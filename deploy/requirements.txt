@@ -1,0 +1,9 @@
+typing_extensions~=4.12.2
+pydantic~=2.9.2
+aiohttp~=3.10.10
+fastapi~=0.115.4
+starlette~=0.41.2
+modal~=0.65.19
+hvac~=2.3.0
+
+vllm==0.6.3post1
