@@ -117,7 +117,7 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
     Each worker is associated with a single CPU socket. The worker is 
     responsible for maintaining the KV cache and executing the model on the 
-    CPU. In case of distributed vllm-inference, each worker is assigned a partition
+    CPU. In case of distributed inference, each worker is assigned a partition
     of the model.
     """
 

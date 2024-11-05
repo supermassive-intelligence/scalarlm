@@ -101,7 +101,7 @@ class LLM:
             :ref:`engine_args`)
 
     Note:
-        This class is intended to be used for offline vllm-inference. For online
+        This class is intended to be used for offline inference. For online
         serving, use the :class:`~vllm.AsyncLLMEngine` class instead.
     """
 
@@ -293,7 +293,7 @@ class LLM:
 
         Args:
             prompts: The prompts to the LLM. You may pass a sequence of prompts
-                for batch vllm-inference. See :class:`~vllm.inputs.PromptType`
+                for batch inference. See :class:`~vllm.inputs.PromptType`
                 for more details about the format of each prompts.
             sampling_params: The sampling parameters for text generation. If
                 None, we use the default sampling parameters.
@@ -673,7 +673,7 @@ class LLM:
 
         Args:
             prompts: The prompts to the LLM. You may pass a sequence of prompts
-                for batch vllm-inference. See :class:`~vllm.inputs.PromptType`
+                for batch inference. See :class:`~vllm.inputs.PromptType`
                 for more details about the format of each prompts.
             pooling_params: The pooling parameters for pooling. If None, we
                 use the default pooling parameters.

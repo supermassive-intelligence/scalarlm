@@ -845,7 +845,7 @@ class ParallelConfig:
                 self.distributed_executor_backend = "ray"
             if self.distributed_executor_backend != "ray":
                 raise ValueError(
-                    "TPU backend only supports Ray for distributed vllm-inference.")
+                    "TPU backend only supports Ray for distributed inference.")
 
         if self.distributed_executor_backend is None and self.world_size > 1:
             # We use multiprocessing by default if world_size fits on the
@@ -858,7 +858,7 @@ class ParallelConfig:
                     and cuda_device_count_stateless() < self.world_size):
                 if not ray_found:
                     raise ValueError("Unable to load Ray which is "
-                                     "required for multi-node vllm-inference, "
+                                     "required for multi-node inference, "
                                      "please install Ray with `pip install "
                                      "ray`.") from ray_utils.ray_import_err
                 backend = "ray"
@@ -872,7 +872,7 @@ class ParallelConfig:
                         if get_current_placement_group():
                             backend = "ray"
             self.distributed_executor_backend = backend
-            logger.info("Defaulting to use %s for distributed vllm-inference",
+            logger.info("Defaulting to use %s for distributed inference",
                         backend)
 
         self._verify_args()

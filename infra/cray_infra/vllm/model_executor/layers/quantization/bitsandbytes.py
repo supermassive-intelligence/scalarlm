@@ -231,7 +231,7 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
         for i in range(len(quant_states)):
             output_size = quant_states[i].shape[0]
 
-            # in profile_run or the first generation of vllm-inference,
+            # in profile_run or the first generation of inference,
             # create new matmul_states
             if generation == 0 or generation == 1:
                 matmul_states[i] = MatmulLtState()

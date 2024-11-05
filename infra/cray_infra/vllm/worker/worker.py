@@ -37,7 +37,7 @@ class Worker(LocalOrDistributedWorkerBase):
 
     Each worker is associated with a single GPU. The worker is responsible for
     maintaining the KV cache and executing the model on the GPU. In case of
-    distributed vllm-inference, each worker is assigned a partition of the model.
+    distributed inference, each worker is assigned a partition of the model.
     """
 
     def __init__(

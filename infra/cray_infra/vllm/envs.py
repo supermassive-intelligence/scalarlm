@@ -144,7 +144,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
 
     # used in distributed environment to determine the ip address
     # of the current node, when the node has multiple network interfaces.
-    # If you are using multi-node vllm-inference, you should set this differently
+    # If you are using multi-node inference, you should set this differently
     # on each node.
     'VLLM_HOST_IP':
     lambda: os.getenv('VLLM_HOST_IP', "") or os.getenv("HOST_IP", ""),

@@ -1338,7 +1338,7 @@ def resolve_mm_processor_kwargs(
     kwargs as long as they aren't naming collision for var_kwargs or potential
     positional arguments.
     """
-    # Filter vllm-inference time multimodal processor kwargs provided
+    # Filter inference time multimodal processor kwargs provided
     runtime_mm_kwargs = get_allowed_kwarg_only_overrides(
         callable,
         overrides=inference_kwargs,
@@ -1348,7 +1348,7 @@ def resolve_mm_processor_kwargs(
     init_mm_kwargs = get_allowed_kwarg_only_overrides(
         callable, overrides=init_kwargs, allow_var_kwargs=allow_var_kwargs)
 
-    # Merge the final processor kwargs, prioritizing vllm-inference
+    # Merge the final processor kwargs, prioritizing inference
     # time values over the initialization time values.
     mm_processor_kwargs = {**init_mm_kwargs, **runtime_mm_kwargs}
     return mm_processor_kwargs
