@@ -145,7 +145,7 @@ class InputRegistry:
 
         During memory profiling, the provided function is invoked to create
         dummy data to be inputted into the model. The resulting memory usage
-        should be an upper bound of what the model would use at inference time.
+        should be an upper bound of what the model would use at vllm-inference time.
         """
 
         def wrapper(model_cls: N) -> N:

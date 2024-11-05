@@ -111,7 +111,7 @@ class GPTQMarlinConfig(QuantizationConfig):
             logger.info("Detected that the model can run with gptq_marlin"
                         ", however you specified quantization=gptq explicitly,"
                         " so forcing gptq. Use quantization=gptq_marlin for"
-                        " faster inference")
+                        " faster vllm-inference")
         return None
 
     def get_quant_method(

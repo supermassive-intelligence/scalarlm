@@ -321,7 +321,7 @@ def filter_duplicate_safetensors_files(hf_weights_files: List[str],
 def filter_files_not_needed_for_inference(
         hf_weights_files: List[str]) -> List[str]:
     """
-    Exclude files that are not needed for inference.
+    Exclude files that are not needed for vllm-inference.
 
     See https://github.com/huggingface/transformers/blob/v4.34.0/src/transformers/trainer.py#L227-L233
     """

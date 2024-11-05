@@ -305,7 +305,7 @@ class EngineArgs:
             'default to 1.0, which may cause accuracy issues. '
             'FP8_E5M2 (without scaling) is only supported on cuda version'
             'greater than 11.8. On ROCm (AMD GPU), FP8_E4M3 is instead '
-            'supported for common inference criteria.')
+            'supported for common vllm-inference criteria.')
         parser.add_argument('--max-model-len',
                             type=int,
                             default=EngineArgs.max_model_len,

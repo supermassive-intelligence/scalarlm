@@ -213,7 +213,7 @@ class CustomAllreduce:
                                        device="cpu")
 
         # we cannot directly use `dist.all_gather_object` here
-        # because it is incompatible with `gloo` backend under inference mode.
+        # because it is incompatible with `gloo` backend under vllm-inference mode.
         # see https://github.com/pytorch/pytorch/issues/126032 for details.
 
         handles = []

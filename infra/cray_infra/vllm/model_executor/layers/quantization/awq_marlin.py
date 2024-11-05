@@ -101,7 +101,7 @@ class AWQMarlinConfig(QuantizationConfig):
             logger.info("Detected that the model can run with awq_marlin"
                         ", however you specified quantization=awq explicitly,"
                         " so forcing awq. Use quantization=awq_marlin for"
-                        " faster inference")
+                        " faster vllm-inference")
         return None
 
     def get_quant_method(self, layer: torch.nn.Module,

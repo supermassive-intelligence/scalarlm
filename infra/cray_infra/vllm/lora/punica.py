@@ -31,9 +31,9 @@ def compute_meta(
     """
     Get the information required for the sgmv kernel. With the  features:
     1. If consecutive requests in the batch use the same LoRA, this function
-    will combine them into a single request, improving sgmv kernel inference
+    will combine them into a single request, improving sgmv kernel vllm-inference
     performance.
-    2. At the beginning of each prefill stage inference, recalculations are
+    2. At the beginning of each prefill stage vllm-inference, recalculations are
     needed based on the input, but only once.
     """
 

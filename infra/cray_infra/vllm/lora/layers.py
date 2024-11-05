@@ -617,7 +617,7 @@ class QKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
     qkv_proj. Certain models, such as chtglm3 and baichuan-7b,
     only contains a single LoRA within their qkv_proj layer.
 
-    During inference with Tensor Parallel, the weights of lora_b
+    During vllm-inference with Tensor Parallel, the weights of lora_b
     must be accurately partitioned according to the respective ranks.
 
     Q slice may have different shape than K and V slices (which both have

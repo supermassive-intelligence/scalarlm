@@ -502,7 +502,7 @@ class SiglipVisionTransformer(nn.Module):
             return encoder_outputs
 
         last_hidden_state = self.post_layernorm(encoder_outputs)
-        # TODO: add this back when pooled_output is used in inference
+        # TODO: add this back when pooled_output is used in vllm-inference
         # if self.use_head:
         # pooled_output = self.head(last_hidden_state)
 

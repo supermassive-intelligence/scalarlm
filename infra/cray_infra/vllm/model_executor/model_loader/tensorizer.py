@@ -195,7 +195,7 @@ class TensorizerArgs:
                          ' tensorizer deserializer when '
                          'load_format=tensorizer is specified when '
                          'initializing an LLMEngine, either via the CLI '
-                         'when running the vLLM OpenAI inference server '
+                         'when running the vLLM OpenAI vllm-inference server '
                          'with a JSON string passed to '
                          '--model-loader-extra-config or as arguments given '
                          'to TensorizerConfig when passed to '
