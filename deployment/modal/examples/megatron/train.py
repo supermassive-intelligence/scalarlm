@@ -1,14 +1,16 @@
 import shutil
-from pathlib import PurePosixPath
-from typing import Union
+from settings import volume_mounts, hf_models_mount, hf_models_volume
 import modal
 from common import rmdir
 
 MINUTES = 60  # seconds
 HOURS = 60 * MINUTES
 
+debian = (modal.Image.debian_slim(python_version="3.11")
+          .pip_install(["huggingface_hub==0.26.2"]))
+
 app = modal.App(
-    "example-megatron",
+    "megatron-finetuning",
     secrets=[
         modal.Secret.from_name("HF_TOKEN"),
         modal.Secret.from_name("wandb"),
@@ -16,26 +18,7 @@ app = modal.App(
 )
 
 
-# Volumes for pre-trained models and training runs.
-hf_models_volume = modal.Volume.from_name("hf_models_volume", create_if_missing=True)
-mcore_models_volume = modal.Volume.from_name("mcore_models_volume", create_if_missing=True)
-runs_volume = modal.Volume.from_name("run_volume", create_if_missing=True)
-
-hf_models_mount = "/hf_models"
-mcore_models_mount = "/mcore_models"
-runs_mount = "/runs"
-
-VOLUME_CONFIG: dict[Union[str, PurePosixPath], modal.Volume] = {
-    hf_models_mount: hf_models_volume,
-    mcore_models_mount: mcore_models_volume,
-    runs_mount: runs_volume,
-}
-
-@app.function(
-    image=modal.Image.debian_slim(python_version="3.11")
-        .pip_install(["huggingface_hub==0.26.2"]),
-    timeout=30 * MINUTES,
-    volumes=VOLUME_CONFIG)
+@app.function(image=debian, timeout=30 * MINUTES,  volumes=volume_mounts)
 def hf_to_mcore():
     from huggingface_hub import snapshot_download
 
