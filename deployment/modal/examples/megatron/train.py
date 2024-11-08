@@ -1,13 +1,10 @@
 import shutil
-from settings import volume_mounts, hf_models_mount, hf_models_volume
+#from settings import volume_mounts, hf_models_mount, hf_models_volume
 import modal
 from common import rmdir
 
 MINUTES = 60  # seconds
 HOURS = 60 * MINUTES
-
-debian = (modal.Image.debian_slim(python_version="3.11")
-          .pip_install(["huggingface_hub==0.26.2"]))
 
 app = modal.App(
     "megatron-finetuning",
@@ -17,13 +14,20 @@ app = modal.App(
     ],
 )
 
+debian = (modal.Image.debian_slim(python_version="3.11")
+          .pip_install(["huggingface_hub==0.26.2"]))
 
-@app.function(image=debian, timeout=30 * MINUTES,  volumes=volume_mounts)
-def hf_to_mcore():
+hf_models_volume = modal.Volume.from_name("hf_models_volume",
+                        create_if_missing=True)
+@app.function(image=debian,
+    timeout=30 * MINUTES,
+    volumes={
+        "/hf_models": hf_models_volume
+    })
+def hf_to_mcore(repo_id: str):
     from huggingface_hub import snapshot_download
 
-    repo_id = "mistralai/Mixtral-8x7B-v0.1"
-    local_dir = f"/{hf_models_mount}/{repo_id}"
+    local_dir = f"/hf_models/{repo_id}"
     local_dir_tmp = f"/{local_dir}.tmp"
 
     print(local_dir)
@@ -41,5 +45,5 @@ def hf_to_mcore():
 @app.local_entrypoint()
 def main():
     # Wait for the training run to finish.
-    hf_to_mcore.remote()
+    hf_to_mcore.remote("mistralai/Mixtral-8x7B-v0.1")
     print("Done")

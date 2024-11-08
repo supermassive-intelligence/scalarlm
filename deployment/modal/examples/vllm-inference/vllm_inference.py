@@ -48,7 +48,7 @@ def get_model_config(engine):
     timeout=24 * HOURS,
     allow_concurrent_inputs=1000,
     volumes={MODELS_DIR: volume},
-    secrets=[modal.Secret.from_name("MODAL_OPENAI_API_KEY")]
+    secrets=[modal.Secret.from_name("MODAL_OPENAI_API_KEY"), modal.Secret.from_name("HF_TOKEN")]
 )
 @modal.asgi_app()
 def serve():
