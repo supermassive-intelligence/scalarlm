@@ -29,7 +29,7 @@ RUN uv pip install torch==${TORCH_CPU} --index-url https://download.pytorch.org/
 
 ###############################################################################
 # VLLM BUILD STAGE
-#FROM cpu AS vllm
+FROM cpu AS vllm
 
 RUN --mount=type=cache,target=/var/cache/apt \
     apt-get update -y \
@@ -67,7 +67,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 ###############################################################################
 # MAIN IMAGE
-#FROM vllm AS infra
+FROM vllm AS infra
 
 RUN apt-get update -y  \
     && apt-get install -y slurm-wlm \
