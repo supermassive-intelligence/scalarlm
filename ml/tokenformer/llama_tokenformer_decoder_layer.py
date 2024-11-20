@@ -3,7 +3,7 @@ from typing import Optional, Tuple
 import torch.nn as nn
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer
 from transformers.models.llama.configuration_llama import LlamaConfig 
-from ml.tokenformer.llama_tokenformer_attention import LlamaTokenformerAttention
+from tokenformer.llama_tokenformer_attention import LlamaTokenformerAttention
 from transformers.cache_utils import Cache
 
 class LlamaTokenformerDecoderLayer(LlamaDecoderLayer):

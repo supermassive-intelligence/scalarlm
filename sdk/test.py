@@ -17,8 +17,7 @@ llm = masint.AsyncSupermassiveIntelligence()
 
 dataset = get_dataset()
 
-for i in range(10):
-    status = asyncio.run(llm.train(dataset, train_args={"max_steps": 1000 + i}))
+status = asyncio.run(llm.train(dataset, train_args={"max_steps": 10}))
 
 print(status)
 

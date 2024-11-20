@@ -1,6 +1,7 @@
 from cray_megatron.huggingface.download_model import download_model
 
 from cray_infra.util.get_job_config import get_job_config
+from tokenformer.llama_tokenformer_model import create_llama_tokenformer_model
 
 from transformers import AutoConfig
 from transformers import AutoTokenizer
@@ -60,11 +61,12 @@ def materialize_model(model_info):
 
     model_info["model"] = AutoModelForCausalLM.from_pretrained(model_info["model_name"])
 
-    job_config = get_job_config()
-    lora_config = LoraConfig(**job_config["lora_config"])
+    # job_config = get_job_config()
+    # lora_config = LoraConfig(**job_config["lora_config"])
 
-    model_info["model"] = get_peft_model(model_info["model"], lora_config)
+    # model_info["model"] = get_peft_model(model_info["model"], lora_config)
 
+    model_info["model"] = create_llama_tokenformer_model(model_info["model"])
     print(model_info["model"])
 
     return model_info
