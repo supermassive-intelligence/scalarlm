@@ -60,13 +60,14 @@ def materialize_model(model_info):
     download_model(model_info["model_name"])
 
     model_info["model"] = AutoModelForCausalLM.from_pretrained(model_info["model_name"])
-
-    # job_config = get_job_config()
-    # lora_config = LoraConfig(**job_config["lora_config"])
-
-    # model_info["model"] = get_peft_model(model_info["model"], lora_config)
-
+    # Convert model to tokenformer model
     model_info["model"] = create_llama_tokenformer_model(model_info["model"])
+
+    # Apply tokenformer_config to train the LM head
+    job_config = get_job_config()
+    tokenformer_config = LoraConfig(**job_config["tokenformer_config"])
+    model_info["model"] = get_peft_model(model_info["model"], tokenformer_config)
+
     print(model_info["model"])
 
     return model_info

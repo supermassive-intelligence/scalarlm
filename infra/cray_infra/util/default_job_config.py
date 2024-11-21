@@ -1,5 +1,8 @@
 from pydantic import BaseModel
 
+class TokenformerConfig(BaseModel):
+    modules_to_save : list = ["lm_head"]
+
 class LoraConfig(BaseModel):
     r : int = 32
     target_modules : str = "all-linear"
@@ -22,6 +25,7 @@ class JobConfig(BaseModel):
     nodes : int = 1
 
     lora_config: str = LoraConfig()
+    tokenformer_config: str = TokenformerConfig()
 
     # 4 hours in seconds
     timeout: int = 4 * 60 * 60
