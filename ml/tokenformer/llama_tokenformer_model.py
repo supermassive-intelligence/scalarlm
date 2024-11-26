@@ -1,6 +1,7 @@
 from tokenformer.llama_tokenformer_decoder_layer import LlamaTokenformerDecoderLayer
-from transformers import LlamaForCausalLM
+import logging
 
+logger = logging.getLogger(__name__)
 
 def replace_decoder_layers(model, custom_layer_class):
     # Replace decoder layers with custom layers
@@ -12,6 +13,16 @@ def replace_decoder_layers(model, custom_layer_class):
         
 
 def create_llama_tokenformer_model(model):
-    model.config.architectures = ["LlamaTokenformerModel"]
-    return replace_decoder_layers(model, LlamaTokenformerDecoderLayer)
+    model = replace_decoder_layers(model, LlamaTokenformerDecoderLayer)
+    # Set requires_grad to False for all parameters in the model
+    for param in model.parameters():
+        param.requires_grad = False
+
+    # Set requires_grad to True for tokenformer params and lm_head
+    for name, param in model.named_parameters():
+        if "tokenformer" in name or "lm_head" in name:
+            param.requires_grad = True
+        logger.debug(f"Parameter: {name}, Requires Grad: {param.requires_grad}")
+    
+    return model
 
