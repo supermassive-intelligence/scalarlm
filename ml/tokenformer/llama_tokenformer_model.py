@@ -20,8 +20,9 @@ def create_llama_tokenformer_model(model):
 
     # Set requires_grad to True for tokenformer params and lm_head
     for name, param in model.named_parameters():
-        if "tokenformer" in name or "lm_head" in name:
-            param.requires_grad = True
+        for item in ["tokenformer", "lm_head"]:
+            if item in name:
+                param.requires_grad = True
         logger.debug(f"Parameter: {name}, Requires Grad: {param.requires_grad}")
     
     return model
