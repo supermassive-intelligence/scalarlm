@@ -1,5 +1,7 @@
 from cray_infra.api.fastapi.aiohttp.get_global_session import get_global_session
 
+from cray_infra.one_server.wait_for_vllm import get_vllm_health
+
 from cray_infra.util.get_config import get_config
 
 import os
@@ -8,8 +10,13 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
 async def register_megatron_models():
     logger.info("Registering Megatron models")
+
+    if not await is_vllm_ready():
+        logger.info("VLLM is not ready. Skipping model registration")
+        return
 
     # Get all the models that are in the model directory
     models = get_models()
@@ -32,10 +39,17 @@ async def get_models():
             yield os.path.basename(os.path.split(root)[0])
 
 
+async def is_vllm_ready():
+    health_status = await get_vllm_health()
+    if health_status == 200:
+        return True
+    return False
+
 
 async def get_registered_models():
+    config = get_config()
     session = get_global_session()
-    async with session.get("http://localhost:8001/v1/models") as resp:
+    async with session.get(config["vllm_api_url"] + "/v1/models") as resp:
         request_data = await resp.json()
 
     logger.info(f"Registered models: {request_data['data']}")
@@ -48,7 +62,7 @@ async def register_model(model):
     config = get_config()
     path = os.path.join(config["training_job_directory"], model, "saved_model")
     async with session.post(
-        "http://localhost:8001/v1/load_lora_adapter",
+        config["vllm_api_url"] + "/v1/load_lora_adapter",
         json={"lora_name": model, "lora_path": path},
     ) as resp:
         if resp.status != 200:

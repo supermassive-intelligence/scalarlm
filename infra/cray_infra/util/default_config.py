@@ -10,11 +10,15 @@ class Config(BaseModel):
 
     data_directory: str = "/app/cray/datasets"
 
-    train_job_entrypoint: str = "train_job_entrypoint.sh"
+    train_job_entrypoint: str = "/app/cray/scripts/train_job_entrypoint.sh"
     training_job_directory: str = "/app/cray/jobs"
 
     max_train_time: int = 15 * 60
     extra_training_seconds: int = 300 # 5 minutes buffer before slurm kills the job
 
     megatron_refresh_period: int = 30 # seconds
+
+    vllm_api_url: str = "http://localhost:8001"
+
+    generate_batch_size: int = 4
 

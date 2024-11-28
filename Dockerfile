@@ -2,7 +2,7 @@ ARG BASE_NAME=cpu
 
 ###############################################################################
 # NVIDIA BASE IMAGE
-FROM nvcr.io/nvidia/pytorch:23.05-py3@sha256:d5aa1e516e68afab9cd3ecaaeac3dd2178618bd26cd7ad96762ed53e32e9e0bd AS nvidia
+FROM nvcr.io/nvidia/pytorch:24.11-py3 AS nvidia
 
 RUN apt-get update -y && apt-get install -y python3-venv
 
@@ -10,6 +10,10 @@ ENV VIRTUAL_ENV=/app/.venv
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 RUN python -m venv $VIRTUAL_ENV
 RUN . $VIRTUAL_ENV/bin/activate
+
+# Put HPC-X MPI in the PATH, i.e. mpirun
+ENV PATH=/opt/hpcx/ompi/bin:$PATH
+ENV LD_LIBRARY_PATH=/opt/hpcx/ompi/lib:$LD_LIBRARY_PATH
 
 ARG TORCH_VERSION="2.4.0"
 
@@ -22,7 +26,8 @@ FROM ubuntu:24.04 AS cpu
 
 RUN --mount=type=cache,target=/var/cache/apt \
     apt-get update -y \
-    && apt-get install -y python3 python3-pip python3-venv
+    && apt-get install -y python3 python3-pip python3-venv \
+    openmpi-bin libopenmpi-dev libpmix-dev
 
 ENV VIRTUAL_ENV=/app/.venv
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
@@ -72,7 +77,8 @@ ARG VLLM_TARGET_DEVICE=cpu
 # Build vllm python package
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=cache,target=/root/.cache/ccache \
-    MAX_JOBS=4 TORCH_CUDA_ARCH_LIST=9.0 VLLM_TARGET_DEVICE=${VLLM_TARGET_DEVICE} python3 ${INSTALL_ROOT}/infra/cray_infra/setup.py bdist_wheel && \
+    MAX_JOBS=8 TORCH_CUDA_ARCH_LIST="7.5 8.6" VLLM_TARGET_DEVICE=${VLLM_TARGET_DEVICE} \
+    python3 ${INSTALL_ROOT}/infra/cray_infra/setup.py bdist_wheel && \
     pip install ${INSTALL_ROOT}/infra/cray_infra/dist/*.whl && \
     rm -rf ${INSTALL_ROOT}/infra/cray_infra/dist
 
@@ -83,18 +89,20 @@ WORKDIR ${INSTALL_ROOT}
 FROM vllm AS infra
 
 RUN apt-get update -y  \
-    && apt-get install -y slurm-wlm \
-    mariadb-server build-essential munge libmunge-dev \
+    && apt-get install -y slurm-wlm libslurm-dev \
+    build-essential \
     less curl wget net-tools vim iputils-ping \
-    openmpi-bin libopenmpi-dev libpmix-dev \
     && rm -rf /var/lib/apt/lists/*
+
+# Build SLURM
+COPY ./infra/slurm_src ${INSTALL_ROOT}/infra/slurm_src
+RUN /app/cray/infra/slurm_src/compile.sh
 
 # Copy slurm config templates
 ENV PYTHONPATH="${PYTHONPATH}:${INSTALL_ROOT}/infra"
 ENV PYTHONPATH="${PYTHONPATH}:${INSTALL_ROOT}/sdk"
 ENV PYTHONPATH="${PYTHONPATH}:${INSTALL_ROOT}/ml"
 
-ENV PATH=$PATH:${INSTALL_ROOT}/usr/bin
 ENV SLURM_CONF=${INSTALL_ROOT}/infra/slurm_configs/slurm.conf
 
 COPY ./infra ${INSTALL_ROOT}/infra
