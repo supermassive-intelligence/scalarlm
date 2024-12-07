@@ -24,9 +24,11 @@ class JobConfig(BaseModel):
     gpus: int = 1
     nodes: int = 1
 
-    lora_config: str = LoraConfig()
+    lora_config: LoraConfig = LoraConfig()
 
     # 4 hours in seconds
     timeout: int = 4 * 60 * 60
 
     training_history_length: int = 1024
+
+

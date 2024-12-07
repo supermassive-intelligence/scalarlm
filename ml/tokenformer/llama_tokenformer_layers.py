@@ -1,7 +1,7 @@
 import torch
 from typing import Optional, Tuple
 import torch.nn as nn
-from transformers.models.llama.modeling_llama import LlamaSdpaAttention, apply_rotary_pos_emb, LlamaDecoderLayer
+from transformers.models.llama.modeling_llama import LlamaAttention, apply_rotary_pos_emb, LlamaDecoderLayer
 from transformers.models.llama.configuration_llama import LlamaConfig 
 from transformers.cache_utils import Cache
 
@@ -35,7 +35,7 @@ class Attention(nn.Module):
         )
         return attn_output
 
-class LlamaTokenformerAttention(LlamaSdpaAttention):
+class LlamaTokenformerAttention(LlamaAttention):
     def __init__(self, config, layer_idx: int):
         super().__init__(config, layer_idx)
         self.attn = Attention(self.head_dim)

@@ -23,7 +23,7 @@ except modal.exception.NotFoundError:
 
 cray_image = (
     modal.Image.from_registry(
-        "gdiamos/masint-cpu:latest",
+        "sudnya/smi-platform:nvidia-latest",#gdiamos/masint-cpu:latest",
         secret=modal.Secret.from_name("dockerhub-credentials"),
         force_build=True,
     )

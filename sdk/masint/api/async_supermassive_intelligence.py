@@ -13,6 +13,9 @@ class AsyncSupermassiveIntelligence:
             data=data, model_name=model_name, train_args=train_args
         )
 
+    async def get_training_job(self, job_dir):
+        return await self.engine.get_training_job(job_dir=job_dir)
+    
     async def health(self):
         return await self.engine.health()
 

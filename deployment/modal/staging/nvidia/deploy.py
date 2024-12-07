@@ -54,7 +54,7 @@ with cray_image.imports():
     image=cray_image,
     container_idle_timeout=5 * 60,
     allow_concurrent_inputs=32,
-    gpu=modal.gpu.L4(count=1),
+    gpu=modal.gpu.A100(size="80GB", count=1),
     secrets=[modal.Secret.from_name("huggingface-credentials")],
     volumes={"/root/.cache/huggingface": volume, "/app/cray/jobs": jobs_volume},
 )

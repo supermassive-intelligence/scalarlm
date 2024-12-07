@@ -326,6 +326,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
                     "model_execute_time", torch.tensor(0)
                 ).item()
 
+        logger.debug("worker base execute model")
         output = self.model_runner.execute_model(
             model_input=model_input,
             kv_caches=(
@@ -337,6 +338,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             num_steps=num_steps,
             **kwargs,
         )
+        logger.debug("worker base execute model finished")
 
         model_execute_time = time.perf_counter() - start_time
         if not get_pp_group().is_last_rank:

@@ -210,6 +210,8 @@ class MQLLMEngine:
     def run_engine_loop(self):
         """Core busy loop of the LLMEngine."""
 
+        step_count = 0
+
         while True:
             self._alive()
             if not self.engine.has_unfinished_requests():
@@ -223,7 +225,11 @@ class MQLLMEngine:
             self.handle_new_input()
 
             # Engine step.
+            logger.debug(f"Engine step {step_count}.")
+
             request_outputs = self.engine_step()
+            step_count += 1
+            logger.debug(f"Engine step {step_count} finished.")
 
             # Send request outputs (if async, done in engine_step callback).
             if not self.use_async_sockets:
@@ -239,6 +245,9 @@ class MQLLMEngine:
             self._set_errored(e)
             rpc_err = RPCError(request_id=None, is_engine_errored=True, exception=e)
             self._send_outputs(rpc_err)
+            import traceback
+            print(f"\n Error occurred {e} \n***** traceback")
+            print(traceback.format_exc())
             raise e
 
     def handle_new_input(self):

@@ -33,6 +33,12 @@ commands:
       arg: coverage-path
       help: Absolute path to a directory to write coverage results into
       default: /tmp/cray/coverage
+    
+    - long: --log-cli-level
+      arg: log-cli-level
+      help: Set log level
+      allowed: ["INFO", "DEBUG", "ERROR"]
+      default: "DEBUG"
 
     - long: --verbose
       help: Prints out DEBUG logs as the test is running.

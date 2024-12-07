@@ -1,6 +1,5 @@
 from cray_infra.api.fastapi.routers.request_types.train_request import (
     TrainResponse,
-    TrainJobStatusResponse,
 )
 
 from cray_infra.training.launch_training_job import launch_training_job
@@ -13,11 +12,10 @@ from cray_infra.util.get_config import get_config
 from fastapi import APIRouter, Request, HTTPException, status
 from fastapi.responses import StreamingResponse, JSONResponse
 
+import yaml
 import os
 import traceback
 import json
-import asyncio
-
 
 import logging
 
@@ -32,9 +30,9 @@ async def train(request: Request):
     training_data_path, params = await upload_training_data(request)
 
     try:
-        train_args = params
+        job_config = params
 
-        logger.info(f"Training args: {train_args}")
+        logger.info(f"Training args: {job_config}")
     except Exception as e:
         logger.exception(e)
         raise HTTPException(
@@ -42,16 +40,9 @@ async def train(request: Request):
             detail="Invalid request body",
         )
 
-    job_info = await launch_training_job(train_args)
+    job_status = await launch_training_job(job_config)
 
-    return TrainResponse(
-        job_id=job_info["job_id"],
-        status=job_info["status"],
-        message="Training job launched",
-        dataset_id=os.path.basename(training_data_path).split(".")[0],
-        job_directory=job_info["job_directory"],
-        model_name=job_info["model_name"],
-    )
+    return TrainResponse(job_status=job_status, job_config=job_config)
 
 
 @megatron_router.get("/train/{job_hash}")
@@ -62,31 +53,38 @@ async def get_training_job_info(job_hash: str):
 
         job_directory_path = get_job_directory_for_hash(job_hash)
         status_filepath = os.path.join(job_directory_path, "status.json")
-
-        job_info = None
-
+        # Get job status
         try:
             with open(status_filepath, "r") as file:
-                job_info = json.loads(file.readline().strip())
+                job_status = json.loads(file.readline().strip())
         except FileNotFoundError:
             logger.error("File not found")
         except json.JSONDecodeError:
             logger.error("Invalid JSON in first line")
 
-        if job_info is None:
+        if not job_status:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Training job was not found at {job_directory_path}",
             )
+        # Get job config
+        config_filepath = os.path.join(job_directory_path, "config.yaml")
+        try:
+            with open(config_filepath, "r") as file:
+                job_config = yaml.safe_load(file)
 
-        return TrainJobStatusResponse(
-            job_id=job_info["job_id"],
-            status=job_info["status"],
-            history=job_info.get("history", []),
-            model_name=job_hash,
-            message=job_info.get("message", "Job details retrieved"),
-            job_directory=job_directory_path,
-        )
+        except FileNotFoundError:
+            logger.error(f"{config_filepath} file not found")
+        except json.JSONDecodeError:
+            logger.error("Invalid YAML")
+
+        if not job_config:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Training job config was not found at {job_directory_path}",
+            )
+
+        return TrainResponse(job_status=job_status, job_config=job_config)
     except Exception as e:
         logger.exception(
             f"Error retrieving training job {job_hash} "

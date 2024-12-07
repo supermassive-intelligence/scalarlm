@@ -165,6 +165,7 @@ async def get_work_step(app: FastAPI):
     ) as resp:
         assert resp.status == 200
 
+
 async def pass_receive() -> typing.NoReturn:
     return {"type": "http.request"}
 
@@ -184,9 +185,13 @@ async def async_completion_task(request, app):
 
     response = await create_completion(completion_request, raw_request)
 
+    response_data = json.loads(response.body.decode("utf-8"))
+
+    logger.info("Got response: %s", response_data)
+
     return {
         "request_id": request["request_id"],
-        "response": json.loads(response.body.decode("utf-8"))["choices"][0]["text"],
+        "response": response_data["choices"][0]["text"],
     }
 
 

@@ -1,5 +1,5 @@
-
 import os
+
 os.environ["VLLM_LOGGING_LEVEL"] = "DEBUG"
 os.environ["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "true"
 
@@ -20,7 +20,7 @@ logging.basicConfig(level=logging.DEBUG)
 
 def main():
     try:
-        return run_server_with_autoreload()
+        return run_all_servers([8000])
 
     except Exception as e:
         print(e)

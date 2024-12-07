@@ -17,6 +17,12 @@ class AsyncCray:
             api_url = make_api_url("v1/megatron/train")
 
             return await upload_async(data_file_path, api_url, train_args)
+    
+    async def get_training_job(self, job_dir):
+        api_url = make_api_url(f"v1/megatron/train/{job_dir}")
+        async with aiohttp.ClientSession() as session:
+            async with session.get(api_url) as resp:
+                return await resp.json()
 
     async def health(self):
         api_url = make_api_url("v1/health")

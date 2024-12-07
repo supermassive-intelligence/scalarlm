@@ -14,6 +14,9 @@ class SupermassiveIntelligence:
             )
         )
 
+    def get_training_job(self, job_dir):
+        return asyncio.run(self.async_api.get_training_job(job_dir=job_dir))
+    
     def generate(self, prompts, model_name=None, max_tokens=None):
         return asyncio.run(
             self.async_api.generate(

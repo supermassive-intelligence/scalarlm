@@ -78,7 +78,6 @@ def materialize_model(model_info):
     download_model(model_info["model_name"])
 
     model_info["model"] = AutoModelForCausalLM.from_pretrained(model_info["model_name"])
-
     model_info["model"] = create_llama_tokenformer_model(model_info["model"])
 
     logger.info(f"Model: {model_info['model']}")

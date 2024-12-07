@@ -869,6 +869,8 @@ class LLMEngine:
             "mm_processor_kwargs"
         )
 
+        logger.debug("Processed inputs for request")
+
         self._add_processed_request(
             request_id=request_id,
             processed_inputs=processed_inputs,
@@ -1458,9 +1460,11 @@ class LLMEngine:
             if allow_async_output_proc:
                 execute_model_req.async_callback = self.async_callbacks[virtual_engine]
 
+            logger.debug("Executing model")
             outputs = self.model_executor.execute_model(
                 execute_model_req=execute_model_req
             )
+            logger.debug("Executing model finished")
 
             # We need to do this here so that last step's sampled_token_ids can
             # be passed to the next iteration for PP.
