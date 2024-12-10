@@ -10,13 +10,69 @@ from vllm.adapter_commons.utils import (add_adapter_worker,
 from vllm.adapter_commons.worker_manager import AbstractWorkerManager
 from vllm.config import LoRAConfig
 from vllm.logger import init_logger
-from vllm.lora.models import (LoRAModel, LoRAModelManager,
+from vllm.lora.models import (LoRAModel, LoRAModelManager, 
+                              TokenformerModel, TokenformerModelManager,
                               LRUCacheLoRAModelManager, create_lora_manager)
 from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
 
 logger = init_logger(__name__)
 
+
+class WorkerTokenformerManager(AbstractWorkerManager):
+    
+    """WorkerTokenformerManager that manages tokenformer models on the worker side.
+
+    Every request, the requested tokenformer model will be loaded (unless it is already
+    loaded)"""
+
+    _manager_cls: Type[TokenformerModelManager] = TokenformerModelManager
+    
+    def __init__(
+        self,
+        lora_config: LoRAConfig,
+        device: torch.device,
+        lora_model_cls: Type[TokenformerModel] = TokenformerModel,
+    ):
+        self._lora_model_cls = lora_model_cls
+        self.lora_config = lora_config
+        super().__init__(device)
+        # Lazily initialized by create_tokenformer_manager.
+        self._adapter_manager: TokenformerModelManager
+    
+    @property
+    def is_enabled(self) -> bool:
+        pass
+
+    def set_active_adapters(self, requests: Set[Any],
+                            mapping: Optional[Any]) -> None:
+        pass
+
+    def add_adapter(self, adapter_request: Any) -> bool:
+        pass
+
+    def remove_adapter(self, adapter_id: int) -> bool:
+        pass
+
+    def remove_all_adapters(self) -> None:
+        pass
+
+    def list_adapters(self) -> Set[int]:
+        pass
+    
+    def create_tokenformer_manager(
+        self,
+        model: torch.nn.Module,
+    ) -> Any:
+        
+        """Create a tokenformer adapter for a given model."""
+        
+        tokenformer_manager = self._manager_cls(
+            model=model,
+            lora_config=self.lora_config)
+        
+        self._adapter_manager = tokenformer_manager
+        return tokenformer_manager.model
 
 class WorkerLoRAManager(AbstractWorkerManager):
     """WorkerLoRAManager that manages LoRA models on the worker side.

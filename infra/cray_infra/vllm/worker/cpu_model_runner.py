@@ -15,6 +15,8 @@ from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.models import supports_lora, supports_multimodal
+from vllm.lora.worker_manager import WorkerTokenformerManager
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalInputs)
 from vllm.sequence import (IntermediateTensors, SequenceData,
@@ -437,6 +439,10 @@ class CPUModelRunner(ModelRunnerBase[ModelInputForCPU]):
         self.model: nn.Module  # Set after init_Model
 
     @property
+    def vocab_size(self) -> int:
+        return self.model_config.get_vocab_size()
+    
+    @property
     def model_is_mrope(self) -> bool:
         """Detect if the model has "mrope" rope_scaling type.
         mrope requires keep "rope_deltas" between prompt and decoding phases."""
@@ -453,6 +459,30 @@ class CPUModelRunner(ModelRunnerBase[ModelInputForCPU]):
                                parallel_config=self.parallel_config,
                                scheduler_config=self.scheduler_config,
                                cache_config=self.cache_config)
+        
+        if self.lora_config:
+            assert supports_lora(
+                self.model
+            ), f"{self.model.__class__.__name__} does not support LoRA yet."
+
+            if supports_multimodal(self.model):
+                logger.warning("Regarding multimodal models, vLLM currently "
+                               "only supports adding LoRA to language model.")
+            # It's necessary to distinguish between the max_position_embeddings
+            # of VLMs and LLMs.
+            if hasattr(self.model.config, "max_position_embeddings"):
+                max_pos_embeddings = self.model.config.max_position_embeddings
+            else:
+                max_pos_embeddings = (
+                    self.model.config.text_config.max_position_embeddings)
+
+            logger.info("Configuring Tokenformer manager...")
+            self.lora_manager = WorkerTokenformerManager(
+                self.lora_config,
+                self.device,
+            )
+            logger.info("Creating Tokenformer model...")
+            self.model = self.lora_manager.create_tokenformer_manager(self.model)
 
     def make_model_input_from_broadcasted_tensor_dict(
         self,

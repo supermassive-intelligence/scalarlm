@@ -287,6 +287,60 @@ class LoRAModel(AdapterModel):
             embedding_padding_modules=embedding_padding_modules,
         )
 
+class TokenformerModel(AdapterModel):
+    """A tokenformer fine-tuned model."""
+
+    def from_local_checkpoint(cls, model_dir, model_id=None, **kwargs):
+        pass
+    
+
+class TokenformerModelManager(AdapterModelManager):
+    """A manager that manages tokenformer models."""
+
+    def __init__(
+        self,
+        model: SupportsLoRA,
+        lora_config: LoRAConfig,
+    ):
+        self.lora_config = lora_config
+        self.model = model
+        
+    
+    @property
+    def capacity(self) -> int:
+        return self.lora_config.max_cpu_loras
+
+    @property
+    def adapter_slots(self) -> int:
+        return self.lora_config.max_loras
+
+   
+    def activate_adapter(self, adapter_id: int) -> bool:
+        pass
+
+    def deactivate_adapter(self, adapter_id: int) -> bool:
+        pass
+
+    def add_adapter(self, adapter: Any) -> bool:
+        pass
+    
+    def set_adapter_mapping(self, mapping: Any) -> None:
+        pass
+
+    def remove_adapter(self, adapter_id: int) -> bool:
+        pass
+
+    def remove_all_adapters(self) -> None:
+        pass
+
+    def get_adapter(self, adapter_id: int) -> Optional[Any]:
+        pass
+
+    def list_adapters(self) -> Dict[int, Any]:
+        pass
+
+    def pin_adapter(self, adapter_id: int) -> bool:
+        pass
 
 class LoRAModelManager(AdapterModelManager):
     """A manager that manages multiple LoRA-fine-tuned models."""
