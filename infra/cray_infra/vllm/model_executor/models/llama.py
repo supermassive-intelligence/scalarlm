@@ -54,6 +54,9 @@ from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers)
 
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 class LlamaMLP(nn.Module):
 
@@ -188,6 +191,56 @@ class LlamaAttention(nn.Module):
         return output
 
 
+class LlamaTokenformerAttention(LlamaAttention):
+    def __init__(
+        self,
+        config: LlamaConfig,
+        hidden_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        rope_theta: float = 10000,
+        rope_scaling: Optional[Dict[str, Any]] = None,
+        max_position_embeddings: int = 8192,
+        quant_config: Optional[QuantizationConfig] = None,
+        bias: bool = False,
+        cache_config: Optional[CacheConfig] = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__(config, hidden_size, num_heads, num_kv_heads, rope_theta, rope_scaling, 
+                         max_position_embeddings, quant_config, bias, cache_config, prefix)
+        
+        self.tokenformer_k = nn.Parameter(torch.randn(self.kv_size, self.kv_size))
+        self.tokenformer_v = nn.Parameter(torch.zeros(self.kv_size, self.kv_size))
+    
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
+    ) -> torch.Tensor:
+        qkv, _ = self.qkv_proj(hidden_states)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        q, k = self.rotary_emb(positions, q, k)
+        
+        # Save query states to use in Tokenformer Attention
+        tokenformer_q = q
+        # Attention
+        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        # Tokenformer Attention
+        tokenformer_attn_output = torch.nn.functional.scaled_dot_product_attention(
+            query=tokenformer_q,
+            key=self.tokenformer_k,
+            value=self.tokenformer_v,
+            attn_mask=None,
+            dropout_p=0.0,
+            is_causal=False,
+        )
+        attn_output = attn_output + tokenformer_attn_output
+        
+        output, _ = self.o_proj(attn_output)
+        return output
+
 class LlamaDecoderLayer(nn.Module):
 
     def __init__(
@@ -264,6 +317,89 @@ class LlamaDecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
+
+class LlamaTokenformerDecoderLayer(LlamaDecoderLayer):
+
+    def __init__(
+        self,
+        config: LlamaConfig,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__(config, cache_config, quant_config, prefix)
+        rope_theta = getattr(config, "rope_theta", 10000)
+        rope_scaling = getattr(config, "rope_scaling", None)
+        if rope_scaling is not None and getattr(
+                config, "original_max_position_embeddings", None):
+            rope_scaling["original_max_position_embeddings"] = (
+                config.original_max_position_embeddings)
+        max_position_embeddings = getattr(config, "max_position_embeddings",
+                                          8192)
+        # Support abacusai/Smaug-72B-v0.1 with attention_bias
+        # Support internlm/internlm-7b with bias
+        attention_bias = getattr(config, "attention_bias", False) or getattr(
+            config, "bias", False)
+        self.self_attn = LlamaTokenformerAttention(
+            config=config,
+            hidden_size=self.hidden_size,
+            num_heads=config.num_attention_heads,
+            num_kv_heads=getattr(config, "num_key_value_heads",
+                                 config.num_attention_heads),
+            rope_theta=rope_theta,
+            rope_scaling=rope_scaling,
+            max_position_embeddings=max_position_embeddings,
+            quant_config=quant_config,
+            bias=attention_bias,
+            cache_config=cache_config,
+            prefix=f"{prefix}.self_attn",
+        )
+        
+        self.ffn_tokenformer_k = nn.Parameter(torch.randn(config.hidden_size, config.hidden_size))
+        self.ffn_tokenformer_v = nn.Parameter(torch.zeros(config.hidden_size, config.hidden_size))
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
+        residual: Optional[torch.Tensor],
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        # Self Attention
+        if residual is None:
+            residual = hidden_states
+            hidden_states = self.input_layernorm(hidden_states)
+        else:
+            hidden_states, residual = self.input_layernorm(
+                hidden_states, residual)
+        hidden_states = self.self_attn(positions=positions,
+                                       hidden_states=hidden_states,
+                                       kv_cache=kv_cache,
+                                       attn_metadata=attn_metadata)
+
+        # Fully Connected
+        hidden_states, residual = self.post_attention_layernorm(
+            hidden_states, residual)
+        
+        # Save hidden_states to use in tokenformer_attention
+        ffn_input_hidden_states = hidden_states
+        
+        hidden_states = self.mlp(hidden_states)
+        
+        # Tokenformer Attention
+        tokenformer_hidden_states = torch.nn.functional.scaled_dot_product_attention(
+            query=ffn_input_hidden_states,
+            key=self.ffn_tokenformer_k,
+            value=self.ffn_tokenformer_v,
+            attn_mask=None,
+            dropout_p=0.0,
+            is_causal=False, # should be false for Tokenformer
+        )
+        
+        hidden_states = hidden_states + tokenformer_hidden_states
+        
+        return hidden_states, residual
 
 class LlamaModel(nn.Module):
 
@@ -544,6 +680,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
+        
         model_output = self.model(input_ids, positions, kv_caches,
                                   attn_metadata, intermediate_tensors)
         return model_output
@@ -606,3 +743,28 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 name = name.replace(item, mapping[item])
 
         return name, loaded_weight
+
+
+def replace_decoder_layers(model, custom_layer_class):
+    # Replace decoder layers with custom layers
+    for i, layer in enumerate(model.model.layers):
+        new_layer = custom_layer_class(model.config)
+        new_layer.load_state_dict(layer.state_dict(), strict=False)
+        model.model.layers[i] = new_layer
+    return model
+        
+
+def create_llama_tokenformer_model(model):
+    model = replace_decoder_layers(model, LlamaTokenformerDecoderLayer)
+    # Set requires_grad to False for all parameters in the model
+    for param in model.parameters():
+        param.requires_grad = False
+
+    # Set requires_grad to True for tokenformer params and lm_head
+    for name, param in model.named_parameters():
+        for item in ["tokenformer", "lm_head"]:
+            if item in name:
+                param.requires_grad = True
+        logger.debug(f"Parameter: {name}, Requires Grad: {param.requires_grad}")
+    
+    return model

@@ -290,8 +290,28 @@ class LoRAModel(AdapterModel):
 class TokenformerModel(AdapterModel):
     """A tokenformer fine-tuned model."""
 
-    def from_local_checkpoint(cls, model_dir, model_id=None, **kwargs):
-        pass
+    @classmethod
+    def from_local_checkpoint(cls, model, model_dir, **kwargs):
+        
+        checkpoint_files = [f for f in os.listdir(model_dir) if f.endswith('.pt')]
+        if not checkpoint_files:
+            raise FileNotFoundError(f"No .pt files found in {model_dir}")
+        checkpoint_file = checkpoint_files[0]
+    
+        checkpoint_path = os.path.join(model_dir, checkpoint_file)
+    
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
+        
+        checkpoint = torch.load(checkpoint_path, map_location=torch.device("cpu"))
+    
+        # Load the model state dict
+        model.load_state_dict(checkpoint['model_state_dict'])
+        
+        # Set the model to evaluation mode
+        model.eval()
+        
+        return model
     
 
 class TokenformerModelManager(AdapterModelManager):
@@ -304,6 +324,8 @@ class TokenformerModelManager(AdapterModelManager):
     ):
         self.lora_config = lora_config
         self.model = model
+        self._loaded = False
+        self.tokenformer_model_cls = TokenformerModel
         
     
     @property
@@ -322,7 +344,12 @@ class TokenformerModelManager(AdapterModelManager):
         pass
 
     def add_adapter(self, adapter: Any) -> bool:
-        pass
+        if not self._loaded:
+            self._loaded = True
+            logger.info("ADD_ADAPTER")
+            # self.model = self.tokenformer_model_cls.from_local_checkpoint(model=self.model, model_dir="/app/cray/jobs/77607eb0e1c248bc36048e6c60023f46a50cbd895149adb17dc76edc33511d37")
+            return True
+        return False
     
     def set_adapter_mapping(self, mapping: Any) -> None:
         pass

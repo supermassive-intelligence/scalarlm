@@ -16,6 +16,8 @@ from vllm.lora.models import (LoRAModel, LoRAModelManager,
 from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
 
+from vllm.model_executor.models.llama import create_llama_tokenformer_model
+
 logger = init_logger(__name__)
 
 
@@ -49,7 +51,7 @@ class WorkerTokenformerManager(AbstractWorkerManager):
         pass
 
     def add_adapter(self, adapter_request: Any) -> bool:
-        pass
+        return self._adapter_manager.add_adapter(None)
 
     def remove_adapter(self, adapter_id: int) -> bool:
         pass
@@ -66,6 +68,7 @@ class WorkerTokenformerManager(AbstractWorkerManager):
     ) -> Any:
         
         """Create a tokenformer adapter for a given model."""
+        model = create_llama_tokenformer_model(model).to(torch.bfloat16)
         
         tokenformer_manager = self._manager_cls(
             model=model,
@@ -73,6 +76,9 @@ class WorkerTokenformerManager(AbstractWorkerManager):
         
         self._adapter_manager = tokenformer_manager
         return tokenformer_manager.model
+    
+    def get_model(self):
+        return self._adapter_manager.model
 
 class WorkerLoRAManager(AbstractWorkerManager):
     """WorkerLoRAManager that manages LoRA models on the worker side.

@@ -481,8 +481,11 @@ class CPUModelRunner(ModelRunnerBase[ModelInputForCPU]):
                 self.lora_config,
                 self.device,
             )
+            logger.info(f"Model: {self.model}")
+            
             logger.info("Creating Tokenformer model...")
             self.model = self.lora_manager.create_tokenformer_manager(self.model)
+            logger.info(f"Tokenformer Model: {self.model}")
 
     def make_model_input_from_broadcasted_tensor_dict(
         self,
@@ -546,6 +549,9 @@ class CPUModelRunner(ModelRunnerBase[ModelInputForCPU]):
             raise ValueError(
                 "CPU worker does not support multi-step execution.")
 
+        if self.lora_manager.add_adapter(None):
+            self.model = self.lora_manager.get_model()
+        
         model_executable = self.model
         execute_model_kwargs = {
             "input_ids":
