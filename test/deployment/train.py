@@ -21,6 +21,6 @@ llm = masint.SupermassiveIntelligence()
 
 dataset = get_dataset()
 
-status = llm.train(dataset, train_args={"max_steps": 300})
+status = llm.train(dataset, train_args={"max_steps": 1000})
 
 print(status)
