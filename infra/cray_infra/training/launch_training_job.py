@@ -108,6 +108,7 @@ def create_slurm_run_command(train_args):
     train_job_entrypoint = get_train_job_entrypoint(train_args)
 
     run_command += [train_job_entrypoint]
+    print(f"\n\n****Run Command****\n\n {run_command}")
 
     return run_command
 
