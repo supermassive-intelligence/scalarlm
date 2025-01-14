@@ -1,4 +1,4 @@
-transformers >= 4.45.0  # Required for Llama 3.2.
+transformers == 4.48.0  # Supports Llama 3.2 and our tokenformer is based off of this version
 peft
 psutil
 typing_extensions >= 4.10
