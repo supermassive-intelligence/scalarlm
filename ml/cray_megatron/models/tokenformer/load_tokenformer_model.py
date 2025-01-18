@@ -1,5 +1,7 @@
 from cray_megatron.huggingface.download_model import download_model
-from cray_megatron.megatron.distribution.apply_distribution_strategy import apply_distribution_strategy
+from cray_megatron.megatron.distribution.apply_distribution_strategy import (
+    apply_distribution_strategy,
+)
 
 from tokenformer.llama_tokenformer_model import create_llama_tokenformer_model
 

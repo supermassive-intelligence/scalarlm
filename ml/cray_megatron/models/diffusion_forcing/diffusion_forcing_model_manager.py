@@ -1,6 +1,8 @@
 from cray_infra.util.get_job_config import get_job_config
 
-from cray_megatron.megatron.distribution.apply_distribution_strategy import apply_distribution_strategy
+from cray_megatron.megatron.distribution.apply_distribution_strategy import (
+    apply_distribution_strategy,
+)
 
 from cray_megatron.models.model_manager_base import ModelManagerBase
 

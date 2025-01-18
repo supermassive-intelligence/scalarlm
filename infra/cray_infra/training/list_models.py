@@ -10,6 +10,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
 async def list_models():
     logger.info("Listing models")
 
@@ -24,7 +25,3 @@ async def list_models():
         models.append(model_name)
 
     return ListModelsResponse(models=models)
-
-
-
-

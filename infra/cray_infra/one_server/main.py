@@ -1,5 +1,5 @@
-
 import os
+
 os.environ["VLLM_LOGGING_LEVEL"] = "DEBUG"
 os.environ["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "true"
 
@@ -55,7 +55,7 @@ def run_all_servers(sockets):
 
 async def run_all_servers_async():
     server_status = await start_cray_server(server_list=["all"])
-    #server_status = await start_cray_server(server_list=["api"])
+    # server_status = await start_cray_server(server_list=["api"])
 
     done, pending = await asyncio.wait(
         server_status.tasks,

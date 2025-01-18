@@ -4,6 +4,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
 async def clear_acked_requests_from_queue():
     inference_work_queue = get_inference_work_queue()
 
@@ -14,4 +15,3 @@ async def clear_acked_requests_from_queue():
     ending_size = len(inference_work_queue)
 
     logger.info(f"Cleared {starting_size - ending_size} acked requests from the queue.")
-

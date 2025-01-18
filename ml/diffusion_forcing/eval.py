@@ -20,10 +20,11 @@ def main():
 
     diffusion_forcing_eval(path)
 
+
 def setup_logging():
     logging.basicConfig(
         level=logging.DEBUG,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
 
     # Ignore urllib and filelock

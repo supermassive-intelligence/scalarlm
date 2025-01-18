@@ -26,7 +26,12 @@ class TestGetResults(unittest.IsolatedAsyncioTestCase):
 
         llm = masint.AsyncSupermassiveIntelligence()
 
-        prompts = ["What is 1 + 1?", "What is 2 + 2?", "What is 3 + 3?", "What is 4 + 4?"]
+        prompts = [
+            "What is 1 + 1?",
+            "What is 2 + 2?",
+            "What is 3 + 3?",
+            "What is 4 + 4?",
+        ]
 
         results = await llm.submit_generate(prompts=prompts)
 
@@ -43,10 +48,6 @@ class TestGetResults(unittest.IsolatedAsyncioTestCase):
         for r in new_results["results"]:
             self.assertTrue(r["request_id"] in ids)
 
-
     async def asyncTearDown(self):
         logger.debug("Shutting down server")
         await self.app.shutdown()
-
-
-

@@ -74,6 +74,7 @@ async def get_training_logs(model_name: str, starting_line_number: int = 0):
 async def models():
     return await list_models()
 
+
 @megatron_router.get("/squeue")
 async def get_squeue():
     return await squeue()

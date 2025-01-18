@@ -152,10 +152,10 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
                 multi_modal_kwargs,
                 lora_requests,
             ) = self._prepare_prompt(self.seq_group_metadata_list)
-            
+
         else:
-            (input_tokens, input_positions, attn_metadata, lora_requests) = self._prepare_decode(
-                self.seq_group_metadata_list
+            (input_tokens, input_positions, attn_metadata, lora_requests) = (
+                self._prepare_decode(self.seq_group_metadata_list)
             )
             seq_lens = None
 
@@ -227,9 +227,9 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         multi_modal_inputs_list: List[MultiModalInputs] = []
 
         for seq_group_metadata in seq_group_metadata_list:
-            
+
             lora_requests.add(seq_group_metadata.lora_request)
-            
+
             assert seq_group_metadata.is_prompt
             seq_ids = list(seq_group_metadata.seq_data.keys())
             assert len(seq_ids) == 1
@@ -512,11 +512,12 @@ class CPUModelRunner(ModelRunnerBase[ModelInputForCPU]):
             ), f"{self.model.__class__.__name__} does not support LoRA yet."
 
             self.tokenformer_manager = WorkerTokenformerManager(
-                    self.device,
-                )
+                self.device,
+            )
             logger.info("Creating Tokenformer model...")
-            self.model = self.tokenformer_manager.create_tokenformer_manager(self.model).to(self.model_config.dtype)
-
+            self.model = self.tokenformer_manager.create_tokenformer_manager(
+                self.model
+            ).to(self.model_config.dtype)
 
     def make_model_input_from_broadcasted_tensor_dict(
         self,
@@ -585,7 +586,7 @@ class CPUModelRunner(ModelRunnerBase[ModelInputForCPU]):
             raise ValueError("CPU worker does not support multi-step execution.")
 
         model_executable = self.model
-        
+
         if self.lora_config:
             assert model_input.lora_requests is not None
             for lora_request in model_input.lora_requests:

@@ -54,7 +54,11 @@ def make_training_archive(data):
         with tempfile.NamedTemporaryFile() as archive_file:
             with tarfile.open(archive_file.name, "w") as tar:
                 # Add the data file to the archive
-                tar.add(data_file_path, arcname="dataset.jsonlines", filter=tar_info_strip_file_info)
+                tar.add(
+                    data_file_path,
+                    arcname="dataset.jsonlines",
+                    filter=tar_info_strip_file_info,
+                )
 
                 # Add the machine learning directory to the archive
                 # The directory tree is as follows:
@@ -67,6 +71,7 @@ def make_training_archive(data):
 
             archive_file.seek(0)
             yield archive_file.name
+
 
 def tar_info_strip_file_info(tarinfo):
     tarinfo.uid = tarinfo.gid = 0

@@ -172,6 +172,7 @@ async def get_work_step(app: FastAPI):
     ) as resp:
         assert resp.status == 200
 
+
 async def pass_receive() -> typing.NoReturn:
     return {"type": "http.request"}
 
@@ -644,10 +645,10 @@ async def run_server(args, running_status, **uvicorn_kwargs) -> None:
     # see https://github.com/vllm-project/vllm/issues/8204
 
     # make sure the socket is not already bound
-    #try:
+    # try:
     #    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     #    sock.bind(("", args.port))
-    #except OSError as e:
+    # except OSError as e:
     #    logger.error(f"Port {args.port} is already in use: {e}")
 
     def signal_handler(*_) -> None:
@@ -672,7 +673,7 @@ async def run_server(args, running_status, **uvicorn_kwargs) -> None:
             ssl_certfile=args.ssl_certfile,
             ssl_ca_certs=args.ssl_ca_certs,
             ssl_cert_reqs=args.ssl_cert_reqs,
-            #fd=sock.fileno(),
+            # fd=sock.fileno(),
             running_status=running_status,
             **uvicorn_kwargs,
         )

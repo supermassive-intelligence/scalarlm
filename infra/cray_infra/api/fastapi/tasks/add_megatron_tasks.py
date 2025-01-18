@@ -2,7 +2,9 @@ from cray_infra.util.get_config import get_config
 
 from cray_infra.training.restart_megatron_jobs import restart_megatron_jobs
 from cray_infra.training.register_megatron_models import register_megatron_models
-from cray_infra.generate.clear_acked_requests_from_queue import clear_acked_requests_from_queue
+from cray_infra.generate.clear_acked_requests_from_queue import (
+    clear_acked_requests_from_queue,
+)
 
 from fastapi_utils.tasks import repeat_every
 

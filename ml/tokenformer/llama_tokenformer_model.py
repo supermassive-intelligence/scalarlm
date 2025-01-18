@@ -1,7 +1,7 @@
-
 import logging
 from tokenformer.llama_tokenformer_layers import LlamaTokenformerDecoderLayer
 from tokenformer.transformers_tokenformer import TransformersTokenformerSurgeon
+
 
 def replace_layers(model, custom_layer_class):
     # Replace layers with custom layers
@@ -10,6 +10,7 @@ def replace_layers(model, custom_layer_class):
         new_layer.load_state_dict(layer.state_dict(), strict=False)
         model.model.layers[i] = new_layer
     return model
+
 
 def log_param_gradients(model, logger=logging.getLogger(__name__)):
     for name, param in model.named_parameters():
@@ -33,4 +34,3 @@ def create_llama_tokenformer_model(model):
     log_param_gradients(tokenformer_model)
 
     return tokenformer_model
-

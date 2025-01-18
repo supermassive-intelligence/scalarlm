@@ -4,7 +4,10 @@ from safetensors.torch import safe_open
 from pathlib import Path
 from typing import Optional, Any, Dict, List
 import os
-from tokenformer.tokenformer_surgeon import TokenformerSurgeon, TokenformerAttentionAdapter
+from tokenformer.tokenformer_surgeon import (
+    TokenformerSurgeon,
+    TokenformerAttentionAdapter,
+)
 from vllm.model_executor.models import SupportsLoRA
 from vllm.lora.models import get_lora_id
 from vllm.logger import init_logger
@@ -13,6 +16,7 @@ from cray_infra.vllm.adapter_commons.models import AdapterModel, AdapterModelMan
 from cray_infra.vllm.attention import AttentionMetadata, AttentionType
 
 logger = init_logger(__name__)
+
 
 class vLLMTokenformerAttentionAdapter(TokenformerAttentionAdapter):
     def __init__(self, layer, hidden_size):
@@ -28,12 +32,14 @@ class vLLMTokenformerAttentionAdapter(TokenformerAttentionAdapter):
         attn_type: AttentionType = AttentionType.DECODER,
     ) -> torch.Tensor:
 
-        base_layer_results = self.layer(query=query,
-                                        key=key,
-                                        value=value,
-                                        kv_cache=kv_cache,
-                                        attn_metadata=attn_metadata,
-                                        attn_type=attn_type)
+        base_layer_results = self.layer(
+            query=query,
+            key=key,
+            value=value,
+            kv_cache=kv_cache,
+            attn_metadata=attn_metadata,
+            attn_type=attn_type,
+        )
 
         seq_len = query.shape[0]
         new_shape = [-1, self.layer.num_heads, seq_len, self.layer.head_dim]
@@ -41,6 +47,7 @@ class vLLMTokenformerAttentionAdapter(TokenformerAttentionAdapter):
         reshaped_base_layer_results = torch.reshape(base_layer_results, new_shape)
         result = super().forward(reshaped_query, reshaped_base_layer_results)
         return torch.reshape(result, [-1, self.layer.num_heads * self.layer.head_dim])
+
 
 class vLLMTokenformerSurgeon(TokenformerSurgeon):
 
@@ -50,14 +57,16 @@ class vLLMTokenformerSurgeon(TokenformerSurgeon):
     ):
         super().__init__(model)
 
-
     def update_attn(self, name, layer):
         """Try to wrap the layer with a TokenformerAttentionAdaptor."""
         if not self._is_attn_layer(name):
             return
 
         # Wrap the layer with a TokenformerAttentionAdapter
-        self._recursive_setattr(self.model, name, vLLMTokenformerAttentionAdapter(layer, layer.head_dim))
+        self._recursive_setattr(
+            self.model, name, vLLMTokenformerAttentionAdapter(layer, layer.head_dim)
+        )
+
 
 class TokenformerModel(AdapterModel):
     """A tokenformer pre-trained model."""
@@ -74,7 +83,6 @@ class TokenformerModel(AdapterModel):
         if len(files) == 0:
             raise FileNotFoundError(f"Tokenformer tensor file not found: {model_dir}")
 
-
         for tokenformer_tensor_path in files:
             tokenformers = {}
             with safe_open(tokenformer_tensor_path, framework="pt") as f:
@@ -83,6 +91,7 @@ class TokenformerModel(AdapterModel):
                         tokenformers[module] = f.get_tensor(module)
 
         return cls(tokenformers)
+
 
 class TokenformerModelManager(AdapterModelManager):
     """A manager that manages tokenformer models."""
@@ -103,7 +112,6 @@ class TokenformerModelManager(AdapterModelManager):
     @property
     def adapter_slots(self) -> int:
         pass
-
 
     def activate_adapter(self, adapter_id: int) -> bool:
         if adapter_id in self._active_adapters:

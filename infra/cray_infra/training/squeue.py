@@ -6,7 +6,7 @@ import subprocess
 async def squeue():
     try:
         squeue_output = subprocess.check_output(
-            ["squeue", '--format=%.18i %.9P %.12j %.8u %.8T %.10M %.9l %.6D %R']
+            ["squeue", "--format=%.18i %.9P %.12j %.8u %.8T %.10M %.9l %.6D %R"]
         )
 
         return SqueueResponse(

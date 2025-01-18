@@ -26,4 +26,3 @@ class MegatronTrainer:
         TrainingLoop(self.training_harness).train()
 
         self.training_harness.update_status(status=TrainingJobStatus.COMPLETED)
-

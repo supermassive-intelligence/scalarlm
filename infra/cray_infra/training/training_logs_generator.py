@@ -50,5 +50,3 @@ def training_logs_generator(model_name: str, starting_line_number: int):
                     line_number += 1
 
     return generate()
-
-

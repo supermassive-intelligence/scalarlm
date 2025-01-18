@@ -25,7 +25,7 @@ class JobConfig(BaseModel):
     training_data_path: str
     dataset_hash: str
 
-    #llm_name: str = "masint/tiny-random-llama"
+    # llm_name: str = "masint/tiny-random-llama"
     llm_name: str = "meta-llama/Llama-3.2-1B-Instruct"
 
     max_steps: int = 100

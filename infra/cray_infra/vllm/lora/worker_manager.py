@@ -237,8 +237,8 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
         self._adapter_manager.activate_adapter(lora_request.lora_int_id)
         return loaded
 
-class WorkerTokenformerManager(AbstractWorkerManager):
 
+class WorkerTokenformerManager(AbstractWorkerManager):
     """WorkerTokenformerManager that manages tokenformer models on the worker side.
 
     Every request, the requested tokenformer model will be loaded (unless it is already
@@ -260,16 +260,17 @@ class WorkerTokenformerManager(AbstractWorkerManager):
     def is_enabled(self) -> bool:
         pass
 
-    def set_active_adapters(self, requests: Set[Any],
-                            mapping: Optional[Any]) -> None:
+    def set_active_adapters(self, requests: Set[Any], mapping: Optional[Any]) -> None:
         pass
 
     def add_adapter(self, adapter_request: Any) -> bool:
-        return add_adapter_worker(adapter_request,
-                                  self.list_adapters,
-                                  self._load_adapter,
-                                  self._adapter_manager.add_adapter,
-                                  self._adapter_manager.activate_adapter)
+        return add_adapter_worker(
+            adapter_request,
+            self.list_adapters,
+            self._load_adapter,
+            self._adapter_manager.add_adapter,
+            self._adapter_manager.activate_adapter,
+        )
 
     def remove_adapter(self, adapter_id: int) -> bool:
         pass
@@ -285,8 +286,7 @@ class WorkerTokenformerManager(AbstractWorkerManager):
         model: torch.nn.Module,
     ) -> Any:
 
-        tokenformer_manager = self._manager_cls(
-            model=model)
+        tokenformer_manager = self._manager_cls(model=model)
 
         self._adapter_manager = tokenformer_manager
         return tokenformer_manager.model

@@ -1,4 +1,3 @@
-
 from cray_infra.util.get_config import get_config
 
 import persistqueue
@@ -61,7 +60,7 @@ class InferenceWorkQueue:
         results = self.queue.queue()
 
         for result in results:
-            #logger.debug(f"checking if result {id} is finished: {result} vs ackstatus {persistqueue.AckStatus.acked}")
+            # logger.debug(f"checking if result {id} is finished: {result} vs ackstatus {persistqueue.AckStatus.acked}")
             if result["id"] == id:
                 if int(result["status"]) == int(persistqueue.AckStatus.acked):
                     return result["data"]

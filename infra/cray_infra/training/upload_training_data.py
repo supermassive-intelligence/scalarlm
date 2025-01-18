@@ -1,4 +1,3 @@
-
 from cray_infra.util.get_config import get_config
 
 from fastapi import Request, HTTPException, status
@@ -21,6 +20,7 @@ import tarfile
 import logging
 
 logger = logging.getLogger(__name__)
+
 
 async def upload_training_data(request: Request):
 
@@ -65,9 +65,7 @@ async def upload_training_data(request: Request):
 
         os.makedirs(job_directory, exist_ok=True)
 
-        final_dataset_filepath = os.path.join(
-            job_directory, "dataset.jsonlines"
-        )
+        final_dataset_filepath = os.path.join(job_directory, "dataset.jsonlines")
 
         train_args["training_data_path"] = final_dataset_filepath
 
@@ -140,6 +138,7 @@ class MaxBodySizeValidator:
         if self.body_len > self.max_size:
             raise MaxBodySizeException(body_len=self.body_len)
 
+
 def get_job_directory(train_args: Dict):
     contents = json.dumps(train_args)
     hash_id = hashlib.sha256(contents.encode()).hexdigest()
@@ -149,4 +148,3 @@ def get_job_directory(train_args: Dict):
     job_directory = os.path.join(config["training_job_directory"], hash_id)
 
     return job_directory
-
