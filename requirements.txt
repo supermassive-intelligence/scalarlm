@@ -2,5 +2,6 @@ numpy<2.0.0
 jsonlines
 aiofiles
 persist-queue
+pre-commit
 matplotlib
 streaming-form-data==1.15.0
