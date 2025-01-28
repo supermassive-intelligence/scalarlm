@@ -16,7 +16,7 @@ SOURCE_FILE=$LOCAL_DIRECTORY/cgroup_docker.c
 INCLUDE_PATH=/usr/include
 
 # Compile the cgroup_docker.c file into a shared object file
-gcc -I$INCLUDE_PATH -Wall -fPIC -shared -o $LOCAL_DIRECTORY/cgroup_docker.so $SOURCE_FILE
+gcc -g -o -I$INCLUDE_PATH -Wall -fPIC -shared -o $LOCAL_DIRECTORY/cgroup_docker.so $SOURCE_FILE
 
 # Determine if the target is an x86_64 or aarch64 machine
 if [ "$(uname -m)" == "x86_64" ]; then

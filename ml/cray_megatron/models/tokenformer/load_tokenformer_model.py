@@ -46,7 +46,7 @@ def load_model_config():
         "model_config": model_config,
         "tokenizer": tokenizer,
     }
-
+    print("Successfully Loaded tokenformer model config")
     return model_info
 
 
@@ -55,6 +55,7 @@ def apply_tokenformer_adapter(model_info):
 
 
 def materialize_model(model_info):
+    print("Attempting to materialize_model")
     download_model(model_info["model_name"])
 
     model_info["model"] = AutoModelForCausalLM.from_pretrained(model_info["model_name"])
@@ -62,6 +63,7 @@ def materialize_model(model_info):
     model_info["model"] = create_llama_tokenformer_model(
         model_info["model"], model_info["distribution_strategy"]["device"]
     )
+    print("was able to create_llama_tokenformer_modeld")
 
     model_info["model"] = model_info["model"].to(torch.bfloat16)
     logger.info(f"Model: {model_info['model']}")

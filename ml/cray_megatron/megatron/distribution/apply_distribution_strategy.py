@@ -1,5 +1,6 @@
 import torch
 
+
 def load_distribution_strategy():
     device = get_device()
 

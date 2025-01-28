@@ -62,7 +62,7 @@ FROM ${BASE_NAME} AS vllm
 RUN --mount=type=cache,target=/var/cache/apt \
     apt-get update -y \
     && apt-get install -y curl ccache git vim numactl gcc-12 g++-12 libomp-dev libnuma-dev \
-    && apt-get install -y ffmpeg libsm6 libxext6 libgl1 libdnnl-dev \
+    && apt-get install -y ffmpeg libsm6 libxext6 libgl1 libdnnl-dev gdb python3-dbg \
     && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12
 
 ARG INSTALL_ROOT=/app/cray

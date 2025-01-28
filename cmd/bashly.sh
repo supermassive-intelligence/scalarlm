@@ -14,9 +14,15 @@ if test -t 0; then
   TTY=-it
 fi
 
-# Run the docker container
-docker run --rm $TTY --user $(id -u):$(id -g) \
-    --volume "$LOCAL_DIRECTORY:/app/cmd" \
-    --volume "$LOCAL_DIRECTORY/../scripts:/app/scripts" \
-    --volume "$LOCAL_DIRECTORY/bashly-settings.yml:/app/bashly-settings.yml" \
-    dannyben/bashly "$@"
+# Define the docker run command
+DOCKER_CMD="docker run --rm $TTY --user $(id -u):$(id -g) \
+    --volume \"$LOCAL_DIRECTORY:/app/cmd\" \
+    --volume \"$LOCAL_DIRECTORY/../scripts:/app/scripts\" \
+    --volume \"$LOCAL_DIRECTORY/bashly-settings.yml:/app/bashly-settings.yml\" \
+    dannyben/bashly \"$@\""
+
+# Print the docker run command
+echo "Executing: $DOCKER_CMD"
+
+# Execute the docker run command
+eval $DOCKER_CMD

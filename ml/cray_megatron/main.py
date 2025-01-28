@@ -1,6 +1,10 @@
 from cray_infra.training.training_harness import TrainingHarness
 from cray_infra.training.training_job_status import TrainingJobStatus
 
+import torch
+
+torch.backends.mkldnn.enabled = False
+
 import traceback
 import sys
 
@@ -18,10 +22,15 @@ except Exception as e:
 import signal
 import logging
 
+logger = logging.getLogger(__name__)
+
 
 def main():
 
     harness = TrainingHarness()
+    import faulthandler
+
+    faulthandler.enable()
 
     try:
         setup_logging()
@@ -30,6 +39,10 @@ def main():
         trainer = MegatronTrainer(training_harness=harness)
         trainer.train()
     except Exception as e:
+        import traceback
+
+        print(f"An error occurred: {e}")
+        traceback.print_exc()  # This prints the full stack trace
         print_exception()
         harness.update_status(
             status=TrainingJobStatus.FAILED, metadata={"error": str(e)}
@@ -45,7 +58,7 @@ def setup_logging():
 
 def setup_signal_handler(harness):
     def signal_handler(sig, frame):
-        logger.warn("Received signal: ", sig)
+        logger.warning("Received signal: %s", sig)
         harness.update_status(status=TrainingJobStatus.QUEUED)
 
         sys.exit(0)

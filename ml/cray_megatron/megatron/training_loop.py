@@ -28,56 +28,81 @@ class TrainingLoop:
         self.training_state = TrainingState()
 
     def train(self):
-        self.model_manager = get_model_manager()
+        try:
+            self.model_manager = get_model_manager()
+            self.training_state.model_info = self.model_manager.load_model()
+        except Exception as e:
+            import traceback
 
-        self.training_state.model_info = self.model_manager.load_model()
+            error_message = (
+                traceback.format_exc()
+            )  # Capture the stack trace as a string
+            print(f"An error occurred in loading the model: {error_message}")
 
-        self.training_loop()
+        try:
+            self.training_loop()
+        except Exception as e:
+            import traceback
+
+            error_message = (
+                traceback.format_exc()
+            )  # Capture the stack trace as a string
+            print(f"An error occurred in the training loop: {error_message}")
 
         self.checkpoint()
 
     def training_loop(self):
-        self.on_train_begin()
+        import traceback
 
-        self.training_state.model_info["model"].train()
+        try:
+            self.on_train_begin()
 
-        max_steps = get_max_steps()
+            self.training_state.model_info["model"].train()
 
-        self.training_state.optimizer = get_optimizer(
-            self.training_state.model_info["model"]
-        )
-        self.training_state.scheduler = get_scheduler(
-            self.training_state.optimizer, max_steps
-        )
+            max_steps = get_max_steps()
 
-        if does_any_checkpoint_exist():
-            self.resume_from_checkpoint()
+            self.training_state.optimizer = get_optimizer(
+                self.training_state.model_info["model"]
+            )
+            self.training_state.scheduler = get_scheduler(
+                self.training_state.optimizer, max_steps
+            )
 
-        data_loader = DataLoader(
-            model=self.training_state.model_info["model"],
-            tokenizer=self.training_state.model_info["tokenizer"],
-        )
+            if does_any_checkpoint_exist():
+                self.resume_from_checkpoint()
 
-        data_iterator = iter(data_loader)
+            data_loader = DataLoader(
+                model=self.training_state.model_info["model"],
+                tokenizer=self.training_state.model_info["tokenizer"],
+            )
 
-        starting_step = self.training_state.current_step
+            data_iterator = iter(data_loader)
 
-        for step in range(starting_step, max_steps):
-            self.training_state.current_step = step
-            self.training_state.epoch = data_loader.epoch
+            starting_step = self.training_state.current_step
 
-            self.on_step_begin(step)
+            for step in range(starting_step, max_steps):
+                self.training_state.current_step = step
+                self.training_state.epoch = data_loader.epoch
 
-            batch = next(data_iterator)
+                self.on_step_begin(step)
 
-            self.training_step(batch)
+                batch = next(data_iterator)
 
-            self.on_step_end(step)
+                self.training_step(batch)
 
-            if self.training_state.should_stop_training:
-                break
+                self.on_step_end(step)
 
-        self.on_train_end()
+                if self.training_state.should_stop_training:
+                    break
+
+            self.on_train_end()
+        except Exception as e:
+            print("An error occurred:")
+            traceback.print_exc()  # This will print the full stack trace
+            # Optionally log the exception to a file for later review
+            with open("error_log.txt", "a") as f:
+                f.write("An error occurred:\n")
+                traceback.print_exc(file=f)
 
     def resume_from_checkpoint(self):
         latest_checkpoint_path = get_latest_checkpoint_path()
@@ -100,7 +125,6 @@ class TrainingLoop:
     def training_step(self, batch):
 
         device = self.training_state.model_info["distribution_strategy"]["device"]
-
         # forward pass
         loss = self.training_state.model_info["model"](
             input_ids=batch["input_ids"].to(device),
