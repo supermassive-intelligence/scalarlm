@@ -20,11 +20,11 @@ else
     docker_platform=("linux/amd64")
 fi
 
-docker_build_command="depot build --platform ${docker_platform} --build-arg BASE_NAME=${target} --build-arg VLLM_TARGET_DEVICE=${vllm_target_device} -t gdiamos/cray-${target}:latest --push ."
+docker_build_command="depot build --platform ${docker_platform} --build-arg BASE_NAME=${target} --build-arg VLLM_TARGET_DEVICE=${vllm_target_device} -t sudnya/smi-platform-${target}:latest --push ."
 
 # Run docker build command
-echo $(green_bold Building image with command: ${docker_build_command})
+echo "Building image with command: ${docker_build_command}"
 eval $docker_build_command
 
-echo $(green_bold Successfully built image)
+echo $(Successfully built image)
 
