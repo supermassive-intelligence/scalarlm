@@ -4,3 +4,6 @@ aiofiles
 persist-queue
 matplotlib
 streaming-form-data==1.15.0
+mpi4py
+openmpi
+
