@@ -16,14 +16,25 @@ class FSDPLayer(nn.Module):
         self.rank = rank
         self.world_size = world_size
 
+    def all_gather(self, tensor):
+        if tensor is None:
+            return None
+        tensor_numpy = tensor.detach().numpy()
+        gathered = np.zeros([self.world_size] + list(tensor_numpy.shape), dtype=tensor_numpy.dtype)
+        comm.Allgather(tensor_numpy, gathered)
+        return torch.from_numpy(gathered).to(tensor.device)
+
     def forward(self, x):
+        if hasattr(self.layer, 'weight'):
+            full_weight = self.all_gather(self.layer.weight)
+            self.layer.weight.data = full_weight[self.rank]
+        if hasattr(self.layer, 'bias'):
+            full_bias = self.all_gather(self.layer.bias)
+            self.layer.bias.data = full_bias[self.rank]
         return self.layer(x)
 
-    def backward(self, grad_output):
-        if grad_output is None:
-            return None
-
-        def process_grad(param):
+    def synchronize_gradients(self):
+        def reduce_scatter(param):
             if param.grad is not None:
                 grad = param.grad.data
                 local_size = grad.numel() // self.world_size
@@ -31,18 +42,16 @@ class FSDPLayer(nn.Module):
                 end = start + local_size if self.rank < self.world_size - 1 else grad.numel()
                 
                 local_grad = torch.zeros(end - start, dtype=grad.dtype, device=grad.device)
-                comm.Scatter_reduce(grad.view(-1), local_grad, root=MPI.ROOT, op=MPI.SUM)
+                comm.Reduce_scatter(grad.view(-1).numpy(), local_grad.numpy(), op=MPI.SUM)
                 
                 grad.view(-1)[start:end] = local_grad
                 grad /= self.world_size
                 param.grad.data = grad
 
         if hasattr(self.layer, 'weight'):
-            process_grad(self.layer.weight)
+            reduce_scatter(self.layer.weight)
         if hasattr(self.layer, 'bias'):
-            process_grad(self.layer.bias)
-        
-        return grad_output
+            reduce_scatter(self.layer.bias)
 
 class FSDPModel(nn.Module):
     def __init__(self, model):
@@ -64,7 +73,7 @@ class FSDPModel(nn.Module):
     def backward(self, loss):
         loss.backward()
         for layer in reversed(self.layers):
-            layer.backward(None)
+            layer.synchronize_gradients()
 
 def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -95,4 +104,4 @@ def main():
 if __name__ == "__main__":
     main()
 
-# mpirun --allow-run-as-root -np 4 --oversubscribe python fsdp.py
+# mpirun --allow-run-as-root -np 2 --oversubscribe python fsdp.py
