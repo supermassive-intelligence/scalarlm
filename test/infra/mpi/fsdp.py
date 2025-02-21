@@ -1,13 +1,17 @@
-import torch
-import torch.nn as nn
 from mpi4py import MPI
 import numpy as np
+import torch
+import torch.nn as nn
+from torch.nn import TransformerDecoder, TransformerDecoderLayer
+from torch.utils.data import DataLoader, TensorDataset, DistributedSampler
+import math
 
+torch.manual_seed(42)
+
+# Initialize MPI environment
 comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
 world_size = comm.Get_size()
-
-torch.manual_seed(42)
 
 class FSDPLayer(nn.Module):
     def __init__(self, layer):
@@ -75,7 +79,54 @@ class FSDPModel(nn.Module):
         for layer in reversed(self.layers):
             layer.synchronize_gradients()
 
-def main():
+
+# Define a simple transformer model
+class SimpleTransformer(nn.Module):
+    def __init__(self, ntoken, d_model, nhead, d_hid, nlayers, dropout=0.5):
+        super(SimpleTransformer, self).__init__()
+        self.model_type = 'Transformer'
+        self.encoder = nn.Embedding(ntoken, d_model)
+        self.pos_encoder = PositionalEncoding(d_model, dropout)
+        decoder_layers = TransformerDecoderLayer(d_model, nhead, d_hid, dropout)
+        self.transformer_decoder = TransformerDecoder(decoder_layers, nlayers)
+        self.d_model = d_model
+        self.decoder = nn.Linear(d_model, ntoken)
+
+        self.init_weights()
+
+    def init_weights(self):
+        initrange = 0.1
+        self.encoder.weight.data.uniform_(-initrange, initrange)
+        self.decoder.bias.data.zero_()
+        self.decoder.weight.data.uniform_(-initrange, initrange)
+
+    def forward(self, src):
+        src = self.encoder(src) 
+        src = src * math.sqrt(self.d_model)
+        src = self.pos_encoder(src)
+        output = self.transformer_decoder(src, src, tgt_mask=None)
+        output = self.decoder(output)
+        return output  
+
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model, dropout=0.1, max_len=5000):
+        super(PositionalEncoding, self).__init__()
+        self.dropout = nn.Dropout(p=dropout)
+
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0).transpose(0, 1)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        x = x + self.pe[:x.size(0), :]
+        return self.dropout(x)
+
+
+def test_sequential_model():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     model = nn.Sequential(
@@ -101,7 +152,75 @@ def main():
         if rank == 0:
             print(f"Epoch {epoch}, Loss: {loss.item()}")
 
+def test_transformer_model():
+    # Determine device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Model parameters (reduced size)
+    ntokens = 1000  # size of vocabulary
+    emsize = 64  # embedding dimension
+    d_hid = 64  # dimension of the feedforward network model
+    nlayers = 1  # number of nn.TransformerEncoderLayer in nn.TransformerEncoder
+    nhead = 2  # number of heads in nn.MultiheadAttention
+    dropout = 0.2  # dropout probability
+
+    # Create model and move to device
+    model = SimpleTransformer(ntokens, emsize, nhead, d_hid, nlayers, dropout).to(device)
+
+    # Wrap model with FSDP
+    model = FSDPModel(model)
+
+    # Define loss function and optimizer
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+
+    # Create synthetic dataset
+    def create_dataset(num_samples, seq_length):
+        data = torch.randint(0, ntokens, (num_samples, seq_length), dtype=torch.long)
+        target = torch.randint(0, ntokens, (num_samples, seq_length), dtype=torch.long)
+        return TensorDataset(data, target)
+
+    # Create DataLoader with DistributedSampler for MPI ranks
+    num_samples = 1000  # Reduced number of samples
+    seq_length = 20  # Reduced sequence length
+    batch_size = 16  # Smaller batch size
+    dataset = create_dataset(num_samples, seq_length)
+    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank)
+    train_loader = DataLoader(dataset, batch_size=batch_size, sampler=sampler)
+
+    # Training loop
+    def train(model, data_loader, optimizer, criterion, epochs, device):
+        model.train()
+        for epoch in range(epochs):
+            sampler.set_epoch(epoch)
+            total_loss = 0
+
+            for batch_idx, (data, target) in enumerate(data_loader):
+                data, target = data.to(device), target.to(device)
+                optimizer.zero_grad()
+                output = model(data)  
+                loss = criterion(output.view(-1, ntokens), target.view(-1))  
+
+                loss.backward()
+                optimizer.step()
+
+                total_loss += loss.item()
+
+                if batch_idx % 10 == 0 and rank == 0:
+                    print(f"Epoch {epoch+1}, Batch {batch_idx}, Loss: {loss.item():.4f}")
+
+            if rank == 0:
+                print(f"Epoch {epoch+1} completed. Average Loss: {total_loss / len(data_loader):.4f}")
+
+    # Run training
+    train(model, train_loader, optimizer, criterion, epochs=5, device=device)
+
+    # Finalize MPI environment (optional but good practice)
+    comm.Barrier()
+    if rank == 0:
+        print("Training complete.")
+
 if __name__ == "__main__":
-    main()
+    test_transformer_model()
 
 # mpirun --allow-run-as-root -np 2 --oversubscribe python fsdp.py
