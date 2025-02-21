@@ -12,8 +12,6 @@ import logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-torch.manual_seed(42)
-
 # Initialize MPI environment
 comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
@@ -154,7 +152,7 @@ def test_sequential_model():
     
     fsdp_model = FSDPModel(model)
     
-    optimizer = torch.optim.SGD(fsdp_model.parameters(), lr=0.01)
+    optimizer = torch.optim.Adam(fsdp_model.parameters(), lr=0.01)
     for epoch in range(10):
         input_data = torch.randn(32, 10, device=device)
         output = fsdp_model(input_data)
@@ -248,6 +246,6 @@ def test_transformer_model():
         logger.debug("Training complete.")
 
 if __name__ == "__main__":
-    test_transformer_model()
+    test_sequential_model()
 
 # mpirun --allow-run-as-root -np 2 --oversubscribe python fsdp.py
