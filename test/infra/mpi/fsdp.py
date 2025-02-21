@@ -5,6 +5,12 @@ import torch.nn as nn
 from torch.nn import TransformerDecoder, TransformerDecoderLayer
 from torch.utils.data import DataLoader, TensorDataset, DistributedSampler
 import math
+import random
+import logging
+
+# Initialize logging
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 torch.manual_seed(42)
 
@@ -12,6 +18,17 @@ torch.manual_seed(42)
 comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
 world_size = comm.Get_size()
+
+def seed_all(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+# Set a fixed seed
+seed_all(42)
 
 class FSDPLayer(nn.Module):
     def __init__(self, layer):
@@ -46,6 +63,7 @@ class FSDPLayer(nn.Module):
                 end = start + local_size if self.rank < self.world_size - 1 else grad.numel()
                 
                 local_grad = torch.zeros(end - start, dtype=grad.dtype, device=grad.device)
+                
                 comm.Reduce_scatter(grad.view(-1).numpy(), local_grad.numpy(), op=MPI.SUM)
                 
                 grad.view(-1)[start:end] = local_grad
@@ -125,7 +143,6 @@ class PositionalEncoding(nn.Module):
         x = x + self.pe[:x.size(0), :]
         return self.dropout(x)
 
-
 def test_sequential_model():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
@@ -150,13 +167,13 @@ def test_sequential_model():
         optimizer.step()
         
         if rank == 0:
-            print(f"Epoch {epoch}, Loss: {loss.item()}")
+            logger.debug(f"Epoch {epoch}, Loss: {loss.item()}")
 
 def test_transformer_model():
     # Determine device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Model parameters (reduced size)
+    # Model parameters 
     ntokens = 1000  # size of vocabulary
     emsize = 64  # embedding dimension
     d_hid = 64  # dimension of the feedforward network model
@@ -167,6 +184,10 @@ def test_transformer_model():
     # Create model and move to device
     model = SimpleTransformer(ntokens, emsize, nhead, d_hid, nlayers, dropout).to(device)
 
+    # Ensure identical initialization across ranks
+    for param in model.parameters():
+        comm.Bcast(param.data.numpy(), root=0)
+
     # Wrap model with FSDP
     model = FSDPModel(model)
 
@@ -176,17 +197,21 @@ def test_transformer_model():
 
     # Create synthetic dataset
     def create_dataset(num_samples, seq_length):
+        # Use a fixed seed for dataset creation
+        rng_state = torch.get_rng_state()
+        torch.manual_seed(0)
         data = torch.randint(0, ntokens, (num_samples, seq_length), dtype=torch.long)
         target = torch.randint(0, ntokens, (num_samples, seq_length), dtype=torch.long)
+        torch.set_rng_state(rng_state)
         return TensorDataset(data, target)
 
     # Create DataLoader with DistributedSampler for MPI ranks
-    num_samples = 1000  # Reduced number of samples
-    seq_length = 20  # Reduced sequence length
-    batch_size = 16  # Smaller batch size
+    num_samples = 1000  
+    seq_length = 20  
+    batch_size = 16  
     dataset = create_dataset(num_samples, seq_length)
-    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank)
-    train_loader = DataLoader(dataset, batch_size=batch_size, sampler=sampler)
+    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=False)
+    train_loader = DataLoader(dataset, batch_size=batch_size, sampler=sampler, drop_last=True)
 
     # Training loop
     def train(model, data_loader, optimizer, criterion, epochs, device):
@@ -201,24 +226,26 @@ def test_transformer_model():
                 output = model(data)  
                 loss = criterion(output.view(-1, ntokens), target.view(-1))  
 
-                loss.backward()
+                model.backward(loss)
                 optimizer.step()
 
                 total_loss += loss.item()
 
                 if batch_idx % 10 == 0 and rank == 0:
-                    print(f"Epoch {epoch+1}, Batch {batch_idx}, Loss: {loss.item():.4f}")
+                    logger.debug(f"Epoch {epoch+1}, Batch {batch_idx}, Loss: {loss.item():.4f}")
 
+            # Synchronize total_loss across all ranks
+            total_loss = comm.allreduce(total_loss, op=MPI.SUM)
             if rank == 0:
-                print(f"Epoch {epoch+1} completed. Average Loss: {total_loss / len(data_loader):.4f}")
+                logger.debug(f"Epoch {epoch+1} completed. Average Loss: {total_loss / (len(data_loader) * world_size):.4f}")
 
     # Run training
     train(model, train_loader, optimizer, criterion, epochs=5, device=device)
 
-    # Finalize MPI environment (optional but good practice)
+    # Finalize MPI environment
     comm.Barrier()
     if rank == 0:
-        print("Training complete.")
+        logger.debug("Training complete.")
 
 if __name__ == "__main__":
     test_transformer_model()
