@@ -83,11 +83,17 @@ def test_sequential_model(rank, device):
         def forward(self, x):
             return self.model(x)
     
-    fsdp_model = SimpleFSDP(SequentialModel().to(device))
+    
+    model = SequentialModel().to(device)
+    
+    for name, param in model.named_parameters():
+        logger.debug(f"MODEL {name} shape: {param.shape}")
+    
+    fsdp_model = SimpleFSDP(model)
     
     # Verify parameter shapes before optimizer initialization
     for name, param in fsdp_model.named_parameters():
-        logger.debug(f"{name} shape: {param.shape}")
+        logger.debug(f"FSDP_MODEL {name} shape: {param.shape}")
     
     optimizer = torch.optim.Adam(fsdp_model.parameters(), lr=0.01)
     

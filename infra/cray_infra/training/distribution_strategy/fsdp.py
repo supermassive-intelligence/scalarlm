@@ -129,7 +129,7 @@ class FSDPLayer(nn.Module):
                 valid_elements = total_elements - (world_size - 1) * local_size
                 local_grad = local_grad[:valid_elements]
             
-            # logger.info(f"Rank {rank}: Reduced {grad_numpy.shape}->{local_grad.shape}")        
+            logger.info(f"Rank {rank}: Reduced {grad_numpy.shape}->{local_grad.shape}")        
             param.grad.data = torch.from_numpy(local_grad).to(device=grad.device).to(original_dtype)
 
 
@@ -140,7 +140,7 @@ class FSDPLayer(nn.Module):
 
     def synchronize_gradients_hook(self, module, grad_input, grad_output):
         
-        if hasattr(module, "weight"):    
+        if hasattr(module, "weight") and module.weight is not None:    
             self.reduce_scatter(module.weight)
         if hasattr(module, "bias") and module.bias is not None:  
             self.reduce_scatter(module.bias)
@@ -173,18 +173,28 @@ class FSDPLayer(nn.Module):
             module.bias.data = self.shard_tensor(module.bias)
 
     def shard_tensor(self, tensor):
+        # Shard the tensor across the world_size, without copying off the GPU
         flat_view = tensor.view(-1)
-        total_elements = flat_view.numel()
-        padded_size = ((total_elements + self.world_size - 1) // self.world_size) * self.world_size
-        local_size = padded_size // self.world_size
-        start = self.rank * local_size
-        end = start + local_size
-        
-        # Handle the last rank correctly when padding is needed
-        if end > total_elements:
-           end = total_elements
 
-        shard = flat_view[start:end]
+        shard_size = flat_view.numel() // self.world_size
+
+        start = self.rank * shard_size
+        end = (
+            start + shard_size if self.rank < self.world_size - 1 else flat_view.numel()
+        )
+
+        # Make a deep copy of the shard
+        padding = shard_size - (end - start)
+
+        if padding > 0:
+            shard = torch.cat(
+                [flat_view[start:end], torch.zeros(padding, device=flat_view.device)],
+                dim=0,
+            )
+        else:
+            shard = flat_view[start:end].clone()
+
+        # logger.info(f"Rank {self.rank} shard: {shard.shape} out of {flat_view.shape}")
 
         return shard
 
