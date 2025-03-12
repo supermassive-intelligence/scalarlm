@@ -97,12 +97,6 @@ def test_sequential_model(rank, device):
     
     optimizer = torch.optim.Adam(fsdp_model.parameters(), lr=0.01)
     
-    for name, param in fsdp_model.named_parameters():
-        if hasattr(name, "weight"):
-            logger.debug(f"name: {name}, param shape: {param.weight.shape}")
-        if hasattr(name, "bias"):
-            logger.debug(f"name: {name}, param shape: {param.bias.shape}")
-    
     for epoch in range(10):
         input_data = torch.randn(32, 10, device=device)
         output = fsdp_model(input_data)
