@@ -83,9 +83,19 @@ def test_sequential_model(rank, device):
         def forward(self, x):
             return self.model(x)
     
-    fsdp_model = SimpleFSDP(SequentialModel())
+    fsdp_model = SimpleFSDP(SequentialModel().to(device))
+    
+    # Verify parameter shapes before optimizer initialization
+    for name, param in fsdp_model.named_parameters():
+        logger.debug(f"{name} shape: {param.shape}")
     
     optimizer = torch.optim.Adam(fsdp_model.parameters(), lr=0.01)
+    
+    for name, param in fsdp_model.named_parameters():
+        if hasattr(name, "weight"):
+            logger.debug(f"name: {name}, param shape: {param.weight.shape}")
+        if hasattr(name, "bias"):
+            logger.debug(f"name: {name}, param shape: {param.bias.shape}")
     
     for epoch in range(10):
         input_data = torch.randn(32, 10, device=device)
@@ -183,7 +193,7 @@ if __name__ == "__main__":
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     test_sequential_model(rank, device)
-    test_transformer_model(comm, rank, world_size, device)
+    # test_transformer_model(comm, rank, world_size, device)
 
 
-# PYTHONPATH=/app/cray/ mpirun --allow-run-as-root -np 2 --oversubscribe python test_fsdp.py
+# PYTHONPATH=/app/cray/ mpirun --allow-run-as-root -np 2 --oversubscribe python test/infra/distribution_strategy/test_fsdp.py
