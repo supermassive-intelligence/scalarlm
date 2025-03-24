@@ -5,7 +5,7 @@
 replicaCount: 1
 
 image:
-  repository: sudnya/craylm-rocm
+  repository: sudnya/scalarlm-rocm
   tag: latest
   pullPolicy: Always
 
