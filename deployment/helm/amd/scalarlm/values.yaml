@@ -1,0 +1,33 @@
+image:
+  repository: tensorwave/scalarlm-amd
+  tag: latest
+  pullPolicy: Always
+
+env:
+  - name: HIP_VISIBLE_DEVICES
+    value: "0"
+  - name: ROCR_VISIBLE_DEVICES
+    value: "0"
+
+service:
+  type: ClusterIP
+  api_port: 8000
+  vllm_port: 8001
+  externalIP: 10.214.142.100 #10.1.81.248
+
+jobs_pvc:
+  storageClass: local-hostpath
+  size: 100Gi
+
+cache_pvc:
+  storageClass: local-hostpath
+  size: 32Gi
+
+model: meta-llama/Llama-3.1-8B-Instruct
+max_model_length: 4096
+gpu_memory_utilization: 0.75
+
+training_gpus: 1
+inference_gpus: 1
+
+max_train_time: 86400
