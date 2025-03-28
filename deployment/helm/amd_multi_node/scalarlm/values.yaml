@@ -40,19 +40,35 @@ inference_gpus: 1
 
 max_train_time: 86400
 
-# Add node affinity and anti-affinity to spread deployments
-nodeSelector:
-  gpu-type: amd
-  gpu: "true"  # Based on the labels you added earlier
-  kubernetes.io/os: linux
+# Resource requests to ensure proper scheduling
+resources:
+  requests:
+    cpu: 4
+    memory: 16Gi
+    amd.com/gpu: 1  # Or amd.com/gpu depending on your setup
+  limits:
+    cpu: 8
+    memory: 32Gi
+    amd.com/gpu: 1  # Or amd.com/gpu depending on your setup
 
-# Affinity configuration
+# Debugging annotations
+metadata:
+  annotations:
+    scheduler.alpha.kubernetes.io/critical-pod: ''
+
+# Add node affinity and anti-affinity to spread deployments
+#nodeSelector:
+#  kubernetes.io/hostname: ctr-swpool-l025  # First node
+#  gpu-type: amd
+#  #nodeName: ctr-swpool-l025
+#  gpu: "true"  # Based on the labels you added earlier
+#  kubernetes.io/os: linux
+
 affinity:
   nodeAffinity:
-    preferredDuringSchedulingIgnoredDuringExecution:
-      - weight: 100
-        preference:
-          matchExpressions:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
             - key: gpu
               operator: In
               values:
@@ -61,7 +77,6 @@ affinity:
               operator: In
               values:
                 - linux
-  
   podAntiAffinity:
     preferredDuringSchedulingIgnoredDuringExecution:
       - weight: 100
@@ -73,3 +88,15 @@ affinity:
                 values:
                   - scalarlm
           topologyKey: kubernetes.io/hostname
+
+# Scheduling hints
+tolerations:
+  - key: "gpu"
+    operator: "Exists"
+    effect: "NoSchedule"
+  - key: "node.kubernetes.io/not-ready"
+    operator: "Exists"
+    effect: "NoSchedule"
+  - key: "node.kubernetes.io/unreachable"
+    operator: "Exists"
+    effect: "NoSchedule"
