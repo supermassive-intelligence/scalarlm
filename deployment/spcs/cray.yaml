@@ -1,0 +1,38 @@
+  spec_version: 1
+  name: cray-nvidia-service
+  compute:
+    instances:
+    - name: cray-llama-instance
+      container:
+        image: gdiamos/cray-nvidia:latest
+        memory: 16g
+        command: ["/app/cray/scripts/start_one_server.sh"]
+        environmental_variables:
+          MODEL: meta-llama/Llama-3.2-3B-Instruct
+          MAX_MODEL_LENGTH: "4096"
+          GPU_MEMORY_UTILIZATION: "0.33"
+        resources:
+          nvidia.com/gpu: 1
+        volumes:
+        - mount: /app/cray/cray-config.yaml
+          source: config-vol
+          subpath: cray-config.yaml
+  endpoints:
+    - name: health
+      port: 8001
+      public_port: true
+    - name: train
+      port: 8002
+      public_port: true
+    - name: generate
+      port: 8003
+      public_port: true
+  volumes:
+    - name: config-vol
+      data: |
+        model: meta-llama/Llama-3.2-3B-Instruct
+        max_model_length: 4096
+        gpu_memory_utilization: 0.33
+  networking:
+    egress:
+      allow_all: true
