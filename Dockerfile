@@ -51,7 +51,7 @@ ENV BASE_NAME=cpu
 
 ###############################################################################
 # AMD BASE IMAGE
-FROM gdiamos/rocm-base AS amd
+FROM gdiamos/rocm-base:latest AS amd
 ARG MAX_JOBS=8
 
 ENV BASE_NAME=amd
