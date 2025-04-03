@@ -1,6 +1,6 @@
 image:
-  repository: tensorwave/scalarlm-amd
-  tag: latest
+  repository: sudnya/scalarlm-rocm
+  tag: v1
   pullPolicy: Always
 
 env:
