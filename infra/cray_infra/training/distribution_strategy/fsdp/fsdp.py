@@ -1,17 +1,50 @@
 import torch
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
-
-import numpy as np
-from mpi4py import MPI
+from gpu_aware_mpi import get_size, get_rank, allgather, reduce_scatter
 
 import gc
 import time
-
 import logging
 
 logger = logging.getLogger(__name__)
 
+def log_live_cuda_tensors_and_params(model):
+    # Build a mapping from data_ptr to parameter/buffer name
+    rank = get_rank()
+    data_ptr_to_name = {}
+    for name, param in model.named_parameters(recurse=False):
+        if param.is_cuda:
+            data_ptr_to_name[param.data_ptr()] = f"param:{name}"
+    for name, buf in model.named_buffers(recurse=False):
+        if buf.is_cuda:
+            data_ptr_to_name[buf.data_ptr()] = f"buffer:{name}"
+
+    logger.debug(f"Rank {rank}: === Live CUDA tensors ===")
+    for obj in gc.get_objects():
+        try:
+            if torch.is_tensor(obj) or (hasattr(obj, 'data') and torch.is_tensor(obj.data)):
+                tensor = obj.data if hasattr(obj, 'data') else obj
+                if tensor.is_cuda:
+                    assoc = data_ptr_to_name.get(tensor.data_ptr(), "")
+                    logger.debug(
+                        f"Rank={rank}, "
+                        f"Tensor id={id(tensor):>10}, data_ptr={tensor.data_ptr():>12}, "
+                        f"shape={tuple(tensor.shape):>20}, dtype={str(tensor.dtype):>10}, "
+                        f"device={str(tensor.device):>8}, requires_grad={getattr(tensor, 'requires_grad', False)} {assoc}"
+                    )
+        except Exception:
+            pass
+
+
+def log_gpu_memory(prefix=""):
+    for i in range(torch.cuda.device_count()):
+        allocated = torch.cuda.memory_allocated(i)
+        reserved = torch.cuda.memory_reserved(i)
+        free, total = torch.cuda.mem_get_info(i)
+        rank = get_rank()
+        if rank == 0:
+            logger.debug(f"{prefix} GPU {i}: Allocated={allocated/1e6:.2f}MB, Reserved={reserved/1e6:.2f}MB, Free={free/1e6:.2f}MB, Total={total/1e6:.2f}MB")
 
 class FSDPLayer(nn.Module):
     def __init__(self, module, should_checkpoint=False):
@@ -19,12 +52,7 @@ class FSDPLayer(nn.Module):
         self.module = module
         self.shard_parameters()
 
-        self.module.register_full_backward_hook(self._full_backward_hook)
-
         self.should_checkpoint = should_checkpoint
-
-    def _full_backward_hook(self, module, grad_input, grad_output):
-        self.free_params()
 
     def shard_parameters(self):
         self.sharded_parameter_metadata = {}
@@ -46,7 +74,7 @@ class FSDPLayer(nn.Module):
                 nn.Parameter(shard, requires_grad=param.requires_grad),
             )
             delattr(self.module, name)
-            setattr(self.module, name, shard)
+            setattr(self.module, name, nn.Parameter(shard))
 
         logger.debug(
             f" Rank {rank}: Sharded parameters are {[i[0] for i in self.module.named_parameters(recurse=False)]}"
@@ -62,7 +90,11 @@ class FSDPLayer(nn.Module):
         self.gather_all_parameters()
         result = self.module(*args, **kwargs)
 
+        log_gpu_memory("Before FreeParams:")
+        log_live_cuda_tensors_and_params(self.module)
         self.free_params()
+        log_gpu_memory("After FreeParams:")
+        log_live_cuda_tensors_and_params(self.module)
 
         return result
 
@@ -85,17 +117,17 @@ class FSDPLayer(nn.Module):
             full_tensor = all_gather_op(param, metadata_dict)
 
             logger.debug(
-                f" Rank {rank}: Gathered parameter {name} with shape {full_tensor.shape}"
+               f" Rank {rank}: Gathered parameter {name} with shape {full_tensor.shape}"
             )
 
             # Copy the full tensor back to the original parameter
-            setattr(self.module, name, full_tensor)
+            setattr(self.module, name, nn.Parameter(full_tensor))
 
     def free_params(self):
+        logger.debug(f"Rank {rank}: Free params")
         for name, param in self.module.named_parameters(recurse=False):
 
             if not name.startswith("shard_"):
-                logger.debug(f" Rank {rank}: Skipping parameter {name}")
                 continue
 
             # Remove _shard_ prefix
@@ -105,7 +137,7 @@ class FSDPLayer(nn.Module):
                 if getattr(self.module, name).data_ptr() != param.data.data_ptr():
                     delattr(self.module, name)
 
-            setattr(self.module, name, param.data)
+            setattr(self.module, name, nn.Parameter(param.data))
 
         gc.collect()
         torch.cuda.empty_cache()
@@ -115,25 +147,6 @@ class FSDPLayer(nn.Module):
             return super().__getattr__(name)
         except AttributeError:
             return getattr(self.module, name)
-
-    def free_params(self):
-        for name, param in self.module.named_parameters(recurse=False):
-
-            if not name.startswith("shard_"):
-                logger.debug(f" Rank {rank}: Skipping parameter {name}")
-                continue
-
-            # Remove _shard_ prefix
-            name = name[6:]
-
-            if hasattr(self.module, name):
-                if getattr(self.module, name).data_ptr() != param.data.data_ptr():
-                    delattr(self.module, name)
-
-            setattr(self.module, name, param.data)
-
-        gc.collect()
-        torch.cuda.empty_cache()
 
 
 class SimpleFSDP(nn.Module):
@@ -242,10 +255,8 @@ class SimpleFSDP(nn.Module):
                 )
 
 
-comm = MPI.COMM_WORLD
-world_size = comm.Get_size()
-rank = comm.Get_rank()
-
+world_size = get_size()
+rank = get_rank()
 
 def shard_tensor(tensor):
     """Evenly shard tensor across ranks with padding if needed.
@@ -272,12 +283,16 @@ def shard_tensor(tensor):
     shard = tensor_padded[start : start + shard_size].clone()
 
     # Gather metadata from all ranks
-    local_metadata = (original_numel, original_shape, shard_size, padding)
-    all_metadata = comm.allgather(local_metadata)  # Gather metadata from all ranks
+    local_metadata = torch.tensor([original_numel, *original_shape, shard_size, padding], dtype=torch.long)
+    all_metadata = torch.zeros((world_size, local_metadata.numel()), dtype=torch.long)
+    allgather(local_metadata, all_metadata)
 
     # Create a dictionary of metadata keyed by rank
-    metadata_dict = {rank: meta for rank, meta in enumerate(all_metadata)}
+    metadata_dict = {rank: all_metadata[rank].tolist() for rank in range(world_size)}
 
+    # Convert metadata back to original format
+    metadata_dict = {rank: (meta[0], tuple(meta[1:-2]), meta[-2], meta[-1]) for rank, meta in metadata_dict.items()}
+    
     return shard, metadata_dict
 
 
@@ -315,12 +330,18 @@ def trim_padding(all_tensors, rank, world_size, metadata_dict):
 def collectives_all_gather(shard, metadata_dict):
     """Gather shards and reconstruct the full tensor using metadata."""
     # Prepare buffers
-    shard_numpy = shard.detach().to(torch.float32).cpu().numpy().flatten()
-    gathered = np.empty(shard_numpy.size * world_size, dtype=shard_numpy.dtype)
+    gathered = torch.empty(shard.numel() * world_size, device=shard.device, dtype=shard.dtype)
 
     # Collective operation
-    comm.Allgather(shard_numpy, gathered)
-
+    start = time.time()
+    allgather(shard, gathered)
+    end = time.time()
+    
+    total_time = "{:.1e}".format(end - start)
+    bandwidth = "{:.1e}".format(shard.nbytes / (end - start) / 1e9)
+    logger.debug(f"All_gather time on device {shard.device}: {total_time}, bandwidth: {bandwidth} GB/s on tensor {shard.shape}"
+        )
+    
     # Reconstruct the full tensor using metadata
     all_tensors = []
     offset = 0
@@ -331,42 +352,51 @@ def collectives_all_gather(shard, metadata_dict):
         offset += shard_size
 
     all_tensors = trim_padding(all_tensors, rank, world_size, metadata_dict)
-
-    concatenated_numpy = np.concatenate(all_tensors)
-
+    concatenated = torch.cat(all_tensors)
     original_shape = metadata_dict[rank][1]
-    return (
-        torch.from_numpy(concatenated_numpy)
-        .to(shard.device)
-        .to(shard.dtype)
-        .reshape(original_shape)
-    )
+    
+    del gathered
+    gc.collect()
+    torch.cuda.empty_cache()
+    
+    return concatenated.reshape(original_shape)
 
 
 def collectives_reduce_scatter(tensor, metadata_dict):
     """Reduce-scatter with even sharding. Returns local shard trimmed to original size."""
+    rank = get_rank()
+    world_size = get_size()
 
     original_numel, _, shard_size, padding = metadata_dict[rank]
 
     # Pad tensor if needed
-    tensor_padded = tensor.view(-1).clone()
+    tensor_padded = tensor.reshape(-1)
     if padding > 0:
-        tensor_padded = torch.cat(
-            [tensor.view(-1), torch.zeros(padding, device=tensor.device)]
-        )
+        tensor_padded = torch.concatenate([tensor_padded, torch.zeros(padding, device=tensor.device, dtype=tensor_padded.dtype)])
 
-    tensor_numpy = tensor_padded.detach().float().cpu().numpy()
-    local_shard = np.zeros(shard_size, dtype=tensor_numpy.dtype)
-
+    local_shard = torch.empty(shard_size, device=tensor.device, dtype=tensor_padded.dtype)
+    
     # Collective operation
-    comm.Reduce_scatter(tensor_numpy, local_shard, op=MPI.SUM)
+    start = time.time()
+    reduce_scatter(tensor_padded, local_shard)
+    end = time.time()
+    
+    total_time = "{:.1e}".format(end - start)
+    bandwidth = "{:.1e}".format(tensor_padded.nbytes / (end - start) / 1e9)
+    logger.debug(
+        f"Reduce_scatter time on device {tensor.device if hasattr(tensor, 'device') else 'CPU'}: {total_time}, bandwidth: {bandwidth} GB/s"
+    )
 
     # Trim padding on last rank using its original size from metadata_dict
     if rank == world_size - 1:
         valid_elements = original_numel - padding
         local_shard = local_shard[:valid_elements]
 
-    return torch.from_numpy(local_shard).to(tensor.device).to(tensor.dtype)
+    del tensor_padded
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    return local_shard
 
 
 class _AllGather(torch.autograd.Function):

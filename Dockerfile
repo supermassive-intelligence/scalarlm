@@ -23,6 +23,9 @@ RUN pip install uv
 RUN uv pip install torch==${TORCH_VERSION}
 RUN uv pip install xformers==0.0.27.post2
 
+ARG INSTALL_ROOT=/app/cray
+WORKDIR ${INSTALL_ROOT}
+
 ENV BASE_NAME=nvidia
 
 ###############################################################################
@@ -47,11 +50,14 @@ ARG TORCH_VERSION="2.4.0"
 RUN pip install uv
 RUN uv pip install torch==${TORCH_VERSION} --index-url https://download.pytorch.org/whl/cpu
 
+ARG INSTALL_ROOT=/app/cray
+WORKDIR ${INSTALL_ROOT}
+
 ENV BASE_NAME=cpu
 
 ###############################################################################
 # AMD BASE IMAGE
-FROM gdiamos/rocm-base AS amd
+FROM gdiamos/rocm-base:rocm_mpi AS amd
 ARG MAX_JOBS=8
 
 ENV BASE_NAME=amd
@@ -60,6 +66,9 @@ RUN pip install amdsmi
 RUN --mount=type=cache,target=/var/cache/apt \
     apt-get update -y \
     && apt install -y amd-smi-lib
+
+ARG INSTALL_ROOT=/app/cray
+WORKDIR ${INSTALL_ROOT}
 
 ###############################################################################
 # VLLM BUILD STAGE
@@ -113,6 +122,11 @@ WORKDIR ${INSTALL_ROOT}
 ###############################################################################
 # MAIN IMAGE
 FROM vllm AS infra
+
+# Build GPU-aware MPI
+COPY ./infra/cray_infra/training/gpu_aware_mpi ${INSTALL_ROOT}/infra/cray_infra/training/gpu_aware_mpi
+RUN python3 ${INSTALL_ROOT}/infra/cray_infra/training/gpu_aware_mpi/setup.py bdist_wheel --dist-dir=dist && \
+    pip install dist/*.whl
 
 RUN apt-get update -y  \
     && apt-get install -y slurm-wlm libslurm-dev \
