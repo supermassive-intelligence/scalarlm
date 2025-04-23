@@ -3,7 +3,7 @@
 ## Training and Fine-tuning
 
 #### Do I need special templates (special tokens) for training or inference prompts?
-Yes. The training and inference prompts follow the same format as the prompt template for the model published on HuggingFace. Each deployment is tied to a specific model, refer to the model card for the prompt template. For example, [this](https://www.llama.com/docs/model-cards-and-prompt-formats/llama3_1/) is the template for the ScalarLM deployment that supports Llama8B Instruct: 
+Yes. The training and inference prompts follow the same format as the prompt template for the model published on HuggingFace. Each deployment is tied to a specific model, refer to the model card for the prompt template. For example, [this](https://www.llama.com/docs/model-cards-and-prompt-formats/llama3_1/) is the template for the ScalarLM deployment that supports Llama8B Instruct. 
 
 ### How can I monitor fine-tuning progress, such as loss function curves?
 Use the `scalarlm plot` CLI command after setting your API URL. We provide a pip-installable tool called `scalarlm` for this purpose.
@@ -115,7 +115,7 @@ Yes. Use the ScalarLM inference endpoint to score or rank data with your reward 
 The framework itself doesn't expose early-stop parameters, but since it's built on PyTorch/Hugging Face, you can integrate the Hugging Face early stopping callback into your training loop. You'll need to write new code to enable this and determine how to configure the relevant hyperparameters on the callback. See huggingface.co/docs/transformers/en/main_classes/callback for details.
 
 ### Where can I see a full list of fine‑tuning parameters?
-All tunable parameters live under the `ml/` directory of the repo (e.g. in `cray_megatron/megatron/`). There isn't yet a single "config file" listing them all.
+Instead of providing a single config file listing all possible training parameters, ScalarLM lets you modify and write new code in the `ml/` directory to add/enhance/update training parameters as needed. This gives the user the highest level of autonomy and flexibility. ScalarLM is designed to allow users to experiment as seamlessly as possible.
 
 ### Can I use any Hugging Face model?
 In principle yes, but each deployment must be explicitly configured. 
