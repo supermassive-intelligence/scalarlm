@@ -1,12 +1,12 @@
 image:
-  repository: gdiamos/scalarlm-amd #tensorwave/scalarlm-amd
-  tag: fsdp
+  repository: sudnya/scalarlm-rocm
+  tag: v0.7
   pullPolicy: Always
 
 service:
   type: ClusterIP
-  api_port: 9000
-  vllm_port: 9001
+  api_port: 8200
+  vllm_port: 8201
   externalIP: 64.139.222.101
 
 jobs_pvc:
