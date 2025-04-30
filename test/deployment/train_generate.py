@@ -11,6 +11,7 @@ logging.basicConfig(level=logging.DEBUG)
 count = 3
 selected = random.randint(1, count)
 
+TINY_BASE_MODEL = "masint/tiny-random-llama"
 TEST_QUESTION = f"What is {selected} + {selected}?"
 TEST_ANSWER = f"The answer is {selected + selected}."
 
@@ -46,7 +47,7 @@ def run_test():
 
     # 1. Call generate on base model
     base_model_generate_results = llm.generate(
-        prompts=dataset
+        prompts=dataset, model_name=TINY_BASE_MODEL
     )
     logger.info(
         f"Base model on prompt {dataset} returned {base_model_generate_results}"
