@@ -18,22 +18,23 @@ def get_directory():
 def get_datasets(num_examples=1):
     # Load data from file
     path = os.path.join(get_directory(), 'data.json')
+    data = []
     with open(path, 'r') as file:
         data = json.load(file)
     
     dataset = [example['input'] for example in data[:num_examples]]
-    gold_answers = [example['output'] for example in data[:num_examples]]
+    gold_dataset = [example['output'] for example in data[:num_examples]]
     
     train_dataset = []
     count = 0
-    for example in dataset:
+    for example in data:
         for _ in range(10):
             train_dataset.append(example)
         count += 1
         if count >= num_examples:
             break
 
-    return dataset, train_dataset, gold_answers
+    return dataset, train_dataset, gold_dataset
 
 def parse_args():
     
@@ -52,7 +53,7 @@ def run_test():
 
     logger.info(results)
 
-    dataset, train_dataset, gold_answers = get_datasets(args.num_examples)
+    dataset, train_dataset, gold_dataset = get_datasets(args.num_examples)
 
     # 1. Call generate on base model
     base_model_generate_results = llm.generate(prompts=dataset, max_tokens=6000)
@@ -103,7 +104,7 @@ def run_test():
     # 5. Make sure base model gives different answer than the trained model
     assert base_model_generate_results != trained_model_generate_results
     # 6. Make sure trained model gives the expected answers
-    assert trained_model_generate_results == gold_answers
+    assert trained_model_generate_results == gold_dataset
 
 
 # Ensure the main function is only executed when the script is run directly
