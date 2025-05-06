@@ -17,7 +17,7 @@ cache_pvc:
   storageClass: local-path
   size: 200Gi
 
-model: meta-llama/Llama-3.1-70B-Instruct
+model: meta-llama/Llama-3.3-70B-Instruct
 max_model_length: 4096
 gpu_memory_utilization: 0.95
 
