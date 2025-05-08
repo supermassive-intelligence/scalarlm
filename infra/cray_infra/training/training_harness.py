@@ -26,16 +26,76 @@ class TrainingHarness:
         job_config = get_job_config()
 
         checkpoint_path = os.path.join(job_config["job_directory"], checkpoint_name)
-
-        torch.save(checkpoint_state, checkpoint_path)
-
-        logger.info(f"Checkpoint saved to {checkpoint_path}")
-
         saved_model_path = os.path.join(job_config["job_directory"], "saved_model")
 
+        torch.save(checkpoint_state, checkpoint_path)
+        logger.info(f"Checkpoint saved to {checkpoint_path}")
         model.save_pretrained(saved_model_path)
-
         logger.info(f"Model saved to {saved_model_path}")
+        
+        # Verification
+        logger.info("Verify Checkpoint Integrity...")
+        self._verify_checkpoint_integrity(model, checkpoint_path, saved_model_path)
+        logger.info("Verification complete.")
+    
+    def _verify_checkpoint_integrity(self, original_model, checkpoint_path, saved_model_path):
+        # Check file existence
+        for path in [checkpoint_path, saved_model_path]:
+            if not os.path.exists(path):
+                raise FileNotFoundError(f"Checkpoint file missing: {path}")
+            logger.info(f"File verification passed: {path} (size: {os.path.getsize(path)/1e6:.2f}MB)")
+
+        # Check checkpoint contents
+        self._verify_checkpoint_contents(original_model, checkpoint_path)
+        
+        # Check saved model
+        self._verify_saved_model(original_model, saved_model_path)
+
+    def _verify_checkpoint_contents(self, original_model, checkpoint_path):
+        try:
+            # Load checkpoint
+            loaded_state = torch.load(checkpoint_path, map_location='cpu')
+            
+            # Compare model states
+            original_state = original_model.state_dict()
+            if 'model_state_dict' not in loaded_state:
+                raise KeyError("Checkpoint missing model_state_dict")
+                
+            for key in original_state:
+                if not torch.allclose(original_state[key].cpu(), 
+                                    loaded_state['model_state_dict'][key].cpu(),
+                                    atol=1e-6):
+                    raise ValueError(f"Weight mismatch in tensor: {key}")
+                    
+            logger.info("Checkpoint content verification passed.")
+
+        except Exception as e:
+            logger.error(f"Checkpoint verification failed: {str(e)}")
+            raise
+
+    def _verify_saved_model(self, original_model, saved_model_path):
+        try:
+            # Load saved model
+            loaded_model = type(original_model).from_pretrained(saved_model_path)
+            loaded_model.eval()
+            
+            # Compare parameters
+            original_state = original_model.state_dict()
+            loaded_state = loaded_model.state_dict()
+            
+            for key in original_state:
+                if key not in loaded_state:
+                    raise KeyError(f"Missing key in saved model: {key}")
+                if not torch.allclose(original_state[key].cpu(),
+                                    loaded_state[key].cpu(),
+                                    atol=1e-6):
+                    raise ValueError(f"Parameter mismatch in tensor: {key}")
+                    
+            logger.info("Saved model verification passed.")
+
+        except Exception as e:
+            logger.error(f"Model verification failed: {str(e)}")
+            raise
 
     def get_status(self):
         return get_status()
