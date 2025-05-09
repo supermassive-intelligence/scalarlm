@@ -223,7 +223,7 @@ class SimpleFSDP(nn.Module):
         # Set the required grads
         for name, param in unwrapped_model.named_parameters():
             param.requires_grad = required_grads.get(name, False)
-            logger.debug(f" Rank {rank}: Setting requires_grad for {name} to {param.requires_grad}")
+            logger.info(f" Rank {rank}: Setting requires_grad for {name} to {param.requires_grad}")
 
         # Fix for pad_token_id
         if len(unwrapped_model.config.eos_token_id) > 1:
@@ -259,7 +259,7 @@ class SimpleFSDP(nn.Module):
                         required_grads[f"{prefix}{name}.{param_name}"] = param.requires_grad
                         
                         logger.info(
-                        f" Rank {rank}: Unwrapping parameter {prefix}{name}.{param_name}"
+                        f" Rank {rank}: Unwrapping parameter {prefix}{name}.{param_name} with requires_grad={param.requires_grad}"
                     )
 
                     else:
@@ -269,7 +269,7 @@ class SimpleFSDP(nn.Module):
                         required_grads[f"{prefix}{name}.{param_name}"] = param.requires_grad
 
                         logger.info(
-                            f" Rank {rank}: Unwrapping parameter {prefix}{name}.{param_name}"
+                            f" Rank {rank}: Unwrapping parameter {prefix}{name}.{param_name} with requires_grad={param.requires_grad}"
                         )
 
             else:
