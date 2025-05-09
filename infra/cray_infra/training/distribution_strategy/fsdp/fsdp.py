@@ -253,13 +253,13 @@ class SimpleFSDP(nn.Module):
                         # Gather all shards and reconstruct the full tensor
                         full_tensor = all_gather_op(param, metadata_dict)
 
-                        unwrapped_state_dict[f"{prefix}{name}.{param_name}"] = full_tensor.to(
+                        unwrapped_state_dict[f"{prefix}{param_name}.{param_name}"] = full_tensor.to(
                             torch.device("cpu")
                         )
-                        required_grads[f"{prefix}{name}.{param_name}"] = param.requires_grad
+                        required_grads[f"{prefix}{param_name}.{param_name}"] = param.requires_grad
                         
                         logger.info(
-                        f" Rank {rank}: Unwrapping parameter {prefix}{name}.{param_name} with requires_grad={param.requires_grad}"
+                        f" Rank {rank}: Unwrapping parameter {prefix}{param_name}.{param_name} with requires_grad={param.requires_grad}"
                     )
 
                     else:
