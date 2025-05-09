@@ -243,7 +243,7 @@ class SimpleFSDP(nn.Module):
             if isinstance(child, FSDPLayer):
                 logger.debug(f" Rank {rank}: Unwrapping module {prefix}{name}")
                 for param_name, param in child.module.named_parameters(recurse=False):
-                    if not name.startswith("shard_"):
+                    if name.startswith("shard_"):
                         # Remove _shard_ prefix
                         param_name = param_name[6:]
 
@@ -257,6 +257,10 @@ class SimpleFSDP(nn.Module):
                             torch.device("cpu")
                         )
                         required_grads[f"{prefix}{name}.{param_name}"] = param.requires_grad
+                        
+                        logger.info(
+                        f" Rank {rank}: Unwrapping parameter {prefix}{name}.{param_name}"
+                    )
 
                     else:
                         unwrapped_state_dict[f"{prefix}{name}.{param_name}"] = param.to(
@@ -264,9 +268,9 @@ class SimpleFSDP(nn.Module):
                         )
                         required_grads[f"{prefix}{name}.{param_name}"] = param.requires_grad
 
-                    logger.debug(
-                        f" Rank {rank}: Unwrapping parameter {prefix}{name}.{param_name}"
-                    )
+                        logger.info(
+                            f" Rank {rank}: Unwrapping parameter {prefix}{name}.{param_name}"
+                        )
 
             else:
                 logger.debug(f" Rank {rank}: Skipping module {prefix}{name}")

@@ -55,15 +55,23 @@ class TrainingHarness:
         try:
             # Load checkpoint
             loaded_state = torch.load(checkpoint_path, map_location='cpu')
-            
-            # Compare model states
-            original_state = original_model.state_dict()
             if 'model_state_dict' not in loaded_state:
                 raise KeyError("Checkpoint missing model_state_dict")
-                
-            for key in original_state:
-                if key in loaded_state['model_state_dict'] and not torch.allclose(original_state[key].cpu(),
-                                    loaded_state['model_state_dict'][key].cpu(),
+            loaded_model_state_dict = loaded_state['model_state_dict']
+            
+            # Find all params with requires_grad in original model and make sure they exist in loaded_state
+            required_params = [name for name, param in original_model.named_parameters() if param.requires_grad]
+            
+            for param_name in required_params:
+                if param_name not in loaded_model_state_dict:
+                    raise KeyError(f"Parameter {param_name} with requires_grad=True missing in checkpoint")
+                        
+            # Compare model states
+            original_model_state_dict = original_model.state_dict()
+        
+            for key in original_model_state_dict:
+                if key in loaded_model_state_dict and not torch.allclose(original_model_state_dict[key].cpu(),
+                                    loaded_model_state_dict[key].cpu(),
                                     atol=1e-6):
                     raise ValueError(f"Weight mismatch in tensor: {key}")
                     
