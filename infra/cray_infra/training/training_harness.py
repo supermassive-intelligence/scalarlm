@@ -30,6 +30,8 @@ class TrainingHarness:
 
         torch.save(checkpoint_state, checkpoint_path)
         logger.info(f"Checkpoint saved to {checkpoint_path}")
+        if not os.path.exists(saved_model_path):
+            os.makedirs(saved_model_path)
         model.save_pretrained(saved_model_path)
         logger.info(f"Model saved to {saved_model_path}")
         
@@ -62,6 +64,9 @@ class TrainingHarness:
             # Find all params with requires_grad in original model and make sure they exist in loaded_state
             required_params = [name for name, param in original_model.named_parameters() if param.requires_grad]
             
+            assert len(required_params) > 0
+            logger.info(f"required_params: {required_params}")
+            
             for param_name in required_params:
                 if param_name not in loaded_model_state_dict:
                     raise KeyError(f"Parameter {param_name} with requires_grad=True missing in checkpoint")
@@ -85,11 +90,20 @@ class TrainingHarness:
         try:
             # Load saved model
             loaded_model = type(original_model).from_pretrained(saved_model_path)
-            loaded_model.eval()
+            
+            # Find all params with requires_grad in original model and make sure they exist in loaded_state
+            required_params = [name for name, param in original_model.named_parameters() if param.requires_grad]
+            
+            assert len(required_params) > 0
+            logger.info(f"required_params: {required_params}")
             
             # Compare parameters
             original_state = original_model.state_dict()
             loaded_state = loaded_model.state_dict()
+            
+            for param_name in required_params:
+                if param_name not in loaded_state:
+                    raise KeyError(f"Parameter {param_name} with requires_grad=True missing in checkpoint")
             
             for key in original_state:
                 if key in loaded_state:
