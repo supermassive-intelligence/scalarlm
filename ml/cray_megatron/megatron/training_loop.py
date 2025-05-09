@@ -178,8 +178,6 @@ class TrainingLoop:
             model_state_dict = self.training_state.model_info["model"].unwrap_model()
         else:
             model_state_dict = filter_checkpoint(model, model.state_dict())
-            
-        logger.info(f"model_state_dict: {model_state_dict}")
 
         self.save_checkpoint(model_state_dict)
 

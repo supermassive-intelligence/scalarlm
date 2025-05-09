@@ -216,29 +216,29 @@ class SimpleFSDP(nn.Module):
             if isinstance(child, FSDPLayer):
                 logger.debug(f" Rank {rank}: Unwrapping module {prefix}{name}")
                 for param_name, param in child.module.named_parameters(recurse=False):
-                    if name.startswith("shard_"):
-                        # Remove _shard_ prefix
-                        param_name = param_name[len("shard_"):]
+                    if param.requires_grad:
+                        if param_name.startswith("shard_"):
+                            # Remove _shard_ prefix
+                            param_name = param_name[len("shard_"):]
 
-                        # Get metadata for this parameter
-                        metadata_dict = child.sharded_parameter_metadata[param_name]
+                            # Get metadata for this parameter
+                            metadata_dict = child.sharded_parameter_metadata[param_name]
 
-                        # Gather all shards and reconstruct the full tensor
-                        full_tensor = all_gather_op(param, metadata_dict)
+                            # Gather all shards and reconstruct the full tensor
+                            full_tensor = all_gather_op(param, metadata_dict)
 
-                        unwrapped_state_dict[f"{prefix}{name}.{param_name}"] = full_tensor.to(
-                            torch.device("cpu")
+                            unwrapped_state_dict[f"{prefix}{name}.{param_name}"] = full_tensor.to(
+                                torch.device("cpu")
+                            )
+
+                        else:
+                            unwrapped_state_dict[f"{prefix}{name}.{param_name}"] = param.to(
+                                torch.device("cpu")
+                            )
+
+                        logger.debug(
+                            f" Rank {rank}: Unwrapping parameter {prefix}{name}.{param_name}"
                         )
-
-                    else:
-                        unwrapped_state_dict[f"{prefix}{name}.{param_name}"] = param.to(
-                            torch.device("cpu")
-                        )
-
-                    logger.debug(
-                        f" Rank {rank}: Unwrapping parameter {prefix}{name}.{param_name}"
-                    )
-
             else:
                 logger.debug(f" Rank {rank}: Skipping module {prefix}{name}")
                 self.unwrap_layers(
