@@ -31,12 +31,6 @@ class TrainingHarness:
 
         logger.info(f"Checkpoint saved to {checkpoint_path}")
 
-        saved_model_path = os.path.join(job_config["job_directory"], "saved_model")
-
-        model.save_pretrained(saved_model_path)
-
-        logger.info(f"Model saved to {saved_model_path}")
-
     def get_status(self):
         return get_status()
 
