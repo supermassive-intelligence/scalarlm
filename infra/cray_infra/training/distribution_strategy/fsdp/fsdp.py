@@ -239,11 +239,11 @@ class SimpleFSDP(nn.Module):
 
     def unwrap_layers(self, prefix, module, unwrapped_state_dict, required_grads):
         rank = get_rank()
-        for name, child in module.named_children():
+        for module_name, child in module.named_children():
             if isinstance(child, FSDPLayer):
-                logger.debug(f" Rank {rank}: Unwrapping module {prefix}{name}")
+                logger.debug(f" Rank {rank}: Unwrapping module {prefix}{module_name}")
                 for param_name, param in child.module.named_parameters(recurse=False):
-                    if name.startswith("shard_"):
+                    if param_name.startswith("shard_"):
                         # Remove _shard_ prefix
                         param_name = param_name[6:]
 
@@ -253,29 +253,29 @@ class SimpleFSDP(nn.Module):
                         # Gather all shards and reconstruct the full tensor
                         full_tensor = all_gather_op(param, metadata_dict)
 
-                        unwrapped_state_dict[f"{prefix}{param_name}.{param_name}"] = full_tensor.to(
+                        unwrapped_state_dict[f"{prefix}{module_name}.{param_name}"] = full_tensor.to(
                             torch.device("cpu")
                         )
-                        required_grads[f"{prefix}{param_name}.{param_name}"] = param.requires_grad
+                        required_grads[f"{prefix}{module_name}.{param_name}"] = param.requires_grad
                         
                         logger.info(
-                        f" Rank {rank}: Unwrapping parameter {prefix}{param_name}.{param_name} with requires_grad={param.requires_grad}"
+                        f" Rank {rank}: Unwrapping parameter {prefix}{module_name}.{param_name} with requires_grad={param.requires_grad}"
                     )
 
                     else:
-                        unwrapped_state_dict[f"{prefix}{name}.{param_name}"] = param.to(
+                        unwrapped_state_dict[f"{prefix}{module_name}.{param_name}"] = param.to(
                             torch.device("cpu")
                         )
-                        required_grads[f"{prefix}{name}.{param_name}"] = param.requires_grad
+                        required_grads[f"{prefix}{module_name}.{param_name}"] = param.requires_grad
 
                         logger.info(
-                            f" Rank {rank}: Unwrapping parameter {prefix}{name}.{param_name} with requires_grad={param.requires_grad}"
+                            f" Rank {rank}: Unwrapping parameter {prefix}{module_name}.{param_name} with requires_grad={param.requires_grad}"
                         )
 
             else:
-                logger.debug(f" Rank {rank}: Skipping module {prefix}{name}")
+                logger.debug(f" Rank {rank}: Skipping module {prefix}{module_name}")
                 self.unwrap_layers(
-                    prefix=prefix + name + ".",
+                    prefix=prefix + module_name + ".",
                     module=child,
                     unwrapped_state_dict=unwrapped_state_dict,
                     required_grads=required_grads,

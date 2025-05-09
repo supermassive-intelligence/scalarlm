@@ -172,13 +172,9 @@ class TrainingLoop:
 
     def checkpoint(self):
         model = self.training_state.model_info["model"]
-        required_params = [name for name, param in model.named_parameters() if param.requires_grad]
-        logger.info(f"Original model required params: {required_params}")
         if hasattr(model, "unwrap_model"):
             logger.info("Unwrapping model")
             model = self.training_state.model_info["model"].unwrap_model()
-            required_params = [name for name, param in model.named_parameters() if param.requires_grad]
-            logger.info(f"Unwrapped model required params: {required_params}")
 
         self.save_checkpoint(model)
 
