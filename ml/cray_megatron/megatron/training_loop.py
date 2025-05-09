@@ -192,7 +192,6 @@ class TrainingLoop:
         checkpoint_name = f"checkpoint_{self.training_state.current_step}.pt"
 
         self.training_harness.checkpoint(
-            model=model,
             checkpoint_state=checkpoint,
             checkpoint_name=checkpoint_name,
         )

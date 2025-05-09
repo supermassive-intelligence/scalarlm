@@ -22,7 +22,7 @@ class TrainingHarness:
 
         save_status(current_status)
 
-    def checkpoint(self, model, checkpoint_state, checkpoint_name):
+    def checkpoint(self, checkpoint_state, checkpoint_name):
         job_config = get_job_config()
 
         checkpoint_path = os.path.join(job_config["job_directory"], checkpoint_name)

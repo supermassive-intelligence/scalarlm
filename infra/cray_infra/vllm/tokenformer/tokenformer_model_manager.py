@@ -72,15 +72,6 @@ class vLLMTokenformerSurgeon(TokenformerSurgeon):
         if not self._is_attn_layer(name):
             return
 
-        # logger.info(f"Wrapping layer {name} with vLLMTokenformerAttentionAdaptor")
-
-        # Wrap the layer with a TokenformerAttentionAdapter
-        # self._recursive_setattr(
-        #    self.model,
-        #    name,
-        #    vLLMTokenformerAttentionAdapter(layer, layer.head_dim, self.device),
-        # )
-
 
 class TokenformerModel(AdapterModel):
     """A tokenformer pre-trained model."""
@@ -103,7 +94,8 @@ class TokenformerModel(AdapterModel):
 
         tokenformers = {}
         state_dict = torch.load(checkpoint_file, map_location=device)
-        for module, tensor in state_dict.items():
+        module_state_dict = state_dict['model_state_dict']
+        for module, tensor in module_state_dict.items():
             if any(key in module for key in ("tokenformer", "lm_head")):
                 logger.info(f"Loading {module} from {checkpoint_file}")
                 tokenformers[module] = tensor.to(device)
