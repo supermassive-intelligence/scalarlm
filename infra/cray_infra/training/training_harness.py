@@ -63,9 +63,8 @@ class TrainingHarness:
             
             # Find all params with requires_grad in original model and make sure they exist in loaded_state
             required_params = [name for name, param in original_model.named_parameters() if param.requires_grad]
-            
-            assert len(required_params) > 0
             logger.info(f"required_params: {required_params}")
+            assert len(required_params) > 0
             
             for param_name in required_params:
                 if param_name not in loaded_model_state_dict:
@@ -93,9 +92,8 @@ class TrainingHarness:
             
             # Find all params with requires_grad in original model and make sure they exist in loaded_state
             required_params = [name for name, param in original_model.named_parameters() if param.requires_grad]
-            
-            assert len(required_params) > 0
             logger.info(f"required_params: {required_params}")
+            assert len(required_params) > 0
             
             # Compare parameters
             original_state = original_model.state_dict()
