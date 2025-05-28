@@ -9,4 +9,3 @@ spec:
     requests:
       storage: {{ .Values.jobs_pvc.size }}
   storageClassName: {{ .Values.jobs_pvc.storageClass }}
-  #wait_until_bound: false

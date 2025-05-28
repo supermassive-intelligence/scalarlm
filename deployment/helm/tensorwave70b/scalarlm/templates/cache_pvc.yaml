@@ -11,4 +11,3 @@ spec:
     requests:
       storage: {{ .Values.cache_pvc.size }}
   storageClassName: {{ .Values.cache_pvc.storageClass }}
-  #wait_until_bound: false
