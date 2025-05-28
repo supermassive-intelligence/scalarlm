@@ -13,7 +13,7 @@ def get_dataset(count):
 
 llm = scalarlm.SupermassiveIntelligence()
 
-dataset = get_dataset(count=1)
+dataset = get_dataset(count=10)
 
 results = llm.generate(
     prompts=dataset,

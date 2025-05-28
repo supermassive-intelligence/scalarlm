@@ -1,7 +1,12 @@
 services:
 
-    cray: &cray
-        command: /app/cray/scripts/start_one_server.sh
+    cray-api:
+        command: >
+            bash -c "
+                (echo 'server_list: api' > /app/cray/cray-config.yaml) &&
+                (echo 'vllm_api_url: \"http://scalarlm-cray-vllm-0-1:8001\"' >> /app/cray/cray-config.yaml) &&
+                /app/cray/scripts/start_one_server.sh
+            "
         build:
             context: .
             dockerfile: Dockerfile
@@ -10,6 +15,39 @@ services:
                 - VLLM_TARGET_DEVICE=${VLLM_TARGET_DEVICE}
         ports:
             - "8000:8000"
+        volumes:
+            - type: bind
+              source: ./models
+              target: /root/.cache/huggingface
+            - type: bind
+              source: ./infra/cray_infra
+              target: /app/cray/infra/cray_infra
+            - type: bind
+              source: ./scripts
+              target: /app/cray/scripts
+            - type: bind
+              source: ./ml
+              target: /app/cray/ml
+            - type: bind
+              source: ./test
+              target: /app/cray/test
+        networks:
+            - cray-network
+
+    cray-vllm-0:
+        command: >
+            bash -c "
+                (echo 'server_list: vllm' > /app/cray/cray-config.yaml) &&
+                (echo 'api_url: \"http://scalarlm-cray-api-1:8000\"' >> /app/cray/cray-config.yaml) &&
+                /app/cray/scripts/start_one_server.sh
+            "
+        build:
+            context: .
+            dockerfile: Dockerfile
+            args:
+                - BASE_NAME=${BASE_NAME}
+                - VLLM_TARGET_DEVICE=${VLLM_TARGET_DEVICE}
+        ports:
             - "8001:8001"
         volumes:
             - type: bind
@@ -31,23 +69,39 @@ services:
             - cray-network
 
 
-    cray-nvidia:
-        <<: *cray
-        runtime: nvidia
-        deploy:
-            resources:
-                reservations:
-                    devices:
-                        - driver: nvidia
-                          capabilities: [gpu]
-
-    cray-amd:
-        <<: *cray
-        devices:
-          - /dev/kfd
-          - /dev/dri
-        security_opt:
-          - seccomp:unconfined
+    cray-vllm-1:
+        command: >
+            bash -c "
+                (echo 'server_list: vllm' > /app/cray/cray-config.yaml) &&
+                (echo 'api_url: \"http://scalarlm-cray-api-1:8000\"' >> /app/cray/cray-config.yaml) &&
+                /app/cray/scripts/start_one_server.sh
+            "
+        build:
+            context: .
+            dockerfile: Dockerfile
+            args:
+                - BASE_NAME=${BASE_NAME}
+                - VLLM_TARGET_DEVICE=${VLLM_TARGET_DEVICE}
+        ports:
+            - "8002:8002"
+        volumes:
+            - type: bind
+              source: ./models
+              target: /root/.cache/huggingface
+            - type: bind
+              source: ./infra/cray_infra
+              target: /app/cray/infra/cray_infra
+            - type: bind
+              source: ./scripts
+              target: /app/cray/scripts
+            - type: bind
+              source: ./ml
+              target: /app/cray/ml
+            - type: bind
+              source: ./test
+              target: /app/cray/test
+        networks:
+            - cray-network
 
 
 networks:
