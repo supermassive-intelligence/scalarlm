@@ -1,6 +1,6 @@
 import scalarlm
 
-scalarlm.api_url = "http://localhost:8000"
+scalarlm.api_url = "http://localhost:8200"
 
 def get_dataset(count):
     dataset = []
@@ -13,7 +13,7 @@ def get_dataset(count):
 
 llm = scalarlm.SupermassiveIntelligence()
 
-dataset = get_dataset(count=1)
+dataset = get_dataset(count=10)
 
 results = llm.generate(
     prompts=dataset,
