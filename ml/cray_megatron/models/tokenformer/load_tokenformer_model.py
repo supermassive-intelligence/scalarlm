@@ -1,4 +1,8 @@
 import logging
+logging.basicConfig(level=logging.INFO)
+logging.getLogger('tokenformer').setLevel(logging.ERROR)
+logging.getLogger('tokenformer.llama_tokenformer_model').setLevel(logging.ERROR)
+logging.getLogger('tokenformer.tokenformer_surgeon').setLevel(logging.ERROR)
 
 from cray_megatron.huggingface.download_model import download_model
 from cray_megatron.megatron.distribution.apply_distribution_strategy import (
@@ -34,7 +38,6 @@ def load_tokenformer_model():
     
     return model_info
 
-
 def load_model_config():
     job_config = get_job_config()
 
@@ -57,13 +60,13 @@ def apply_tokenformer_adapter(model_info):
     return model_info
 
 
-
 def materialize_model(model_info):
     download_model(model_info["model_name"])
     model_info["model"] = AutoModelForCausalLM.from_pretrained(model_info["model_name"])
     model_info["model"] = create_llama_tokenformer_model(
         model_info["model"], model_info["distribution_strategy"]["device"]
     )
+
     config = get_config()
     config_dtype = config["dtype"]
     dtype = (
