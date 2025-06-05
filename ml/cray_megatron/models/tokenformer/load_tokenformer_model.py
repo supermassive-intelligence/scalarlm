@@ -1,3 +1,9 @@
+import logging
+logging.basicConfig(level=logging.INFO)
+logging.getLogger('tokenformer').setLevel(logging.ERROR)
+logging.getLogger('tokenformer.llama_tokenformer_model').setLevel(logging.ERROR)
+logging.getLogger('tokenformer.tokenformer_surgeon').setLevel(logging.ERROR)
+
 from cray_megatron.huggingface.download_model import download_model
 from cray_megatron.megatron.distribution.apply_distribution_strategy import (
     apply_distribution_strategy,
@@ -13,23 +19,24 @@ from transformers import AutoTokenizer
 from transformers import AutoModelForCausalLM
 
 import torch
-
-import logging
+import time
+import os
 
 logger = logging.getLogger(__name__)
 
 
 def load_tokenformer_model():
+    total_start = time.time()
+    
     model_info = load_model_config()
-
     model_info = apply_tokenformer_adapter(model_info)
-
     model_info = apply_distribution_strategy(model_info)
-
     model_info = materialize_model(model_info)
-
     model_info = load_checkpoint_weights_if_exist(model_info)
-
+    
+    total_time = time.time() - total_start
+    logger.info(f"🚀 Total model loading time: {total_time:.2f}s ({total_time/60:.1f} minutes)")  # Add this
+    
     return model_info
 
 
@@ -54,16 +61,10 @@ def load_model_config():
 def apply_tokenformer_adapter(model_info):
     return model_info
 
-
 def materialize_model(model_info):
     download_model(model_info["model_name"])
 
-    model_info["model"] = AutoModelForCausalLM.from_pretrained(model_info["model_name"])
-
-    model_info["model"] = create_llama_tokenformer_model(
-        model_info["model"], model_info["distribution_strategy"]["device"]
-    )
-
+    # Get dtype BEFORE loading model
     config = get_config()
     config_dtype = config["dtype"]
     dtype = (
@@ -71,10 +72,22 @@ def materialize_model(model_info):
         if config_dtype == "float16"
         else torch.float32 if config_dtype == "float32" else torch.bfloat16
     )
-    logger.info(f"Converting model to {dtype}...")
+    
+    # Load model with optimizations and correct dtype
+    model_info["model"] = AutoModelForCausalLM.from_pretrained(
+        model_info["model"],
+        torch_dtype=dtype,  # Load directly in target dtype
+        low_cpu_mem_usage=True,  # Critical for 70B model
+        cache_dir=os.path.expanduser("~/.cache/huggingface"),  # Explicit cache
+    )
 
-    model_info["model"] = model_info["model"].to(dtype=dtype)
-
+    # Apply tokenformer (logging already suppressed)
+    model_info["model"] = create_llama_tokenformer_model(
+        model_info["model"], model_info["distribution_strategy"]["device"]
+    )
+    
+    # No need for dtype conversion - already loaded in correct dtype
+    logger.info(f"Model loaded with dtype: {model_info['model'].dtype}")
 
     if (
         "distribution_strategy" in model_info
@@ -85,11 +98,9 @@ def materialize_model(model_info):
         )
 
     logger.info(f"Model: {model_info['model']}")
-
     model_info["model"].to(model_info["distribution_strategy"]["device"])
 
     return model_info
-
 
 def load_checkpoint_weights_if_exist(model_info):
     return model_info
