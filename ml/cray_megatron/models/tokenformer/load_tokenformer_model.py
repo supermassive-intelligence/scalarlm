@@ -19,12 +19,13 @@ from transformers import AutoTokenizer
 from transformers import AutoModelForCausalLM
 
 import torch
+import time
+import os
 
 logger = logging.getLogger(__name__)
 
 
 def load_tokenformer_model():
-    import time
     total_start = time.time()
     
     model_info = load_model_config()
@@ -37,6 +38,7 @@ def load_tokenformer_model():
     logger.info(f"🚀 Total model loading time: {total_time:.2f}s ({total_time/60:.1f} minutes)")  # Add this
     
     return model_info
+
 
 def load_model_config():
     job_config = get_job_config()
@@ -59,14 +61,10 @@ def load_model_config():
 def apply_tokenformer_adapter(model_info):
     return model_info
 
-
 def materialize_model(model_info):
     download_model(model_info["model_name"])
-    model_info["model"] = AutoModelForCausalLM.from_pretrained(model_info["model_name"])
-    model_info["model"] = create_llama_tokenformer_model(
-        model_info["model"], model_info["distribution_strategy"]["device"]
-    )
 
+    # Get dtype BEFORE loading model
     config = get_config()
     config_dtype = config["dtype"]
     dtype = (
@@ -74,8 +72,22 @@ def materialize_model(model_info):
         if config_dtype == "float16"
         else torch.float32 if config_dtype == "float32" else torch.bfloat16
     )
-    logger.info(f"Converting model to {dtype}...")
-    model_info["model"] = model_info["model"].to(dtype=dtype)
+    
+    # Load model with optimizations and correct dtype
+    model_info["model"] = AutoModelForCausalLM.from_pretrained(
+        model_info["model"],
+        torch_dtype=dtype,  # Load directly in target dtype
+        low_cpu_mem_usage=True,  # Critical for 70B model
+        cache_dir=os.path.expanduser("~/.cache/huggingface"),  # Explicit cache
+    )
+
+    # Apply tokenformer (logging already suppressed)
+    model_info["model"] = create_llama_tokenformer_model(
+        model_info["model"], model_info["distribution_strategy"]["device"]
+    )
+    
+    # No need for dtype conversion - already loaded in correct dtype
+    logger.info(f"Model loaded with dtype: {model_info['model'].dtype}")
 
     if (
         "distribution_strategy" in model_info
@@ -84,10 +96,11 @@ def materialize_model(model_info):
         model_info["model"] = model_info["distribution_strategy"]["strategy"](
             model_info["model"]
         )
+
     logger.info(f"Model: {model_info['model']}")
     model_info["model"].to(model_info["distribution_strategy"]["device"])
-    return model_info
 
+    return model_info
 
 def load_checkpoint_weights_if_exist(model_info):
     return model_info
