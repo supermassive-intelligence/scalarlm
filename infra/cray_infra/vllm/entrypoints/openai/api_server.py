@@ -223,7 +223,7 @@ async def async_generate_task(request, app):
 async def async_completion_task(request, app):
     completion_request = ChatCompletionRequest(
         model=request["model"],
-        message=request["prompt"],
+        message=request["prompt"], # convert_to_openai_format(request["prompt"])
         max_tokens=request["max_tokens"],
         temperature=0.0,
     )
@@ -233,7 +233,7 @@ async def async_completion_task(request, app):
         receive=pass_receive,
     )
 
-    response = await create_completion(completion_request, raw_request)
+    response = await create_chat_completion(completion_request, raw_request)
 
     response_data = json.loads(response.body.decode("utf-8"))
 
@@ -243,8 +243,8 @@ async def async_completion_task(request, app):
         "request_id": request["request_id"],
     }
 
-    if "choices" in response_data:
-        response["response"] = response_data["choices"][0]["text"]
+    if "content" in response_data:
+        response["response"] = response_data["content"][0]["text"]
     elif response_data["object"] == "error":
         response["error"] = response_data["message"]
 
@@ -807,6 +807,8 @@ async def run_server(args, running_status, **uvicorn_kwargs) -> None:
     # NB: Await server shutdown only after the backend context is exited
     await shutdown_task
 
+
+def convert_to_openai_format(prompt: )
 
 if __name__ == "__main__":
     # NOTE(simon):
