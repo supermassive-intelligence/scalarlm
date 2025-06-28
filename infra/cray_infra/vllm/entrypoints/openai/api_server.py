@@ -816,7 +816,7 @@ def convert_prompt_to_openai_format(prompt: PromptType) -> list[ChatCompletionMe
         return [{"role": "user", "content": prompt}]
     elif isinstance(prompt, dict):
         return [
-            {"role": 'user', 
+            {"role": 'user',
              "content": [convert_prompt_sub_field_to_openai_content_format(key, value) for key, value in prompt.items()]
             }
         ]
