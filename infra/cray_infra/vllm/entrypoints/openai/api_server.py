@@ -221,9 +221,9 @@ async def async_generate_task(request, app):
 
 
 async def async_completion_task(request, app):
-    completion_request = CompletionRequest(
+    completion_request = ChatCompletionRequest(
         model=request["model"],
-        prompt=request["prompt"],
+        message=request["prompt"],
         max_tokens=request["max_tokens"],
         temperature=0.0,
     )
