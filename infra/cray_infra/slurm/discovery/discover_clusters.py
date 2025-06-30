@@ -1,21 +1,65 @@
-import socket
-import os
+from cray_infra.util.get_config import get_config
+
 import torch
 
-from cray_infra.util.get_config import get_config
+import subprocess
+import time
+import socket
+import os
+import json
+
+import logging
+
+logger = logging.getLogger(__name__)
 
 slurm_config_path = "/app/cray/infra/slurm_configs/slurm.conf"
 gres_config_path = "/app/cray/infra/slurm_configs/gres.conf"
+cluster_info_path = "/app/cray/infra/slurm_configs/cluster_info.json"
+node_config_directory = "/app/cray/infra/slurm_configs/nodes"
+
+
+def main():
+    setup_logging()
+    discover_clusters()
 
 
 def discover_clusters():
+
+    clean_old_node_info()
+
     node_info = get_node_info()
 
     save_node_info(node_info)
 
     cluster_info = get_cluster_info(node_info)
 
-    save_cluster_info(cluster_info)
+    if is_controller(node_info, cluster_info["controller_info"]):
+        save_cluster_info(cluster_info)
+        reload_slurm_configs()
+
+
+def setup_logging():
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+    logger.info("Logging setup complete.")
+
+
+def clean_old_node_info():
+    config = get_config()
+
+    time_limit = config["node_info_time_limit"]
+
+    current_time = time.time()
+
+    for filename in os.listdir(node_config_directory):
+        file_path = os.path.join(node_config_directory, filename)
+        if os.path.isfile(file_path):
+            file_mtime = os.path.getmtime(file_path)
+            if current_time - file_mtime > time_limit:
+                logging.debug(f"Removing old node info file: {file_path}")
+                os.remove(file_path)
 
 
 def get_node_info():
@@ -42,20 +86,90 @@ def get_gpu_count():
 
 
 def save_node_info(node_info):
-    pass
+    node_config_path = os.path.join(
+        node_config_directory, f"{node_info['hostname']}.json"
+    )
+
+    os.makedirs(node_config_directory, exist_ok=True)
+
+    with open(node_config_path, "w") as f:
+        json.dump(node_info, f, indent=4)
 
 
 def get_cluster_info(node_info):
+
+    all_nodes = load_all_nodes()
+
+    controller_info = elect_controller(all_nodes)
+
     return {
-        "controller_info": node_info,
-        "all_nodes": [node_info],
-        "partitions": [{"name": "short", "nodes": [node_info]}],
+        "controller_info": controller_info,
+        "all_nodes": all_nodes,
+        "partitions": [{"name": "short", "nodes": all_nodes}],
     }
 
 
+def load_all_nodes():
+    all_nodes = []
+    for filename in os.listdir(node_config_directory):
+        if filename.endswith(".json"):
+            file_path = os.path.join(node_config_directory, filename)
+            with open(file_path, "r") as f:
+                node_info = json.load(f)
+                all_nodes.append(node_info)
+    return all_nodes
+
+
+def elect_controller(all_nodes):
+    """
+    Elects the controller node based on the lowest GPU count.
+    If multiple nodes have the same CPU count, alphabetical order of hostname is used.
+    """
+    if not all_nodes:
+        raise ValueError("No nodes found in the cluster.")
+
+    # Sort nodes by GPU count (ascending) and hostname (alphabetical)
+    all_nodes.sort(key=lambda x: (x["gpu_count"], x["hostname"]))
+
+    # The first node in the sorted list is the controller
+    controller_node = all_nodes[0]
+
+    logger.info(
+        f"Controller node elected: {controller_node['hostname']} with {controller_node['gpu_count']} GPUs"
+    )
+
+    return controller_node
+
+
+def is_controller(node_info, controller_info):
+    is_controller = node_info["hostname"] == controller_info["hostname"]
+    return is_controller
+
+
 def save_cluster_info(cluster_info):
+    old_cluster_info = load_cluster_info_file()
+
+    if old_cluster_info:
+        if old_cluster_info == cluster_info:
+            logger.info("Cluster info is unchanged, skipping write.")
+            return
+
     write_slurm_config(cluster_info)
     write_gres_config(cluster_info)
+    write_cluster_info_file(cluster_info)
+
+
+def load_cluster_info_file():
+    if not os.path.exists(cluster_info_path):
+        return None
+
+    with open(cluster_info_path, "r") as f:
+        try:
+            cluster_info = json.load(f)
+            return cluster_info
+        except json.JSONDecodeError as e:
+            logger.error(f"Error decoding JSON from {cluster_info_path}: {e}")
+            return None
 
 
 def write_slurm_config(cluster_info):
@@ -183,4 +297,19 @@ def get_gpu_indexes():
     return indexes
 
 
-discover_clusters()
+def write_cluster_info_file(cluster_info):
+    with open(cluster_info_path, "w") as f:
+        json.dump(cluster_info, f, indent=4)
+    logger.info(f"Cluster info saved to {cluster_info_path}")
+
+
+def reload_slurm_configs():
+    try:
+        subprocess.run(["scontrol", "reconfigure"], check=True)
+        logger.info("Slurm configurations reloaded successfully.")
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Failed to reload Slurm configurations: {e}")
+
+
+if __name__ == "__main__":
+    main()
