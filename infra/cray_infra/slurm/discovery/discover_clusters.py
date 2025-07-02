@@ -2,6 +2,8 @@ from cray_infra.util.get_config import get_config
 
 import torch
 
+from atomicwrites import atomic_write
+
 import subprocess
 import time
 import socket
@@ -13,9 +15,13 @@ import logging
 logger = logging.getLogger(__name__)
 
 slurm_config_path = "/app/cray/infra/slurm_configs/slurm.conf"
-gres_config_path = "/app/cray/infra/slurm_configs/gres.conf"
 cluster_info_path = "/app/cray/infra/slurm_configs/cluster_info.json"
-node_config_directory = "/app/cray/infra/slurm_configs/nodes"
+cgroup_config_path = "/app/cray/infra/slurm_configs/cgroup.conf"
+
+shared_slurm_config_path = "/app/cray/nfs/slurm.conf"
+shared_gres_config_path = "/app/cray/nfs/gres.conf"
+shared_cgroup_config_path = "/app/cray/nfs/cgroup.conf"
+shared_node_config_directory = "/app/cray/nfs/nodes"
 
 
 def main():
@@ -33,9 +39,8 @@ def discover_clusters():
 
     cluster_info = get_cluster_info(node_info)
 
-    if is_controller(node_info, cluster_info["controller_info"]):
-        save_cluster_info(cluster_info)
-        reload_slurm_configs()
+    save_cluster_info(cluster_info)
+    reload_slurm_configs()
 
 
 def setup_logging():
@@ -53,8 +58,11 @@ def clean_old_node_info():
 
     current_time = time.time()
 
-    for filename in os.listdir(node_config_directory):
-        file_path = os.path.join(node_config_directory, filename)
+    if not os.path.exists(shared_node_config_directory):
+        return
+
+    for filename in os.listdir(shared_node_config_directory):
+        file_path = os.path.join(shared_node_config_directory, filename)
         if os.path.isfile(file_path):
             file_mtime = os.path.getmtime(file_path)
             if current_time - file_mtime > time_limit:
@@ -67,7 +75,7 @@ def get_node_info():
     cpu_count = get_cpu_count()
     gpu_count = get_gpu_count()
 
-    return {"hostname": hostname, "cpu_count": cpu_count, "gpu_count": gpu_count}
+    return {"hostname": hostname, "cpu_count": cpu_count, "gpu_count": gpu_count, "gpu_type" : get_gpu_type(), "gpu_indexes" : get_gpu_indexes() }
 
 
 def get_hostname():
@@ -87,10 +95,10 @@ def get_gpu_count():
 
 def save_node_info(node_info):
     node_config_path = os.path.join(
-        node_config_directory, f"{node_info['hostname']}.json"
+        shared_node_config_directory, f"{node_info['hostname']}.json"
     )
 
-    os.makedirs(node_config_directory, exist_ok=True)
+    os.makedirs(shared_node_config_directory, exist_ok=True)
 
     with open(node_config_path, "w") as f:
         json.dump(node_info, f, indent=4)
@@ -111,9 +119,9 @@ def get_cluster_info(node_info):
 
 def load_all_nodes():
     all_nodes = []
-    for filename in os.listdir(node_config_directory):
+    for filename in os.listdir(shared_node_config_directory):
         if filename.endswith(".json"):
-            file_path = os.path.join(node_config_directory, filename)
+            file_path = os.path.join(shared_node_config_directory, filename)
             with open(file_path, "r") as f:
                 node_info = json.load(f)
                 all_nodes.append(node_info)
@@ -156,6 +164,7 @@ def save_cluster_info(cluster_info):
 
     write_slurm_config(cluster_info)
     write_gres_config(cluster_info)
+    write_cgroup_config(cluster_info)
     write_cluster_info_file(cluster_info)
 
 
@@ -179,19 +188,23 @@ def write_slurm_config(cluster_info):
 
     slurm_conf_values["SlurmctldHost"] = node_info["hostname"]
 
-    if node_info["gpu_count"] > 0:
+    if has_any_gpus(cluster_info):
         slurm_conf_values["GresTypes"] = "gpu"
     else:
         if "GresTypes" in slurm_conf_values:
             del slurm_conf_values["GresTypes"]
 
-    save_slurm_conf_values(slurm_conf_values)
+    new_config = save_slurm_conf_values(slurm_conf_values)
 
     for node in cluster_info["all_nodes"]:
-        write_node_config(node)
+        new_config += write_node_config(node)
 
     for partition in cluster_info["partitions"]:
-        write_partition_config(partition)
+        new_config += write_partition_config(partition)
+
+    with atomic_write(shared_slurm_config_path, overwrite=True) as f:
+        f.write(new_config)
+
 
 
 def load_slurm_conf_values():
@@ -215,12 +228,20 @@ def load_slurm_conf_values():
             slurm_conf_values[key] = value.strip()
     return slurm_conf_values
 
+def has_any_gpus(cluster_info):
+    for node in cluster_info["all_nodes"]:
+        if node["gpu_count"] > 0:
+            return True
+    return False
+
 
 def save_slurm_conf_values(slurm_conf_values):
-    with open(slurm_config_path, "w") as f:
+    config = ""
+    with open(shared_slurm_config_path, "w") as f:
         for key, value in slurm_conf_values.items():
-            f.write(f"{key}={value}\n")
+            config += f"{key}={value}\n"
 
+    return config
 
 def write_node_config(node):
     """
@@ -228,8 +249,7 @@ def write_node_config(node):
     """
     gres_string = f"Gres=gpu:{node['gpu_count']}" if node["gpu_count"] > 0 else ""
     node_config = f"NodeName={node['hostname']} CPUs={node['cpu_count']} {gres_string} State=UNKNOWN"
-    with open(slurm_config_path, "a") as f:
-        f.write(node_config + "\n")
+    return node_config + "\n"
 
 
 def write_partition_config(partition):
@@ -245,21 +265,18 @@ def write_partition_config(partition):
 
     node_names = ",".join([node["hostname"] for node in partition["nodes"]])
     partition_config = f"PartitionName={partition['name']} Nodes={node_names} Default=YES MaxTime={max_training_time} State=UP"
-    with open(slurm_config_path, "a") as f:
-        f.write(partition_config + "\n")
+
+    return partition_config + "\n"
 
 
 def write_gres_config(cluster_info):
     """
     NodeName=41ad10a2cba0 Name=gpu File=/dev/nvidia0
     """
-    # Clear the file
-    open(gres_config_path, "w").close()
-
+    gres_config = ""
     for node in cluster_info["all_nodes"]:
-        gres_config = ""
-        for index in get_gpu_indexes():
-            if torch.version.hip:
+        for index in node["gpu_indexes"]:
+            if node["gpu_type"] == "amd":
                 gres_config += (
                     f"NodeName={node['hostname']} Name=gpu File=/dev/dri/card{index}\n"
                 )
@@ -268,8 +285,13 @@ def write_gres_config(cluster_info):
                     f"NodeName={node['hostname']} Name=gpu File=/dev/nvidia{index}\n"
                 )
 
-        with open(gres_config_path, "a") as f:
-            f.write(gres_config)
+    with atomic_write(shared_gres_config_path, overwrite=True) as f:
+        f.write(gres_config)
+
+def write_cgroup_config(cluster_info):
+    with open(cgroup_config_path) as config:
+        with atomic_write(shared_cgroup_config_path, overwrite=True) as shared_config:
+            shared_config.write(config.read())
 
 
 def get_gpu_indexes():
@@ -283,18 +305,27 @@ def get_gpu_indexes():
 
     indexes = []
 
-    for file in os.listdir(prefix):
-        if file.startswith(card_name):
-            try:
-                index_str = file[len(card_name) :]
-                if index_str.isdigit():
-                    print(file[len(card_name) :])
-                    index_as_int = int(file[len(card_name) :])
-                    indexes.append(index_as_int)
-            except Exception as e:
-                continue
+    if os.path.exists(prefix):
+        for file in os.listdir(prefix):
+            if file.startswith(card_name):
+                try:
+                    index_str = file[len(card_name) :]
+                    if index_str.isdigit():
+                        print(file[len(card_name) :])
+                        index_as_int = int(file[len(card_name) :])
+                        indexes.append(index_as_int)
+                except Exception as e:
+                    continue
 
     return indexes
+
+def get_gpu_type():
+    if torch.version.hip:
+        return "amd"
+    else:
+        return "nvidia"
+
+    return "none"
 
 
 def write_cluster_info_file(cluster_info):

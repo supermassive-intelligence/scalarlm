@@ -9,6 +9,10 @@ spec:
       targetPort: 8000
       protocol: TCP
       name: http
+    - port: 6817
+      targetPort: 6817
+      protocol: TCP
+      name: slurmctld
   externalIPs:
     - {{ .Values.service.externalIP }}
   selector:

@@ -16,6 +16,16 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
     {{- end }}
+      hostname: {{ include "scalarlm.fullname" . }}
+      dnsConfig:
+        searches:
+          - {{ include "scalarlm.megatronname" . }}-headless.scalarlm.svc.cluster.local
+          - "scalarlm.svc.cluster.local"
+          - "svc.cluster.local"
+          - "cluster.local"
+        options:
+          - name: ndots
+            value: "1"
       containers:
         - name: {{ .Chart.Name }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
@@ -39,7 +49,7 @@ spec:
             - name: scalarlm-cache
               mountPath: /root/.cache/huggingface
             - name: scalarlm-slurm-config
-              mountPath: /app/cray/infra/slurm_configs
+              mountPath: /app/cray/nfs
       volumes:
         - name: scalarlm-jobs
           persistentVolumeClaim:
