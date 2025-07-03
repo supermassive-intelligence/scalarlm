@@ -4,7 +4,7 @@ ARG BASE_NAME=cpu
 # NVIDIA BASE IMAGE
 FROM nvcr.io/nvidia/pytorch:24.07-py3 AS nvidia
 
-RUN apt-get update -y && apt-get install -y python3-venv
+RUN apt-get update -y && apt-get install -y python3-venv slurm-wlm libslurm-dev
 
 ENV VIRTUAL_ENV=/app/.venv
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
@@ -40,7 +40,7 @@ FROM ubuntu:24.04 AS cpu
 RUN --mount=type=cache,target=/var/cache/apt \
     apt-get update -y \
     && apt-get install -y python3 python3-pip python3-venv \
-    openmpi-bin libopenmpi-dev libpmix-dev
+    openmpi-bin libopenmpi-dev libpmix-dev slurm-wlm libslurm-dev
 
 ENV VIRTUAL_ENV=/app/.venv
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
