@@ -246,7 +246,7 @@ async def async_completion_task(request, app):
     }
 
     if "choices" in response_data:
-        response["response"] = response_data["choices"][0]["content"]
+        response["response"] = response_data["choices"][0]["message"]["content"]
     elif response_data["object"] == "error":
         response["error"] = response_data["message"]
 
