@@ -2,7 +2,7 @@ ARG BASE_NAME=cpu
 
 ###############################################################################
 # NVIDIA BASE IMAGE
-FROM nvcr.io/nvidia/pytorch:24.07-py3 AS nvidia
+FROM nvcr.io/nvidia/pytorch:25.06-py3 AS nvidia
 
 RUN apt-get update -y && apt-get install -y python3-venv slurm-wlm libslurm-dev
 
@@ -17,14 +17,24 @@ ARG MAX_JOBS=8
 ENV PATH=$PATH:/opt/hpcx/ompi/bin
 ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/hpcx/ompi/lib
 
-ARG TORCH_VERSION="2.4.0"
-ARG TORCH_CUDA_ARCH_LIST="8.0"
+# Use the NVIDIA PyTorch version (already 2.8.0-based) from the base image
+ARG TORCH_VERSION="2.8.0-nv25.6"
+
+# Set Blackwell architecture for compilation - 10.0 for Blackwell
+ENV TORCH_CUDA_ARCH_LIST="10.0"
+ARG TORCH_CUDA_ARCH_LIST="10.0"
+
+# Set up CUDA environment for Blackwell compilation
+ENV CUDA_HOME="/usr/local/cuda"
+ENV CUDA_CUDA_LIBRARY="/usr/local/cuda/lib64/stubs/libcuda.so"
+ENV LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH}"
 
 RUN pip install uv
-
-RUN git clone --branch v0.0.28.post1 https://github.com/facebookresearch/xformers.git
 RUN uv pip install ninja
-RUN cd xformers && \
+
+# Compile xformers with Blackwell support
+RUN git clone --branch v0.0.28.post1 https://github.com/facebookresearch/xformers.git && \
+    cd xformers && \
     git submodule update --init --recursive && \
     TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} pip install . --no-deps
 
@@ -48,7 +58,6 @@ RUN python3 -m venv $VIRTUAL_ENV
 RUN . $VIRTUAL_ENV/bin/activate
 
 ARG MAX_JOBS=4
-#ENV DNNL_DEFAULT_FPMATH_MODE=F32
 
 ARG TORCH_VERSION="2.4.0"
 
@@ -107,14 +116,16 @@ COPY ./infra/requirements-vllm.txt ${INSTALL_ROOT}/infra/cray_infra/requirements
 WORKDIR ${INSTALL_ROOT}/infra/cray_infra
 
 ARG VLLM_TARGET_DEVICE=cpu
-ARG TORCH_CUDA_ARCH_LIST="8.0"
 
-# Build vllm python package
+# Fix missing CUDA library by creating symbolic link
+RUN ln -sf /usr/local/cuda/lib64/stubs/libcuda.so /usr/local/cuda/lib64/libcuda.so
+
+# Build vllm python package with Blackwell support for NVIDIA builds
 RUN \
     --mount=type=cache,target=/root/.cache/pip \
     --mount=type=cache,target=/root/.cache/ccache \
     MAX_JOBS=${MAX_JOBS} \
-    TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} \
+    TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST:-"8.0"} \
     VLLM_TARGET_DEVICE=${VLLM_TARGET_DEVICE} \
     python ${INSTALL_ROOT}/infra/cray_infra/setup.py bdist_wheel && \
     pip install ${INSTALL_ROOT}/infra/cray_infra/dist/*.whl && \
