@@ -32,7 +32,7 @@ class Config(BaseModel):
 
     gpu_memory_utilization: float = 0.50
     max_model_length: int = 8192
-    dtype: str = "float32"
+    dtype: str = "bfloat16"# "float32"
 
     max_log_length: int = 100
 
