@@ -21,8 +21,10 @@ ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/hpcx/ompi/lib
 ARG TORCH_VERSION="2.8.0-nv25.6"
 
 # Set Blackwell architecture for compilation - 10.0 for Blackwell
-ENV TORCH_CUDA_ARCH_LIST="10.0"
-ARG TORCH_CUDA_ARCH_LIST="10.0"
+ENV TORCH_CUDA_ARCH_LIST="12.0"
+ARG TORCH_CUDA_ARCH_LIST="12.0"
+# Force vLLM to use XFormers instead of FlashAttention for Blackwell compatibility
+ENV VLLM_ATTENTION_BACKEND=TORCH_SPDA
 
 # Set up CUDA environment for Blackwell compilation
 ENV CUDA_HOME="/usr/local/cuda"
@@ -37,6 +39,9 @@ RUN git clone --branch v0.0.28.post1 https://github.com/facebookresearch/xformer
     cd xformers && \
     git submodule update --init --recursive && \
     TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} pip install . --no-deps
+
+# Disable FlashAttention for Blackwell compatibility
+ENV VLLM_ATTENTION_BACKEND=XFORMERS
 
 ARG INSTALL_ROOT=/app/cray
 WORKDIR ${INSTALL_ROOT}
