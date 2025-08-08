@@ -413,7 +413,7 @@ def convert_prompt_sub_field_to_openai_content_format(key: str, value: str) -> d
     if key == "text":
         return {"type": "text", "text": value}
     elif key == "image":
-        return {"type": "image_url", "image_url": {"url": value}}
+        return [{"type": "image_url", "image_url": {"url": image}} for image in value]
     else:
         raise ValueError(f"Invalid prompt sub-field: {key}. Must be 'text' or 'image'.")
 
