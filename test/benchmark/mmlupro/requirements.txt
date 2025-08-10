@@ -1,0 +1,31 @@
+# MMLU-Pro Benchmark Requirements
+
+# Core dependencies
+torch>=2.0.0
+transformers>=4.30.0
+datasets>=2.14.0
+accelerate>=0.20.0
+
+# Data processing
+numpy>=1.24.0
+pandas>=2.0.0
+tqdm>=4.65.0
+
+# Utilities
+pyyaml>=6.0
+jsonlines>=3.1.0
+tabulate>=0.9.0
+
+# For faster inference (optional)
+# vllm>=0.2.0  # Uncomment if using vLLM
+
+# Logging and visualization
+matplotlib>=3.7.0
+seaborn>=0.12.0
+wandb>=0.15.0  # Optional: for experiment tracking
+
+# Testing
+pytest>=7.3.0
+pytest-cov>=4.1.0
+
+aiofiles
