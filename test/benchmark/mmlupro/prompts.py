@@ -1,14 +1,13 @@
 """
-Prompt templates and formatting for MMLU-Pro evaluation
+Prompt templates and formatting for MMLU-Pro evaluation (Refactored)
 """
 
 from typing import List, Optional, Dict, Any
-from dataclasses import dataclass
-import re
 from abc import ABC, abstractmethod
 
 from dataset import MMLUProQuestion
 from config import PromptStyle, EvaluationMode
+from utils import AnswerExtractor, format_choices_with_letters
 
 
 class BasePromptTemplate(ABC):
@@ -31,8 +30,8 @@ class StandardPromptTemplate(BasePromptTemplate):
     
     def __init__(self, config):
         self.config = config
-        self.cot_trigger = config.cot_trigger
-        self.answer_pattern = re.compile(config.extract_answer_pattern, re.IGNORECASE)
+        self.cot_trigger = config.evaluation.cot_trigger
+        self.answer_extractor = AnswerExtractor(config.evaluation.extract_answer_pattern)
     
     def format_question(self, question: MMLUProQuestion, 
                        examples: Optional[List[MMLUProQuestion]] = None) -> str:
@@ -53,7 +52,7 @@ class StandardPromptTemplate(BasePromptTemplate):
         prompt_parts.append(self._format_single_example(question, include_answer=False))
         
         # Add CoT trigger if needed
-        if self.config.evaluation_mode == EvaluationMode.COT:
+        if self.config.evaluation.evaluation_mode == EvaluationMode.COT:
             prompt_parts.append(f"\n{self.cot_trigger}")
             prompt_parts.append("\nProvide your reasoning step by step, then give your final answer in the format: 'The answer is (X)' where X is the letter of the correct option.")
         else:
@@ -68,12 +67,11 @@ class StandardPromptTemplate(BasePromptTemplate):
         lines.append("\nOptions:")
         
         # Format choices with letters A-J
-        for idx, choice in enumerate(question.choices):
-            letter = chr(ord('A') + idx)
-            lines.append(f"{letter}. {choice}")
+        formatted_choices = format_choices_with_letters(question.choices)
+        lines.extend(formatted_choices)
         
         if include_answer:
-            if self.config.evaluation_mode == EvaluationMode.COT and question.explanation:
+            if self.config.evaluation.evaluation_mode == EvaluationMode.COT and question.explanation:
                 lines.append(f"\nReasoning: {question.explanation}")
             lines.append(f"\nAnswer: The answer is ({question.correct_answer})")
         
@@ -81,25 +79,7 @@ class StandardPromptTemplate(BasePromptTemplate):
     
     def extract_answer(self, response: str) -> Optional[str]:
         """Extract answer letter from response"""
-        # Try to find pattern like "The answer is (X)" or "The answer is X"
-        match = self.answer_pattern.search(response)
-        if match:
-            answer = match.group(1).upper()
-            if answer in 'ABCDEFGHIJ':
-                return answer
-        
-        # Fallback: Look for standalone letter at the end
-        lines = response.strip().split('\n')
-        for line in reversed(lines):
-            line = line.strip()
-            # Check if line is just a single letter
-            if len(line) == 1 and line in 'ABCDEFGHIJ':
-                return line
-            # Check if line starts with a letter followed by period or parenthesis
-            if len(line) >= 2 and line[0] in 'ABCDEFGHIJ' and line[1] in '.):':
-                return line[0]
-        
-        return None
+        return self.answer_extractor.extract_letter(response)
 
 
 class InstructionPromptTemplate(BasePromptTemplate):
@@ -107,7 +87,7 @@ class InstructionPromptTemplate(BasePromptTemplate):
     
     def __init__(self, config):
         self.config = config
-        self.answer_pattern = re.compile(config.extract_answer_pattern, re.IGNORECASE)
+        self.answer_extractor = AnswerExtractor(config.evaluation.extract_answer_pattern)
     
     def format_question(self, question: MMLUProQuestion, 
                        examples: Optional[List[MMLUProQuestion]] = None) -> str:
@@ -115,7 +95,7 @@ class InstructionPromptTemplate(BasePromptTemplate):
         instruction = "<|begin_of_text|><|start_header_id|>system<|end_header_id|>"
         instruction += f"You are solving multiple-choice questions in {question.subject}. "
         
-        if self.config.evaluation_mode == EvaluationMode.COT:
+        if self.config.evaluation.evaluation_mode == EvaluationMode.COT:
             instruction += "Think through the problem step by step, then provide your final answer."
         else:
             instruction += "Select the best answer from the given options."
@@ -129,14 +109,13 @@ class InstructionPromptTemplate(BasePromptTemplate):
                 prompt_parts.append(self._format_example(ex, include_answer=True))
                 prompt_parts.append("")
         
-        
         prompt_parts.append("<|eot_id|><|start_header_id|>user<|end_header_id|>")
 
         # Add the actual question
         prompt_parts.append("Question to solve:")
         prompt_parts.append(self._format_example(question, include_answer=False))
         
-        if self.config.evaluation_mode == EvaluationMode.COT:
+        if self.config.evaluation.evaluation_mode == EvaluationMode.COT:
             prompt_parts.append("\nSolution:")
         else:
             prompt_parts.append("\nAnswer:")
@@ -149,12 +128,12 @@ class InstructionPromptTemplate(BasePromptTemplate):
         """Format a single example"""
         lines = [question.question, "\nChoices:"]
         
-        for idx, choice in enumerate(question.choices):
-            letter = chr(ord('A') + idx)
-            lines.append(f"  {letter}) {choice}")
+        formatted_choices = format_choices_with_letters(question.choices)
+        for choice in formatted_choices:
+            lines.append(f"  {choice.replace('.', ')')}")
         
         if include_answer:
-            if self.config.evaluation_mode == EvaluationMode.COT and question.explanation:
+            if self.config.evaluation.evaluation_mode == EvaluationMode.COT and question.explanation:
                 lines.append(f"\nSolution: {question.explanation}")
             lines.append(f"Final Answer: {question.correct_answer}")
         
@@ -162,26 +141,9 @@ class InstructionPromptTemplate(BasePromptTemplate):
     
     def extract_answer(self, response: str) -> Optional[str]:
         """Extract answer from instruction response"""
-        # Similar to standard template
-        match = self.answer_pattern.search(response)
-        if match:
-            answer = match.group(1).upper()
-            if answer in 'ABCDEFGHIJ':
-                return answer
-        
-        # Look for "Final Answer: X" pattern
-        final_answer_pattern = r"[Ff]inal [Aa]nswer:?\s*\(?([A-J])\)?"
-        match = re.search(final_answer_pattern, response)
-        if match:
-            return match.group(1).upper()
-        
-        # Fallback to looking for isolated letter
-        for line in response.strip().split('\n'):
-            line = line.strip()
-            if len(line) == 1 and line.upper() in 'ABCDEFGHIJ':
-                return line.upper()
-        
-        return None
+        # Try additional patterns specific to instruction format
+        additional_patterns = [r"[Ff]inal [Aa]nswer:?\s*\(?([A-J])\)?"]
+        return self.answer_extractor.extract_letter(response, additional_patterns)
 
 
 class ChatPromptTemplate(BasePromptTemplate):
@@ -189,12 +151,12 @@ class ChatPromptTemplate(BasePromptTemplate):
     
     def __init__(self, config):
         self.config = config
-        self.system_prompt = config.system_prompt or self._default_system_prompt()
-        self.answer_pattern = re.compile(config.extract_answer_pattern, re.IGNORECASE)
+        self.system_prompt = config.advanced.system_prompt or self._default_system_prompt()
+        self.answer_extractor = AnswerExtractor(config.evaluation.extract_answer_pattern)
     
     def _default_system_prompt(self) -> str:
         """Default system prompt for chat format"""
-        if self.config.evaluation_mode == EvaluationMode.COT:
+        if self.config.evaluation.evaluation_mode == EvaluationMode.COT:
             return (
                 "You are an expert problem solver. When presented with multiple-choice questions, "
                 "think through the problem step by step, showing your reasoning clearly. "
@@ -220,7 +182,7 @@ class ChatPromptTemplate(BasePromptTemplate):
                 messages.append({"role": "user", "content": user_msg})
                 
                 # Assistant provides answer
-                if self.config.evaluation_mode == EvaluationMode.COT and ex.explanation:
+                if self.config.evaluation.evaluation_mode == EvaluationMode.COT and ex.explanation:
                     assistant_msg = f"{ex.explanation}\n\nThe answer is ({ex.correct_answer})"
                 else:
                     assistant_msg = f"The answer is ({ex.correct_answer})"
@@ -236,28 +198,22 @@ class ChatPromptTemplate(BasePromptTemplate):
         """Format just the question and choices"""
         lines = [f"Subject: {question.subject}", f"\n{question.question}", "\nOptions:"]
         
-        for idx, choice in enumerate(question.choices):
-            letter = chr(ord('A') + idx)
-            lines.append(f"{letter}. {choice}")
+        formatted_choices = format_choices_with_letters(question.choices)
+        lines.extend(formatted_choices)
         
         return "\n".join(lines)
     
     def extract_answer(self, response: str) -> Optional[str]:
         """Extract answer from chat response"""
-        # Same extraction logic as other templates
-        match = self.answer_pattern.search(response)
-        if match:
-            answer = match.group(1).upper()
-            if answer in 'ABCDEFGHIJ':
-                return answer
-        
-        # Fallback
-        for line in response.strip().split('\n'):
-            line = line.strip()
-            if len(line) == 1 and line.upper() in 'ABCDEFGHIJ':
-                return line.upper()
-        
-        return None
+        return self.answer_extractor.extract_letter(response)
+
+
+# Template registry for simple selection
+TEMPLATES = {
+    PromptStyle.STANDARD: StandardPromptTemplate,
+    PromptStyle.INSTRUCTION: InstructionPromptTemplate,
+    PromptStyle.CHAT: ChatPromptTemplate
+}
 
 
 class PromptFormatter:
@@ -269,14 +225,10 @@ class PromptFormatter:
     
     def _get_template(self) -> BasePromptTemplate:
         """Get appropriate template based on config"""
-        if self.config.prompt_style == PromptStyle.STANDARD:
-            return StandardPromptTemplate(self.config)
-        elif self.config.prompt_style == PromptStyle.INSTRUCTION:
-            return InstructionPromptTemplate(self.config)
-        elif self.config.prompt_style == PromptStyle.CHAT:
-            return ChatPromptTemplate(self.config)
-        else:
-            raise ValueError(f"Unknown prompt style: {self.config.prompt_style}")
+        template_class = TEMPLATES.get(self.config.evaluation.prompt_style)
+        if template_class is None:
+            raise ValueError(f"Unknown prompt style: {self.config.evaluation.prompt_style}")
+        return template_class(self.config)
     
     def format_question(self, question: MMLUProQuestion, 
                        examples: Optional[List[MMLUProQuestion]] = None) -> Any:

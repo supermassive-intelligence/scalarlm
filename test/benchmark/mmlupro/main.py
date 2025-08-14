@@ -9,8 +9,9 @@ import json
 import sys
 from pathlib import Path
 
-from config import MMLUProConfig, EvaluationMode, PromptStyle, ALL_SUBJECTS, MMLU_PRO_SUBJECTS
+from config import MMLUProConfig, ScalarLMConfig, DatasetConfig, EvaluationConfig, GenerationConfig, OutputConfig, AdvancedConfig, EvaluationMode, PromptStyle, ALL_SUBJECTS, MMLU_PRO_SUBJECTS
 from evaluator import MMLUProEvaluator
+from utils import ConfigError
 
 # Setup logging
 logging.basicConfig(
@@ -157,60 +158,65 @@ def parse_args():
 
 
 def load_config(args) -> MMLUProConfig:
-    """Load configuration from args or file"""
+    """Load configuration from args or file with new structure"""
     
     # Start with config file if provided
     if args.config_file:
-        with open(args.config_file, 'r') as f:
-            config_dict = json.load(f)
-        config = MMLUProConfig.from_dict(config_dict)
-        logger.info(f"Loaded config from {args.config_file}")
+        try:
+            with open(args.config_file, 'r') as f:
+                config_dict = json.load(f)
+            config = MMLUProConfig.from_dict(config_dict)
+            logger.info(f"Loaded config from {args.config_file}")
+        except Exception as e:
+            raise ConfigError(f"Failed to load config file {args.config_file}: {e}")
     else:
+        # Create with new grouped structure
         config = MMLUProConfig()
     
-    # ScalarLM configuration
-    config.api_url = args.api_url
-    
     # Override with command line arguments
+    # ScalarLM configuration
+    if args.api_url:
+        config.scalarlm.api_url = args.api_url
     if args.model_name:
-        config.model_name = args.model_name
-
+        config.scalarlm.model_name = args.model_name
+    
     # Dataset configuration
     if args.subjects:
-        config.subjects = args.subjects
+        config.dataset.subjects = args.subjects
     elif args.domains:
         # Convert domains to subjects
         subjects = []
         for domain in args.domains:
             subjects.extend(MMLU_PRO_SUBJECTS.get(domain, []))
-        config.subjects = subjects
+        config.dataset.subjects = subjects
     
-    config.dataset_split = args.dataset_split
+    config.dataset.split = args.dataset_split
     
     if args.max_samples:
-        config.max_samples_per_subject = args.max_samples
-    config.cache_dir = args.cache_dir
+        config.dataset.max_samples_per_subject = args.max_samples
+    if args.cache_dir:
+        config.dataset.cache_dir = args.cache_dir
     
     # Evaluation configuration
-    config.evaluation_mode = EvaluationMode(args.evaluation_mode)
-    config.num_few_shot_examples = args.num_shots
-    config.prompt_style = PromptStyle(args.prompt_style)
-    config.batch_size = args.batch_size
+    config.evaluation.evaluation_mode = EvaluationMode(args.evaluation_mode)
+    config.evaluation.num_few_shot_examples = args.num_shots
+    config.evaluation.prompt_style = PromptStyle(args.prompt_style)
+    config.evaluation.batch_size = args.batch_size
     
     # Generation configuration
-    config.max_new_tokens = args.max_tokens
-    config.temperature = args.temperature
+    config.generation.max_new_tokens = args.max_tokens
+    config.generation.temperature = args.temperature
     
     # Output configuration
-    config.output_dir = args.output_dir
-    config.save_predictions = args.save_predictions
-    config.save_metrics_per_subject = not args.no_save_metrics
-    config.verbose = args.verbose
+    config.output.output_dir = args.output_dir
+    config.output.save_predictions = args.save_predictions
+    config.output.save_metrics_per_subject = not args.no_save_metrics
+    config.output.verbose = args.verbose
     
     # Debug mode
     if args.debug:
-        config.subjects = ["mathematics"]  # Only eval one subject
-        config.max_samples_per_subject = 5  # Only 5 questions
+        config.dataset.subjects = ["mathematics"]  # Only eval one subject
+        config.dataset.max_samples_per_subject = 5  # Only 5 questions
         logger.info("Debug mode: evaluating limited subset")
     
     return config
@@ -247,12 +253,15 @@ def main():
         print(f"Wrong: {metrics['wrong_predictions']}")
         print(f"No Answer: {metrics['no_answer_count']}")
         print(f"Average Latency: {metrics['avg_latency']:.3f}s")
-        print(f"\nResults saved to: {config.output_dir}")
+        print(f"\nResults saved to: {config.output.output_dir}")
         
         return 0
         
     except KeyboardInterrupt:
         logger.info("Evaluation interrupted by user")
+        return 1
+    except ConfigError as e:
+        logger.error(f"Configuration error: {e}")
         return 1
     except Exception as e:
         logger.error(f"Evaluation failed: {e}", exc_info=True)

@@ -5,12 +5,13 @@ Handles loading, caching, and preprocessing of MMLU-Pro data
 
 import os
 import json
-import pickle
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 import logging
 from collections import defaultdict
+
+from utils import DatasetError, safe_json_dump, safe_json_load
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +58,7 @@ class MMLUProDataset:
             config: MMLUProConfig instance
         """
         self.config = config
-        self.cache_dir = Path(config.cache_dir) if config.cache_dir else None
+        self.cache_dir = Path(config.dataset.cache_dir) if config.dataset.cache_dir else None
         self.questions_by_subject = defaultdict(list)
         self.all_questions = []
         self.subjects = []
@@ -70,39 +71,42 @@ class MMLUProDataset:
         self._load_dataset()
     
     def _load_dataset(self):
-        """Load dataset from HuggingFace or cache"""
+        """Load dataset from HuggingFace with simplified caching"""
         cache_file = None
         if self.cache_dir:
-            cache_file = self.cache_dir / f"mmlupro_{self.config.dataset_split}.pkl"
+            cache_file = self.cache_dir / f"mmlupro_{self.config.dataset.split}_processed.json"
         
         # Try loading from cache first
         if cache_file and cache_file.exists():
             logger.info(f"Loading MMLU-Pro from cache: {cache_file}")
-            with open(cache_file, 'rb') as f:
-                cached_data = pickle.load(f)
-                self.questions_by_subject = cached_data['questions_by_subject']
-                self.all_questions = cached_data['all_questions']
-                self.subjects = cached_data['subjects']
-        else:
-            logger.info(f"Loading MMLU-Pro from HuggingFace: {self.config.dataset_name}")
-            self._load_from_huggingface()
-            
-            # Save to cache
-            if cache_file:
-                logger.info(f"Saving to cache: {cache_file}")
-                with open(cache_file, 'wb') as f:
-                    pickle.dump({
-                        'questions_by_subject': self.questions_by_subject,
-                        'all_questions': self.all_questions,
-                        'subjects': self.subjects
-                    }, f)
+            try:
+                cached_data = safe_json_load(str(cache_file))
+                self._load_from_cached_data(cached_data)
+                return
+            except Exception as e:
+                logger.warning(f"Failed to load cache: {e}, reloading from HuggingFace")
+        
+        logger.info(f"Loading MMLU-Pro from HuggingFace: {self.config.dataset.name}")
+        self._load_from_huggingface()
+        
+        # Save to cache
+        if cache_file:
+            logger.info(f"Saving to cache: {cache_file}")
+            try:
+                cached_data = {
+                    'questions_by_subject': {k: [q.to_dict() for q in v] for k, v in self.questions_by_subject.items()},
+                    'subjects': self.subjects
+                }
+                safe_json_dump(cached_data, str(cache_file))
+            except Exception as e:
+                logger.warning(f"Failed to save cache: {e}")
         
         # Filter subjects if specified
-        if self.config.subjects:
-            self._filter_subjects(self.config.subjects)
+        if self.config.dataset.subjects:
+            self._filter_subjects(self.config.dataset.subjects)
         
         # Limit samples per subject if specified (for testing)
-        if self.config.max_samples_per_subject:
+        if self.config.dataset.max_samples_per_subject:
             self._limit_samples()
         
         logger.info(f"Loaded {len(self.all_questions)} questions across {len(self.subjects)} subjects")
@@ -112,14 +116,17 @@ class MMLUProDataset:
         try:
             from datasets import load_dataset
         except ImportError:
-            raise ImportError("Please install datasets: pip install datasets")
+            raise DatasetError("Please install datasets: pip install datasets")
         
-        # Load the dataset
-        dataset = load_dataset(
-            self.config.dataset_name,
-            split=self.config.dataset_split,
-            cache_dir=str(self.cache_dir) if self.cache_dir else None
-        )
+        try:
+            # Load the dataset
+            dataset = load_dataset(
+                self.config.dataset.name,
+                split=self.config.dataset.split,
+                cache_dir=str(self.cache_dir) if self.cache_dir else None
+            )
+        except Exception as e:
+            raise DatasetError(f"Failed to load dataset {self.config.dataset.name}: {e}")
         
         # Process each example
         for idx, example in enumerate(dataset):
@@ -144,6 +151,33 @@ class MMLUProDataset:
         
         self.subjects = sorted(list(self.questions_by_subject.keys()))
     
+    def _load_from_cached_data(self, cached_data: Dict[str, Any]):
+        """Load from cached JSON data"""
+        # Reconstruct questions from cached data
+        questions_data = cached_data['questions_by_subject']
+        self.questions_by_subject = defaultdict(list)
+        self.all_questions = []
+        
+        for subject, question_dicts in questions_data.items():
+            questions = []
+            for q_dict in question_dicts:
+                question = MMLUProQuestion(
+                    question_id=q_dict['question_id'],
+                    subject=q_dict['subject'],
+                    question=q_dict['question'],
+                    choices=q_dict['choices'],
+                    correct_answer=q_dict['correct_answer'],
+                    correct_answer_index=q_dict['correct_answer_index'],
+                    explanation=q_dict.get('explanation'),
+                    difficulty=q_dict.get('difficulty'),
+                    topic=q_dict.get('topic')
+                )
+                questions.append(question)
+                self.all_questions.append(question)
+            self.questions_by_subject[subject] = questions
+        
+        self.subjects = cached_data['subjects']
+    
     def _filter_subjects(self, subjects: List[str]):
         """Filter dataset to specific subjects"""
         filtered_questions = defaultdict(list)
@@ -164,7 +198,7 @@ class MMLUProDataset:
         limited_all = []
         
         for subject, questions in self.questions_by_subject.items():
-            limited = questions[:self.config.max_samples_per_subject]
+            limited = questions[:self.config.dataset.max_samples_per_subject]
             limited_questions[subject] = limited
             limited_all.extend(limited)
         
