@@ -204,7 +204,7 @@ def load_config(args) -> MMLUProConfig:
     config.evaluation.batch_size = args.batch_size
     
     # Generation configuration
-    config.generation.max_new_tokens = args.max_tokens
+    config.generation.max_tokens = args.max_tokens
     config.generation.temperature = args.temperature
     
     # Output configuration

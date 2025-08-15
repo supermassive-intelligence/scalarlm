@@ -27,9 +27,6 @@ class ScalarLMConfig:
     """ScalarLM connection and model configuration"""
     api_url: str = "http://localhost:8000"
     model_name: str = ""
-    device: str = "cuda"
-    dtype: str = "float16"  # float16, float32, bfloat16
-
 
 @dataclass
 class DatasetConfig:
@@ -58,12 +55,7 @@ class EvaluationConfig:
 @dataclass
 class GenerationConfig:
     """Model generation parameters"""
-    max_new_tokens: int = 1024
-    temperature: float = 0.0  # 0 for deterministic
-    top_p: float = 1.0
-    top_k: int = 50
-    do_sample: bool = False
-    repetition_penalty: float = 1.0
+    max_tokens: int = 1024
 
 
 @dataclass
@@ -120,7 +112,7 @@ class MMLUProConfig:
         dataset_params = ['dataset_name', 'dataset_split', 'cache_dir', 'subjects', 'max_samples_per_subject']
         evaluation_params = ['batch_size', 'evaluation_mode', 'num_few_shot_examples', 'prompt_style', 
                            'cot_trigger', 'extract_answer_pattern', 'require_reasoning']
-        generation_params = ['max_new_tokens', 'temperature', 'top_p', 'top_k', 'do_sample', 'repetition_penalty']
+        generation_params = ['max_tokens']
         output_params = ['output_dir', 'save_predictions', 'save_metrics_per_subject', 'verbose', 'log_interval']
         advanced_params = ['use_chat_template', 'system_prompt', 'seed', 'tensor_parallel_size']
         

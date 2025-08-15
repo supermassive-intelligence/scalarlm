@@ -100,10 +100,7 @@ class MMLUProEvaluator:
         
         # Generate response
         generation_params = {
-            'max_tokens': self.config.generation.max_new_tokens,
-            'temperature': self.config.generation.temperature,
-            'top_p': self.config.generation.top_p,
-            'top_k': self.config.generation.top_k,
+            'max_tokens': self.config.generation.max_tokens,
         }
         
         response, latency = self.scalarlm_client.generate_single(
@@ -166,10 +163,7 @@ class MMLUProEvaluator:
         
         # Generate responses for batch
         generation_params = {
-            'max_tokens': self.config.generation.max_new_tokens,
-            'temperature': self.config.generation.temperature,
-            'top_p': self.config.generation.top_p,
-            'top_k': self.config.generation.top_k,
+            'max_tokens': self.config.generation.max_tokens,
         }
         
         response_tuples = self.scalarlm_client.generate_batch(prompts, **generation_params)
@@ -213,31 +207,35 @@ class MMLUProEvaluator:
             logger.info(f"Mode: {self.config.evaluation.evaluation_mode.value}")
             logger.info(f"Subjects: {len(self.dataset.subjects)}")
             
-            all_results = []
-            subject_results = {}
+            # Collect all questions from all subjects
+            all_questions = []
+            subject_question_counts = {}
             
-            # Evaluate each subject
-            for subject_idx, subject in enumerate(tqdm(self.dataset.subjects, desc="Subjects")):
+            for subject in self.dataset.subjects:
                 questions = self.dataset.get_questions_by_subject(subject)
+                all_questions.extend(questions)
+                subject_question_counts[subject] = len(questions)
                 
                 if self.config.output.verbose:
-                    logger.info(f"Evaluating {subject} ({len(questions)} questions)...")
+                    logger.info(f"Loaded {subject}: {len(questions)} questions")
+            
+            logger.info(f"Total questions across all subjects: {len(all_questions)}")
+            
+            # Evaluate all questions using cross-subject batching
+            if self.config.evaluation.batch_size > 1:
+                all_results = self._evaluate_cross_subject_batched(all_questions)
+            else:
+                all_results = self._evaluate_all_sequential(all_questions)
+            
+            # Group results by subject for metrics calculation
+            subject_results = {}
+            for subject in self.dataset.subjects:
+                subject_results[subject] = [r for r in all_results if r.subject == subject]
                 
-                # Evaluate questions for this subject
-                if self.config.evaluation.batch_size > 1:
-                    results = self._evaluate_subject_batched(questions)
-                else:
-                    results = self._evaluate_subject_sequential(questions)
-                
-                all_results.extend(results)
-                subject_results[subject] = results
-                
-                # Log progress
-                if self.config.output.verbose:
-                    accuracy = sum(r.is_correct for r in results) / len(results) * 100
-                    self.result_handler.log_progress(
-                        subject_idx + 1, len(self.dataset.subjects), subject, accuracy
-                    )
+                # Log progress for each subject
+                if self.config.output.verbose and subject_results[subject]:
+                    accuracy = sum(r.is_correct for r in subject_results[subject]) / len(subject_results[subject]) * 100
+                    logger.info(f"{subject}: {len(subject_results[subject])} questions, {accuracy:.1f}% accuracy")
             
             # Compute metrics
             metrics = self.metrics.compute_metrics(all_results, subject_results)
@@ -262,16 +260,57 @@ class MMLUProEvaluator:
                 "config": self.config.to_dict()
             }
     
-    def _evaluate_subject_batched(self, questions: List[MMLUProQuestion]) -> List[EvaluationResult]:
-        """Evaluate subject using batch processing"""
+    def _evaluate_cross_subject_batched(self, questions: List[MMLUProQuestion]) -> List[EvaluationResult]:
+        """Evaluate all questions using batch processing across subjects"""
         results = []
         batch_size = self.config.evaluation.batch_size
+        
+        logger.info(f"Processing {len(questions)} questions with batch size {batch_size}")
+        
+        # Process questions in batches regardless of subject boundaries
+        for i in tqdm(range(0, len(questions), batch_size), desc="Batches"):
+            batch = questions[i:i + batch_size]
+            actual_batch_size = len(batch)
+            
+            if self.config.output.verbose:
+                logger.info(f"Processing batch {i//batch_size + 1}: {actual_batch_size} questions")
+            
+            batch_results = self.evaluate_batch(batch)
+            results.extend(batch_results)
+        
+        logger.info(f"Completed evaluation of {len(results)} questions")
+        return results
+    
+    def _evaluate_all_sequential(self, questions: List[MMLUProQuestion]) -> List[EvaluationResult]:
+        """Evaluate all questions sequentially (one by one)"""
+        results = []
+        
+        for q in tqdm(questions, desc="Questions"):
+            # Get few-shot examples if needed
+            examples = None
+            if self.config.evaluation.num_few_shot_examples > 0:
+                examples = self.dataset.get_few_shot_examples(
+                    q.subject,
+                    n=self.config.evaluation.num_few_shot_examples,
+                    exclude_id=q.question_id
+                )
+            
+            result = self.evaluate_question(q, examples)
+            results.append(result)
+        
+        return results
+    
+    def _evaluate_subject_batched(self, questions: List[MMLUProQuestion]) -> List[EvaluationResult]:
+        """Evaluate subject using batch processing (legacy method, kept for compatibility)"""
+        results = []
+        batch_size = self.config.evaluation.batch_size
+        print(f"\n*** Batch size {batch_size}\n")
         
         for i in range(0, len(questions), batch_size):
             batch = questions[i:i + batch_size]
             batch_results = self.evaluate_batch(batch)
             results.extend(batch_results)
-        
+        print(f"\n*** actual batch size for results {len(results)}\n")
         return results
     
     def _evaluate_subject_sequential(self, questions: List[MMLUProQuestion]) -> List[EvaluationResult]:
