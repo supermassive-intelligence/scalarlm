@@ -5,10 +5,10 @@ class Config(BaseModel):
     api_url: str = "http://localhost:8000"
 
     #model: str = "masint/tiny-random-qwen2-vl"
-    #model: str = "masint/tiny-random-llama"
-    #model: str = "Snowflake/Arctic-Text2SQL-R1-7B"
-    #model: str = "Qwen/Qwen2-7B-Instruct"
-    model: str = "Qwen/Qwen2-VL-7B-Instruct"
+    model: str = "masint/tiny-random-llama"
+    #model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    #model: str = "microsoft/DialoGPT-medium"
+    #model: str = "openai-community/gpt2"
 
     # 10GB using 1024 for KB, 1024 for MB, 1024 for GB
     max_upload_file_size: int = 1024 * 1024 * 1024 * 10
@@ -34,10 +34,11 @@ class Config(BaseModel):
 
     inference_work_queue_path: str = "/app/cray/inference_work_queue.sqlite"
 
-    gpu_memory_utilization: float = 0.95
-    max_model_length: int = 8192
-    limit_mm_per_prompt: str = "image=2"
-    dtype: str = "float16"
+    gpu_memory_utilization: float = 0.50
+    max_model_length: int = 1024
+    default_max_output_tokens: int = 128
+    dtype: str = "auto"
+    limit_mm_per_prompt: str = None # "image=2"
 
     max_log_length: int = 100
 
@@ -52,5 +53,4 @@ class Config(BaseModel):
 
     hf_encrypted_token: bytes = b"gAAAAABoZ4CYsnzw-l4vEnBm_4zSfSinpxYoRmXmLYigjOP8q3e8-ZfWRViszKcSN_P5krZgur8NxwyYW_hNimIRqfeKgMNZThI8wB9zedsj9AJ0nmRfZbDeTISFnlgetSPcGs3-oBxQ"
     encryption_key: bytes = b"JAJOZunNSRFeXWXWVVVJfiKSzdzFMw0yFn8_JK50h60="
-
 
