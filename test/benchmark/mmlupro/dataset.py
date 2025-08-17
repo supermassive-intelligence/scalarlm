@@ -82,6 +82,8 @@ class MMLUProDataset:
             try:
                 cached_data = safe_json_load(str(cache_file))
                 self._load_from_cached_data(cached_data)
+                # Apply filters after loading from cache
+                self._apply_filters()
                 return
             except Exception as e:
                 logger.warning(f"Failed to load cache: {e}, reloading from HuggingFace")
@@ -101,13 +103,8 @@ class MMLUProDataset:
             except Exception as e:
                 logger.warning(f"Failed to save cache: {e}")
         
-        # Filter subjects if specified
-        if self.config.dataset.subjects:
-            self._filter_subjects(self.config.dataset.subjects)
-        
-        # Limit samples per subject if specified (for testing)
-        if self.config.dataset.max_samples_per_subject:
-            self._limit_samples()
+        # Apply filters after loading from HuggingFace
+        self._apply_filters()
         
         logger.info(f"Loaded {len(self.all_questions)} questions across {len(self.subjects)} subjects")
     
@@ -177,6 +174,16 @@ class MMLUProDataset:
             self.questions_by_subject[subject] = questions
         
         self.subjects = cached_data['subjects']
+    
+    def _apply_filters(self):
+        """Apply subject filtering and sample limiting"""
+        # Filter subjects if specified
+        if self.config.dataset.subjects:
+            self._filter_subjects(self.config.dataset.subjects)
+        
+        # Limit samples per subject if specified (for testing)
+        if self.config.dataset.max_samples_per_subject:
+            self._limit_samples()
     
     def _filter_subjects(self, subjects: List[str]):
         """Filter dataset to specific subjects"""
