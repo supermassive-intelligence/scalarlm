@@ -15,9 +15,9 @@ ARG MAX_JOBS=8
 
 # Put HPC-X MPI in the PATH, i.e. mpirun
 ENV PATH=$PATH:/opt/hpcx/ompi/bin
-ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/hpcx/ompi/lib
+ENV LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}:/opt/hpcx/ompi/lib
 
-ARG TORCH_VERSION="2.4.0"
+ARG TORCH_VERSION="2.7.1"
 ARG TORCH_CUDA_ARCH_LIST="7.5"
 
 RUN pip install uv
@@ -50,13 +50,13 @@ RUN . $VIRTUAL_ENV/bin/activate
 ARG MAX_JOBS=4
 #ENV DNNL_DEFAULT_FPMATH_MODE=F32
 
-ARG TORCH_VERSION="2.4.0"
+ARG TORCH_VERSION="2.7.1"
 
 RUN pip install uv
-RUN uv pip install torch==${TORCH_VERSION} --index-url https://download.pytorch.org/whl/cpu
+RUN uv pip install torch==${TORCH_VERSION}+cpu --index-url https://download.pytorch.org/whl/cpu
 
 # Put torch on the LD_LIBRARY_PATH
-ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/app/.venv/lib64/python3.12/site-packages/torch/lib
+ENV LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}:/app/.venv/lib64/python3.12/site-packages/torch/lib
 
 ARG INSTALL_ROOT=/app/cray
 WORKDIR ${INSTALL_ROOT}
@@ -93,37 +93,38 @@ ARG INSTALL_ROOT=/app/cray
 COPY ./requirements.txt ${INSTALL_ROOT}/requirements.txt
 COPY ./test/requirements-pytest.txt ${INSTALL_ROOT}/requirements-pytest.txt
 COPY ./infra/requirements-vllm-build.txt ${INSTALL_ROOT}/requirements-vllm-build.txt
+COPY ./infra/requirements-vllm.txt ${INSTALL_ROOT}/requirements-vllm.txt
 
 RUN uv pip install --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements.txt
 RUN uv pip install --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements-vllm-build.txt
+RUN uv pip install --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements-vllm.txt
 RUN uv pip install --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements-pytest.txt
 
 WORKDIR ${INSTALL_ROOT}
 
-COPY ./infra/cray_infra/vllm ${INSTALL_ROOT}/infra/cray_infra/vllm
-COPY ./infra/setup.py ${INSTALL_ROOT}/infra/cray_infra/setup.py
+# Install build dependencies FIRST
+RUN pip install numpy packaging setuptools-scm wheel cmake ninja
 
-COPY ./infra/CMakeLists.txt ${INSTALL_ROOT}/infra/cray_infra/CMakeLists.txt
-COPY ./infra/cmake ${INSTALL_ROOT}/infra/cray_infra/cmake
-COPY ./infra/csrc ${INSTALL_ROOT}/infra/cray_infra/csrc
+# Configure vLLM fork branch (can be overridden at build time)
+ARG VLLM_BRANCH=rschiavi/vllm-adapter
+ARG VLLM_REPO=https://github.com/funston/vllm.git
 
-COPY ./infra/requirements-vllm.txt ${INSTALL_ROOT}/infra/cray_infra/requirements.txt
+# Always clone and install vLLM (REQUIRED for ScalarLM)
+RUN --mount=type=cache,target=/root/.cache/git \
+    git clone -b ${VLLM_BRANCH} ${VLLM_REPO} ${INSTALL_ROOT}/vllm
 
-WORKDIR ${INSTALL_ROOT}/infra/cray_infra
-
+# Set build environment variables for CPU compilation
 ARG VLLM_TARGET_DEVICE=cpu
-ARG TORCH_CUDA_ARCH_LIST="7.5"
+ENV VLLM_TARGET_DEVICE=${VLLM_TARGET_DEVICE}
+ENV CMAKE_BUILD_TYPE=Release
+ENV MAX_JOBS=${MAX_JOBS}
 
-# Build vllm python package
-RUN \
-    --mount=type=cache,target=/root/.cache/pip \
-    --mount=type=cache,target=/root/.cache/ccache \
-    MAX_JOBS=${MAX_JOBS} \
-    TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} \
-    VLLM_TARGET_DEVICE=${VLLM_TARGET_DEVICE} \
-    python ${INSTALL_ROOT}/infra/cray_infra/setup.py bdist_wheel && \
-    pip install ${INSTALL_ROOT}/infra/cray_infra/dist/*.whl && \
-    rm -rf ${INSTALL_ROOT}/infra/cray_infra/dist
+# Build vLLM from source with CPU target  
+WORKDIR ${INSTALL_ROOT}/vllm
+RUN echo "Building vLLM for CPU with target device: ${VLLM_TARGET_DEVICE}" && \
+    echo "Max jobs: ${MAX_JOBS}" && \
+    VLLM_TARGET_DEVICE=cpu python setup.py build_ext --inplace && \
+    VLLM_TARGET_DEVICE=cpu pip install -e . --verbose
 
 WORKDIR ${INSTALL_ROOT}
 
@@ -146,6 +147,8 @@ ENV PYTHONPATH="${PYTHONPATH}:${INSTALL_ROOT}/infra"
 ENV PYTHONPATH="${PYTHONPATH}:${INSTALL_ROOT}/sdk"
 ENV PYTHONPATH="${PYTHONPATH}:${INSTALL_ROOT}/ml"
 ENV PYTHONPATH="${PYTHONPATH}:${INSTALL_ROOT}/test"
+# Add vLLM clone directly to Python path (primary method)
+ENV PYTHONPATH="${PYTHONPATH}:${INSTALL_ROOT}/vllm"
 
 RUN mkdir -p ${INSTALL_ROOT}/jobs
 RUN mkdir -p ${INSTALL_ROOT}/nfs
@@ -156,6 +159,26 @@ COPY ./sdk ${INSTALL_ROOT}/sdk
 COPY ./test ${INSTALL_ROOT}/test
 COPY ./ml ${INSTALL_ROOT}/ml
 COPY ./scripts ${INSTALL_ROOT}/scripts
+COPY ./examples ${INSTALL_ROOT}/examples
+
+
+COPY ./pyproject.toml ${INSTALL_ROOT}/pyproject.toml
+COPY ./setup.py ${INSTALL_ROOT}/setup.py
+
+WORKDIR ${INSTALL_ROOT}
+# Fix setuptools-scm version detection in Docker
+ENV SETUPTOOLS_SCM_PRETEND_VERSION=0.2.0
+
+# Set vLLM environment variables for CPU mode
+ENV VLLM_TARGET_DEVICE=cpu
+ENV VLLM_USE_V1=1
+ENV VLLM_WORKER_MULTIPROC_METHOD=spawn
+ENV VLLM_LOGGING_LEVEL=DEBUG
+# https://github.com/vllm-project/vllm-ascend/issues/1048
+ENV VLLM_PLUGINS=ascend,ascend_enhanced_model
+# For CPU mode, don't set CUDA_VISIBLE_DEVICES at all since there are no CUDA devices
+# ENV CUDA_VISIBLE_DEVICES="0"
+RUN pip install -e .[training]
 
 # Build SLURM plugin
 RUN /app/cray/infra/slurm_src/compile.sh

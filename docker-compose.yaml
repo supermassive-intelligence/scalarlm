@@ -5,9 +5,13 @@ services:
         build:
             context: .
             dockerfile: Dockerfile
+            platforms:
+                - ${DOCKER_PLATFORM:-linux/arm64}
             args:
                 - BASE_NAME=${BASE_NAME}
                 - VLLM_TARGET_DEVICE=${VLLM_TARGET_DEVICE}
+                - VLLM_BRANCH=${VLLM_BRANCH:-rschiavi/vllm-adapter}
+                - VLLM_REPO=${VLLM_REPO:-https://github.com/funston/vllm.git}
         ports:
             - "8000:8000"
             - "8001:8001"
@@ -18,6 +22,9 @@ services:
             - type: bind
               source: ./infra/cray_infra
               target: /app/cray/infra/cray_infra
+            - type: bind
+              source: ./scalarlm_vllm_adapters
+              target: /app/cray/scalarlm_vllm_adapters
             - type: bind
               source: ./scripts
               target: /app/cray/scripts

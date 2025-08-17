@@ -5,7 +5,7 @@ import logging
 import random
 from gpu_aware_mpi import get_rank, finalize_mpi
 
-from infra.cray_infra.training.distribution_strategy.fsdp.fsdp import SimpleFSDP
+from cray_infra.training.distribution_strategy.fsdp.fsdp import SimpleFSDP
 
 # Initialize logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
