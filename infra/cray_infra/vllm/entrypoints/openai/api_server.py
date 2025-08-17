@@ -399,7 +399,6 @@ def convert_prompt_to_openai_format(
                 "content": [{"role": "user", "content": prompt}]
             }
         ]
-        # list_of_content.append({"role": "user", "content": prompt})
     elif isinstance(prompt, dict):
         list_of_content = []
         for key, value in prompt.items():
@@ -415,37 +414,9 @@ def convert_prompt_to_openai_format(
                 "content": list_of_content
             }
         ]
-        # list_of_content = [
-        #             convert_prompt_sub_field_to_openai_content_format(key, value)
-        #             for key, value in prompt.items()
-        #         ]
-        # flattened_content = [item for sublist in list_of_content for item in sublist]
-        # return [
-        #     {
-        #         "role": "user",
-        #         "content": flattened_content,
-        #     }
-        # ]
-        # return [
-        #     {
-        #         "role": "user",
-        #         "content": [
-        #             convert_prompt_sub_field_to_openai_content_format(key, value)
-        #             for key, value in prompt.items()
-        #         ],
-        #     }
-        # ]
     else:
         raise ValueError(f"Invalid prompt type: {type(prompt)}")
     
-
-# def convert_prompt_sub_field_to_openai_content_format(key: str, value) -> dict:
-#     if key == "text":
-#         return {"type": "text", "text": value}
-#     elif key == "image":
-#         return {"type": "image_url", "image_url": {"url": 'lol'}}
-#     else:
-#         raise ValueError(f"Invalid prompt sub-field: {key}. Must be 'text' or 'image'.")
 
 
 def compute_flop_count(model_config):
