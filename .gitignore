@@ -1,10 +1,36 @@
-**/*.swp
-**/*.so
+# ScalarLM .gitignore
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# ScalarLM specific
 models/*
-infra/slurm_configs/slurm.conf
 scripts/scalarlm
 
-*.DS_Store
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Python
 **/__pycache__/
-.env
-.idea
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Local vLLM clone for development
+vllm/***

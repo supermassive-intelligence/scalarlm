@@ -17,7 +17,7 @@ dataset = get_dataset(count=1)
 
 results = llm.generate(
     prompts=dataset,
-    max_tokens=200,
+    max_tokens=32,
 )
 
 print(results)
