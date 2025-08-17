@@ -71,10 +71,6 @@ WORKDIR ${INSTALL_ROOT}
 
 ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/app/venv/lib/python3.12/site-packages/torch/lib:/usr/local/rdma-lib
 
-# vLLM dependencies
-COPY ./infra/requirements-vllm-rocm.txt ${INSTALL_ROOT}/requirements-vllm-rocm.txt
-RUN uv pip install --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements-vllm-rocm.txt
-
 ###############################################################################
 # VLLM BUILD STAGE
 FROM ${BASE_NAME} AS vllm
@@ -94,7 +90,7 @@ RUN pip install setuptools-scm
 
 # Configure vLLM source - can use either local directory or remote repo
 ARG VLLM_SOURCE=remote
-ARG VLLM_BRANCH=rschiavi/vllm-adapter
+ARG VLLM_BRANCH=greg.refactor
 ARG VLLM_REPO=https://github.com/supermassive-intelligence/vllm.git
 
 # Handle vLLM source - keep it simple with bind mount approach
