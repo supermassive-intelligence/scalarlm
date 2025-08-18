@@ -48,7 +48,7 @@ class EvaluationConfig:
     
     # Chain-of-thought specific
     cot_trigger: str = "Let's think step by step."
-    extract_answer_pattern: str = r"[Tt]he answer is \(?([A-J])\)?"
+    extract_answer_pattern: str = r"[Tt]he (?:final )?answer is:?\s*\(?([A-J])\)?"
     require_reasoning: bool = True
 
 
@@ -66,6 +66,7 @@ class OutputConfig:
     save_metrics_per_subject: bool = True
     verbose: bool = True
     log_interval: int = 10  # Log progress every N batches
+    qa_log_file: Optional[str] = None  # Path to log file for saving questions and answers
 
 
 @dataclass
@@ -191,21 +192,22 @@ class MMLUProConfig:
 
 
 # Domain/subject mapping for MMLU-Pro
+# Based on actual dataset structure - domains map to the actual subject categories in the dataset
 MMLU_PRO_SUBJECTS = {
-    "math": ["algebra", "geometry", "calculus", "statistics", "abstract_algebra", "elementary_mathematics"],
-    "physics": ["physics", "conceptual_physics", "high_school_physics", "college_physics", "astronomy"],
-    "chemistry": ["chemistry", "high_school_chemistry", "college_chemistry", "organic_chemistry"],
-    "biology": ["biology", "high_school_biology", "college_biology", "molecular_biology", "genetics"],
-    "computer_science": ["computer_science", "computer_security", "machine_learning", "programming"],
-    "engineering": ["electrical_engineering", "mechanical_engineering", "civil_engineering"],
-    "economics": ["economics", "microeconomics", "macroeconomics", "econometrics"],
-    "business": ["business", "management", "accounting", "marketing", "finance"],
-    "law": ["law", "jurisprudence", "international_law", "constitutional_law"],
-    "medicine": ["medicine", "anatomy", "clinical_knowledge", "medical_genetics", "nutrition"],
-    "psychology": ["psychology", "developmental_psychology", "clinical_psychology", "cognitive_psychology"],
-    "history": ["history", "world_history", "us_history", "european_history", "prehistory"],
-    "philosophy": ["philosophy", "logic", "ethics", "epistemology", "metaphysics"],
-    "other": ["sociology", "political_science", "geography", "anthropology", "linguistics"]
+    "math": ["math"],
+    "physics": ["physics"],
+    "chemistry": ["chemistry"],
+    "biology": ["biology"],
+    "computer_science": ["computer_science"],
+    "engineering": ["engineering"],
+    "economics": ["economics"],
+    "business": ["business"],
+    "law": ["law"],
+    "health": ["health"],
+    "psychology": ["psychology"],
+    "history": ["history"],
+    "philosophy": ["philosophy"],
+    "other": ["other"]
 }
 
 # Flattened list of all subjects

@@ -3,6 +3,7 @@ MMLU-Pro Evaluator with refactored components
 """
 
 import logging
+import json
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
@@ -54,6 +55,7 @@ class MMLUProEvaluator:
         self.metrics = MMLUProMetrics()
         self.scalarlm_client = None
         self.result_handler = None
+        self.qa_log_file = None
         
         # Setup components
         self._init_components()
@@ -73,9 +75,32 @@ class MMLUProEvaluator:
         # Load dataset
         self.dataset = MMLUProDataset(self.config)
         
+        # Setup QA log file if specified
+        if self.config.output.qa_log_file:
+            self.qa_log_file = open(self.config.output.qa_log_file, 'w', encoding='utf-8')
+            logger.info(f"Q&A logging enabled: {self.config.output.qa_log_file}")
+        
         # Log initialization
         stats = self.dataset.get_statistics()
         logger.info(f"Initialized evaluator with {stats['total_questions']} questions from {stats['num_subjects']} subjects")
+    
+    def _log_qa(self, result: EvaluationResult):
+        """Log question and answer to file if logging is enabled"""
+        if self.qa_log_file:
+            log_entry = {
+                "question_id": result.question_id,
+                "subject": result.subject,
+                "question": result.question,
+                "correct_answer": result.correct_answer,
+                "predicted_answer": result.predicted_answer,
+                "is_correct": result.is_correct,
+                "response": result.response,
+                "prompt": result.prompt,
+                "latency": result.latency,
+                "metadata": result.metadata
+            }
+            self.qa_log_file.write(json.dumps(log_entry, ensure_ascii=False) + '\n')
+            self.qa_log_file.flush()
     
     def evaluate_question(self, question: MMLUProQuestion, 
                          examples: Optional[List[MMLUProQuestion]] = None) -> EvaluationResult:
@@ -109,12 +134,13 @@ class MMLUProEvaluator:
         )
         
         # Extract answer
-        predicted_answer = self.prompt_formatter.extract_answer(response)
+        predicted_answer = self.prompt_formatter.extract_answer(response, choices=question.choices)
         
         # Check correctness
         is_correct = predicted_answer == question.correct_answer if predicted_answer else False
         
-        return EvaluationResult(
+        
+        result = EvaluationResult(
             question_id=question.question_id,
             subject=question.subject,
             question=question.question,
@@ -130,6 +156,11 @@ class MMLUProEvaluator:
                 "num_few_shot": len(examples) if examples else 0
             }
         )
+        
+        # Log the question and answer
+        self._log_qa(result)
+        
+        return result
     
     def evaluate_batch(self, questions: List[MMLUProQuestion]) -> List[EvaluationResult]:
         """
@@ -171,8 +202,9 @@ class MMLUProEvaluator:
         # Process responses
         results = []
         for q, prompt, examples, (response, latency) in zip(questions, prompts, examples_list, response_tuples):
-            predicted_answer = self.prompt_formatter.extract_answer(response)
+            predicted_answer = self.prompt_formatter.extract_answer(response, choices=q.choices)
             is_correct = predicted_answer == q.correct_answer if predicted_answer else False
+            
             
             result = EvaluationResult(
                 question_id=q.question_id,
@@ -191,6 +223,9 @@ class MMLUProEvaluator:
                 }
             )
             results.append(result)
+            
+            # Log the question and answer
+            self._log_qa(result)
         
         return results
     
@@ -253,6 +288,11 @@ class MMLUProEvaluator:
                 metrics, 
                 save_metrics_per_subject=self.config.output.save_metrics_per_subject
             )
+            
+            # Close log file if it was opened
+            if self.qa_log_file:
+                self.qa_log_file.close()
+                logger.info(f"Q&A log saved to: {self.config.output.qa_log_file}")
             
             return {
                 "results": all_results,

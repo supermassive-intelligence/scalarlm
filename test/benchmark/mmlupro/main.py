@@ -153,6 +153,11 @@ def parse_args():
         action="store_true",
         help="Enable debug mode (evaluates only a few questions)"
     )
+    parser.add_argument(
+        "--qa-log-file",
+        type=str,
+        help="Path to log file for saving questions and answers"
+    )
 
     return parser.parse_args()
 
@@ -212,6 +217,7 @@ def load_config(args) -> MMLUProConfig:
     config.output.save_predictions = args.save_predictions
     config.output.save_metrics_per_subject = not args.no_save_metrics
     config.output.verbose = args.verbose
+    config.output.qa_log_file = args.qa_log_file
     
     # Debug mode
     if args.debug:

@@ -20,7 +20,7 @@ class BasePromptTemplate(ABC):
         pass
     
     @abstractmethod
-    def extract_answer(self, response: str) -> Optional[str]:
+    def extract_answer(self, response: str, choices: Optional[List[str]] = None) -> Optional[str]:
         """Extract answer from model response"""
         pass
 
@@ -77,9 +77,9 @@ class StandardPromptTemplate(BasePromptTemplate):
         
         return "\n".join(lines)
     
-    def extract_answer(self, response: str) -> Optional[str]:
+    def extract_answer(self, response: str, choices: Optional[List[str]] = None) -> Optional[str]:
         """Extract answer letter from response"""
-        return self.answer_extractor.extract_letter(response)
+        return self.answer_extractor.extract_letter(response, choices=choices)
 
 
 class InstructionPromptTemplate(BasePromptTemplate):
@@ -139,11 +139,11 @@ class InstructionPromptTemplate(BasePromptTemplate):
         
         return "\n".join(lines)
     
-    def extract_answer(self, response: str) -> Optional[str]:
+    def extract_answer(self, response: str, choices: Optional[List[str]] = None) -> Optional[str]:
         """Extract answer from instruction response"""
         # Try additional patterns specific to instruction format
-        additional_patterns = [r"[Ff]inal [Aa]nswer:?\s*\(?([A-J])\)?"]
-        return self.answer_extractor.extract_letter(response, additional_patterns)
+        additional_patterns = [r"[Ff]inal [Aa]nswer:?\s+([A-J])(?:\s|$|\)|\.)"]
+        return self.answer_extractor.extract_letter(response, additional_patterns, choices=choices)
 
 
 class ChatPromptTemplate(BasePromptTemplate):
@@ -203,9 +203,9 @@ class ChatPromptTemplate(BasePromptTemplate):
         
         return "\n".join(lines)
     
-    def extract_answer(self, response: str) -> Optional[str]:
+    def extract_answer(self, response: str, choices: Optional[List[str]] = None) -> Optional[str]:
         """Extract answer from chat response"""
-        return self.answer_extractor.extract_letter(response)
+        return self.answer_extractor.extract_letter(response, choices=choices)
 
 
 # Template registry for simple selection
@@ -235,9 +235,9 @@ class PromptFormatter:
         """Format question using selected template"""
         return self.template.format_question(question, examples)
     
-    def extract_answer(self, response: str) -> Optional[str]:
+    def extract_answer(self, response: str, choices: Optional[List[str]] = None) -> Optional[str]:
         """Extract answer using selected template"""
-        return self.template.extract_answer(response)
+        return self.template.extract_answer(response, choices=choices)
     
     def format_batch(self, questions: List[MMLUProQuestion], 
                     examples_dict: Optional[Dict[str, List[MMLUProQuestion]]] = None) -> List[Any]:

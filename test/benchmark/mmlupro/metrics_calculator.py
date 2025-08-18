@@ -135,13 +135,22 @@ class MetricsCalculator:
         
         # Response length statistics
         response_lengths = [len(r.response) for r in results]
-        stats["response_length"] = {
-            "mean": np.mean(response_lengths),
-            "std": np.std(response_lengths),
-            "min": np.min(response_lengths),
-            "max": np.max(response_lengths),
-            "median": np.median(response_lengths)
-        }
+        if response_lengths:
+            stats["response_length"] = {
+                "mean": np.mean(response_lengths),
+                "std": np.std(response_lengths),
+                "min": np.min(response_lengths),
+                "max": np.max(response_lengths),
+                "median": np.median(response_lengths)
+            }
+        else:
+            stats["response_length"] = {
+                "mean": 0,
+                "std": 0,
+                "min": 0,
+                "max": 0,
+                "median": 0
+            }
         
         # Answer distribution
         answer_dist = defaultdict(int)
