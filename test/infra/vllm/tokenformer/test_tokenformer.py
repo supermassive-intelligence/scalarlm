@@ -3,7 +3,7 @@ import torch
 from pathlib import Path
 from safetensors.torch import save_file
 
-from cray_infra.adapters.model.tokenformer_clean import TokenformerModel
+from cray_infra.adapters.model.tokenformer import TokenformerModel
 
 @pytest.fixture
 def mock_model_dir(tmp_path):

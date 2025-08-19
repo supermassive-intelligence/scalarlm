@@ -8,7 +8,7 @@ from typing import Optional, Any, Dict, List, Type, ClassVar, Literal
 import logging
 
 from ..common.interfaces import SupportsTokenformer
-from .tokenformer_clean import TokenformerManager as TokenformerModelManager, create_clean_tokenformer_manager as create_tokenformer_manager
+from .tokenformer import TokenformerManager as TokenformerModelManager, create_tokenformer_manager
 
 logger = logging.getLogger(__name__)
 

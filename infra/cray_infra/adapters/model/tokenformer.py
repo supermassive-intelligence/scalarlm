@@ -251,7 +251,7 @@ class TokenformerManager(AdapterModelManager):
         return self._active_adapter
 
 
-def create_clean_tokenformer_manager(
+def create_tokenformer_manager(
     model, 
     device: torch.device, 
     capacity: Optional[int] = None,
@@ -269,8 +269,7 @@ def create_clean_tokenformer_manager(
     return TokenformerManager(model, device, capacity, supports_tokenformer_check)
 
 
-# Backward compatibility alias
-CleanTokenformerManager = TokenformerManager
+# No longer needed - use TokenformerManager directly
 
 
 # Helper function for checking tokenformer support
