@@ -51,10 +51,14 @@ async def create_vllm(port):
         f"--gpu-memory-utilization={config['gpu_memory_utilization']}",
         f"--max-log-len={config['max_log_length']}",
         f"--swap-space=0",
-        # NOTE: GPT-2 doesn't support LoRA, so we don't enable it
-        # "--enable-lora",
+        "--enable-lora"
     ]
-    
+
+    # Handle multimodal limits (restored from original)
+    if config['limit_mm_per_prompt'] is not None:
+        args.append(f"--limit-mm-per-prompt={config['limit_mm_per_prompt']}")
+
+        
     # CPU backend only supports V1 scheduler
     if not torch.cuda.is_available():
         os.environ["VLLM_USE_V1"] = "1"

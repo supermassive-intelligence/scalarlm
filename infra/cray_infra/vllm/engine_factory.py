@@ -162,12 +162,12 @@ def _create_shared_engine(config: dict) -> SharedVLLMEngine:
     logger.info("Creating shared vLLM engine")
     
     try:
-        vllm_api_url = config.get("vllm_api_url", "http://localhost:8001")
+        engine_name = config.get("vllm_shared_engine_name", "default")
         
-        # Create shared engine wrapper
-        shared_engine = SharedVLLMEngine(base_url=vllm_api_url)
+        # Create shared engine wrapper  
+        shared_engine = SharedVLLMEngine(engine_name=engine_name)
         
-        logger.info(f"✓ Shared vLLM engine created successfully: {vllm_api_url}")
+        logger.info(f"✓ Shared vLLM engine created successfully: {engine_name}")
         return shared_engine
         
     except Exception as e:

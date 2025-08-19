@@ -1,19 +1,17 @@
 from pydantic import BaseModel
+from typing import Optional
 
 
 class Config(BaseModel):
     api_url: str = "http://localhost:8000"
 
     #model: str = "masint/tiny-random-qwen2-vl"
-    #model: str = "masint/tiny-random-llama"
+    model: str = "masint/tiny-random-llama"
     #model: str = "sentence-transformers/all-MiniLM-L6-v2"
     #model: str = "microsoft/DialoGPT-medium"
     # Generation model (vLLM)
-    model: str = "openai-community/gpt2"
+    #model: str = "openai-community/gpt2"
     
-    # Embedding model (separate service)
-    embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
-    embedding_service_url: str = "http://localhost:8002"
 
     # 10GB using 1024 for KB, 1024 for MB, 1024 for GB
     max_upload_file_size: int = 1024 * 1024 * 1024 * 10
@@ -32,7 +30,7 @@ class Config(BaseModel):
     vllm_api_url: str = "http://localhost:8001"
     
     # vLLM Engine Configuration
-    vllm_use_http: bool = True  # Use HTTP API (True) or direct engine calls (False)
+    vllm_use_http: bool = False  # Use HTTP API (True) or direct engine calls (False)
     vllm_http_timeout: float = 30.0  # HTTP timeout in seconds
     
     # Direct engine configuration (when vllm_use_http=False)
@@ -45,6 +43,7 @@ class Config(BaseModel):
     max_seq_len_to_capture: int = 8192
     max_logprobs: int = 20
     disable_sliding_window: bool = False
+    limit_mm_per_prompt: Optional[str] = None  # Limit multi-modal items per prompt, e.g. '{"image":2}'
 
     generate_batch_size: int = 1024
 
@@ -71,5 +70,4 @@ class Config(BaseModel):
 
     hf_encrypted_token: bytes = b"gAAAAABoZ4CYsnzw-l4vEnBm_4zSfSinpxYoRmXmLYigjOP8q3e8-ZfWRViszKcSN_P5krZgur8NxwyYW_hNimIRqfeKgMNZThI8wB9zedsj9AJ0nmRfZbDeTISFnlgetSPcGs3-oBxQ"
     encryption_key: bytes = b"JAJOZunNSRFeXWXWVVVJfiKSzdzFMw0yFn8_JK50h60="
-
 

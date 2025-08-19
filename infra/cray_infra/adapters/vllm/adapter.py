@@ -9,7 +9,7 @@ import torch
 from contextlib import contextmanager
 
 from ..common.adapter_commons import set_config_provider, ConfigProvider
-from ..model.tokenformer_clean import create_clean_tokenformer_manager, default_supports_tokenformer_check
+from ..model.tokenformer import create_tokenformer_manager, default_supports_tokenformer_check
 from .attention_adapter import patch_vllm_attention_layer
 
 logger = logging.getLogger(__name__)
@@ -117,7 +117,7 @@ class ScalarLMAdapter:
         
     def create_tokenformer_manager(self, model: VLLMModelProtocol, device: torch.device):
         """Create a tokenformer manager for a model."""
-        return create_clean_tokenformer_manager(
+        return create_tokenformer_manager(
             model=model,
             device=device,
             supports_tokenformer_check=self.supports_tokenformer_check
@@ -154,7 +154,7 @@ class EnhancedModelWrapper:
         logger.info("Initializing tokenformer for enhanced model")
         
         # Create tokenformer manager
-        self._tokenformer_manager = create_clean_tokenformer_manager(
+        self._tokenformer_manager = create_tokenformer_manager(
             model=self.vllm_model,
             device=self.device,
             capacity=self.config_provider.get_config_value("tokenformer_cache_capacity", 4),

@@ -43,11 +43,10 @@ from .vllm.adapter import (
 )
 
 # Tokenformer Components
-from .model.tokenformer_clean import (
+from .model.tokenformer import (
     TokenformerModel,
-    TokenformerManager,  # Primary class name
-    CleanTokenformerManager,  # Deprecated alias
-    create_clean_tokenformer_manager,
+    TokenformerManager,
+    create_tokenformer_manager,
     default_supports_tokenformer_check,
 )
 
@@ -91,9 +90,8 @@ __all__ = [
     
     # Tokenformer
     "TokenformerModel",
-    "TokenformerManager",  # Primary class name
-    "CleanTokenformerManager",  # Deprecated alias
-    "create_clean_tokenformer_manager",
+    "TokenformerManager",
+    "create_tokenformer_manager",
     "default_supports_tokenformer_check",
     
     # Adapter Commons

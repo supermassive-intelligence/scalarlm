@@ -53,7 +53,7 @@ ARG MAX_JOBS=4
 ARG TORCH_VERSION="2.7.1"
 
 RUN pip install uv
-RUN uv pip install torch==${TORCH_VERSION}+cpu --index-url https://download.pytorch.org/whl/cpu
+RUN uv pip install torch==${TORCH_VERSION} --index-url https://download.pytorch.org/whl/cpu
 
 # Put torch on the LD_LIBRARY_PATH
 ENV LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}:/app/.venv/lib64/python3.12/site-packages/torch/lib
@@ -105,13 +105,15 @@ WORKDIR ${INSTALL_ROOT}
 # Install build dependencies FIRST
 RUN pip install numpy packaging setuptools-scm wheel cmake ninja
 
-# Configure vLLM fork branch (can be overridden at build time)
+# Configure vLLM source - can use either local directory or remote repo
+ARG VLLM_SOURCE=remote
 ARG VLLM_BRANCH=rschiavi/vllm-adapter
 ARG VLLM_REPO=https://github.com/funston/vllm.git
 
-# Always clone and install vLLM (REQUIRED for ScalarLM)
-RUN --mount=type=cache,target=/root/.cache/git \
-    git clone -b ${VLLM_BRANCH} ${VLLM_REPO} ${INSTALL_ROOT}/vllm
+# Handle vLLM source - keep it simple with bind mount approach
+COPY scripts/build-copy-vllm.sh ${INSTALL_ROOT}/build-copy-vllm.sh
+RUN --mount=type=bind,source=.,target=/workspace \
+    bash ${INSTALL_ROOT}/build-copy-vllm.sh ${VLLM_SOURCE} ${INSTALL_ROOT}/vllm /workspace/vllm ${VLLM_REPO} ${VLLM_BRANCH}
 
 # Set build environment variables for CPU compilation
 ARG VLLM_TARGET_DEVICE=cpu
@@ -121,6 +123,11 @@ ENV MAX_JOBS=${MAX_JOBS}
 
 # Build vLLM from source with CPU target  
 WORKDIR ${INSTALL_ROOT}/vllm
+
+# Set fallback version for setuptools-scm in case git metadata is missing
+# This handles cases where git history might be incomplete
+ENV SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM=0.6.3.post1
+
 RUN echo "Building vLLM for CPU with target device: ${VLLM_TARGET_DEVICE}" && \
     echo "Max jobs: ${MAX_JOBS}" && \
     VLLM_TARGET_DEVICE=cpu python setup.py build_ext --inplace && \
@@ -159,7 +166,7 @@ COPY ./sdk ${INSTALL_ROOT}/sdk
 COPY ./test ${INSTALL_ROOT}/test
 COPY ./ml ${INSTALL_ROOT}/ml
 COPY ./scripts ${INSTALL_ROOT}/scripts
-COPY ./examples ${INSTALL_ROOT}/examples
+
 
 
 COPY ./pyproject.toml ${INSTALL_ROOT}/pyproject.toml

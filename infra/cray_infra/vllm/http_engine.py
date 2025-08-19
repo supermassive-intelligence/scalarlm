@@ -171,6 +171,28 @@ class HTTPVLLMEngine(VLLMEngineInterface):
         if self.session and not self.session.closed:
             await self.session.close()
     
+    async def get_free_kv_cache_tokens(self) -> int:
+        """Get free KV cache tokens via HTTP API."""
+        session = await self._get_session()
+        
+        try:
+            async with session.get(
+                f"{self.base_url}/v1/kv_cache/free_tokens"
+            ) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    logger.warning(f"Failed to get free tokens via HTTP ({response.status}): {error_text}")
+                    return 0
+                
+                data = await response.json()
+                free_tokens = data.get("free_tokens", 0)
+                logger.debug(f"Retrieved {free_tokens} free tokens via HTTP API")
+                return free_tokens
+                
+        except Exception as e:
+            logger.error(f"Error getting free KV cache tokens via HTTP: {e}")
+            return 0
+    
     @property
     def engine_type(self) -> str:
         return "http"

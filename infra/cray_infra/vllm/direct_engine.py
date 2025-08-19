@@ -28,6 +28,37 @@ class DirectVLLMEngine(VLLMEngineInterface):
         self._serving_embedding = None
         self._serving_completion = None
         self._serving_chat = None
+        self._stats_task = None
+        
+        # Start stats logging task
+        self._start_stats_logging()
+        
+    def _start_stats_logging(self):
+        """Start periodic stats logging task."""
+        try:
+            # Only start if we're in an async context
+            loop = asyncio.get_running_loop()
+            self._stats_task = loop.create_task(self._stats_logging_loop())
+            logger.info("✓ Started stats logging task for DirectVLLMEngine")
+        except RuntimeError:
+            # Not in async context, will start later if needed
+            logger.debug("Not in async context, stats logging will start when first async call is made")
+            pass
+    
+    async def _stats_logging_loop(self):
+        """Periodic stats logging loop."""
+        try:
+            while True:
+                await asyncio.sleep(10.0)  # Log every 10 seconds (matches VLLM_LOG_STATS_INTERVAL default)
+                try:
+                    await self.engine.do_log_stats()
+                except Exception as e:
+                    logger.warning(f"Failed to log stats: {e}")
+        except asyncio.CancelledError:
+            logger.info("Stats logging task cancelled")
+            raise
+        except Exception as e:
+            logger.error(f"Stats logging task error: {e}")
         
     async def _get_serving_embedding(self):
         """Get or create OpenAI embedding serving layer."""
@@ -86,6 +117,8 @@ class DirectVLLMEngine(VLLMEngineInterface):
     async def generate_embeddings(self, prompt: str, model: str) -> List[float]:
         """Generate embeddings using direct vLLM engine calls."""
         try:
+            # Ensure stats task is running
+            await self._ensure_stats_task_started()
             serving_embedding = await self._get_serving_embedding()
             
             # Create embedding request
@@ -112,6 +145,16 @@ class DirectVLLMEngine(VLLMEngineInterface):
             logger.error(f"Error in direct embedding generation: {e}")
             raise RuntimeError(f"Direct embedding generation failed: {e}")
     
+    async def _ensure_stats_task_started(self):
+        """Ensure stats logging task is running."""
+        if self._stats_task is None or self._stats_task.done():
+            try:
+                loop = asyncio.get_running_loop()
+                self._stats_task = loop.create_task(self._stats_logging_loop())
+                logger.info("✓ Started stats logging task for DirectVLLMEngine")
+            except Exception as e:
+                logger.warning(f"Failed to start stats logging task: {e}")
+
     async def generate_completion(
         self, 
         prompt: str, 
@@ -121,10 +164,12 @@ class DirectVLLMEngine(VLLMEngineInterface):
     ) -> str:
         """Generate completion using direct vLLM engine calls."""
         try:
+            # Ensure stats task is running
+            await self._ensure_stats_task_started()
             # Bypass serving layer and call engine directly
             from vllm import SamplingParams
             
-            # Create sampling parameters
+            # Create sampling parameters compatible with vLLM v1
             sampling_params = SamplingParams(
                 max_tokens=max_tokens or 100,
                 temperature=kwargs.get('temperature', 1.0),
@@ -132,19 +177,26 @@ class DirectVLLMEngine(VLLMEngineInterface):
                 stop=kwargs.get('stop'),
                 presence_penalty=kwargs.get('presence_penalty', 0.0),
                 frequency_penalty=kwargs.get('frequency_penalty', 0.0),
-                use_beam_search=kwargs.get('use_beam_search', False),
+                # use_beam_search not supported in v1 - removed
                 top_k=kwargs.get('top_k', -1),
-                ignore_eos=kwargs.get('ignore_eos', False),
+                # ignore_eos not supported in v1 - removed  
                 skip_special_tokens=kwargs.get('skip_special_tokens', True),
                 spaces_between_special_tokens=kwargs.get('spaces_between_special_tokens', True),
             )
             
             # Generate completion using the engine directly
-            results = await self.engine.generate(prompt, sampling_params, request_id=f"direct_{id(prompt)}")
+            # In v1, engine.generate() returns an async generator, not a single result
+            request_id = f"direct_{id(prompt)}"
             
-            # Extract the generated text
+            # Collect all results from the async generator
+            results = []
+            async for result in self.engine.generate(prompt, sampling_params, request_id=request_id):
+                results.append(result)
+            
+            # Extract the generated text from the final result
             if results and len(results) > 0:
-                outputs = results[0].outputs
+                final_result = results[-1]  # Get the final result
+                outputs = final_result.outputs
                 if outputs and len(outputs) > 0:
                     return outputs[0].text
                 else:
@@ -165,6 +217,8 @@ class DirectVLLMEngine(VLLMEngineInterface):
     ) -> str:
         """Generate chat completion using direct vLLM engine calls."""
         try:
+            # Ensure stats task is running
+            await self._ensure_stats_task_started()
             serving_chat = await self._get_serving_chat()
             
             # Convert messages to proper format
@@ -244,6 +298,17 @@ class DirectVLLMEngine(VLLMEngineInterface):
             logger.info("Direct engine cleanup completed")
         except Exception as e:
             logger.warning(f"Error during direct engine cleanup: {e}")
+    
+    async def get_free_kv_cache_tokens(self) -> int:
+        """Get free KV cache tokens via direct method call."""
+        try:
+            # Call the method we implemented in the vLLM fork directly
+            free_tokens = await self.engine.get_free_kv_cache_tokens()
+            logger.debug(f"Retrieved {free_tokens} free tokens via direct method")
+            return free_tokens
+        except Exception as e:
+            logger.error(f"Error getting free KV cache tokens via direct method: {e}")
+            return 0
     
     @property
     def engine_type(self) -> str:

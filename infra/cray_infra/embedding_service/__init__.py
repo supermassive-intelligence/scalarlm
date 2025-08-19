@@ -1,1 +1,0 @@
-# ScalarLM Embedding Service
