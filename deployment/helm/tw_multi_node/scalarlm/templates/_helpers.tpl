@@ -11,6 +11,10 @@ gotemplate
 {{- printf "%s-megatron" .Chart.Name | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
+{{- define "scalarlm.cloudflaredFullName" -}}
+{{- printf "%s-cloudflared" .Chart.Name | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
 {{- define "scalarlm.labels" -}}
 app.kubernetes.io/name: {{ include "scalarlm.fullname" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
@@ -23,5 +27,10 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 
 {{- define "scalarlm.megatronlabels" -}}
 app.kubernetes.io/name: {{ include "scalarlm.megatronname" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end -}}
+
+{{- define "scalarlm.cloudflaredLabels" -}}
+app.kubernetes.io/name: {{ include "scalarlm.cloudflaredFullName" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}

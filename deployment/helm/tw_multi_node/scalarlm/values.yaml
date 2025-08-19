@@ -18,14 +18,17 @@ cache_pvc:
   size: 200Gi
 
 slurm_config_pvc:
-    storageClass: longhorn
-    size: 10Gi
+  storageClass: longhorn
+  size: 10Gi
 
-model: meta-llama/Llama-3.3-3B-Instruct
+cloudflared:
+  tunnelToken: YOUR_TOKEN_HERE
+
+model: meta-llama/Llama-3.2-3B-Instruct
 max_model_length: 8192
 gpu_memory_utilization: 0.95
 
 training_gpus: 2
-inference_gpus: 0
+inference_gpus: 1
 
 max_train_time: 86400
