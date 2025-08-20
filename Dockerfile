@@ -105,13 +105,15 @@ WORKDIR ${INSTALL_ROOT}
 # Install build dependencies FIRST
 RUN pip install numpy packaging setuptools-scm wheel cmake ninja
 
-# Configure vLLM fork branch (can be overridden at build time)
+# Configure vLLM source - can use either local directory or remote repo
+ARG VLLM_SOURCE=remote
 ARG VLLM_BRANCH=rschiavi/vllm-adapter
 ARG VLLM_REPO=https://github.com/funston/vllm.git
 
-# Always clone and install vLLM (REQUIRED for ScalarLM)
-RUN --mount=type=cache,target=/root/.cache/git \
-    git clone -b ${VLLM_BRANCH} ${VLLM_REPO} ${INSTALL_ROOT}/vllm
+# Handle vLLM source - keep it simple with bind mount approach
+COPY scripts/build-copy-vllm.sh ${INSTALL_ROOT}/build-copy-vllm.sh
+RUN --mount=type=bind,source=.,target=/workspace \
+    bash ${INSTALL_ROOT}/build-copy-vllm.sh ${VLLM_SOURCE} ${INSTALL_ROOT}/vllm /workspace/vllm ${VLLM_REPO} ${VLLM_BRANCH}
 
 # Set build environment variables for CPU compilation
 ARG VLLM_TARGET_DEVICE=cpu
@@ -121,6 +123,11 @@ ENV MAX_JOBS=${MAX_JOBS}
 
 # Build vLLM from source with CPU target  
 WORKDIR ${INSTALL_ROOT}/vllm
+
+# Set fallback version for setuptools-scm in case git metadata is missing
+# This handles cases where git history might be incomplete
+ENV SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM=0.6.3.post1
+
 RUN echo "Building vLLM for CPU with target device: ${VLLM_TARGET_DEVICE}" && \
     echo "Max jobs: ${MAX_JOBS}" && \
     VLLM_TARGET_DEVICE=cpu python setup.py build_ext --inplace && \
