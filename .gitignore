@@ -112,3 +112,9 @@ wandb/
 
 # Old embedded vLLM (after migration)
 # infra/cray_infra/vllm/
+
+
+tmp/
+patches/
+# Local vLLM clone for development
+vllm/
