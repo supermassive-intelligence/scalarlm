@@ -5,11 +5,11 @@ class Config(BaseModel):
     api_url: str = "http://localhost:8000"
 
     #model: str = "masint/tiny-random-qwen2-vl"
-    #model: str = "masint/tiny-random-llama"
+    model: str = "masint/tiny-random-llama"
     #model: str = "sentence-transformers/all-MiniLM-L6-v2"
     #model: str = "microsoft/DialoGPT-medium"
     # Generation model (vLLM)
-    model: str = "openai-community/gpt2"
+    #model: str = "openai-community/gpt2"
     
     # Embedding model (separate service)
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
@@ -71,5 +71,4 @@ class Config(BaseModel):
 
     hf_encrypted_token: bytes = b"gAAAAABoZ4CYsnzw-l4vEnBm_4zSfSinpxYoRmXmLYigjOP8q3e8-ZfWRViszKcSN_P5krZgur8NxwyYW_hNimIRqfeKgMNZThI8wB9zedsj9AJ0nmRfZbDeTISFnlgetSPcGs3-oBxQ"
     encryption_key: bytes = b"JAJOZunNSRFeXWXWVVVJfiKSzdzFMw0yFn8_JK50h60="
-
 
