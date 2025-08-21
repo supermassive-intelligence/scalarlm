@@ -108,7 +108,7 @@ RUN pip install numpy packaging setuptools-scm wheel cmake ninja
 # Configure vLLM source - can use either local directory or remote repo
 ARG VLLM_SOURCE=remote
 ARG VLLM_BRANCH=rschiavi/vllm-adapter
-ARG VLLM_REPO=https://github.com/funston/vllm.git
+ARG VLLM_REPO=https://github.com/supermassive-intelligence/vllm.git
 
 # Handle vLLM source - keep it simple with bind mount approach
 COPY scripts/build-copy-vllm.sh ${INSTALL_ROOT}/build-copy-vllm.sh
@@ -121,7 +121,7 @@ ENV VLLM_TARGET_DEVICE=${VLLM_TARGET_DEVICE}
 ENV CMAKE_BUILD_TYPE=Release
 ENV MAX_JOBS=${MAX_JOBS}
 
-# Build vLLM from source with CPU target  
+# Build vLLM from source with CPU target
 WORKDIR ${INSTALL_ROOT}/vllm
 
 # Set fallback version for setuptools-scm in case git metadata is missing
@@ -166,8 +166,6 @@ COPY ./sdk ${INSTALL_ROOT}/sdk
 COPY ./test ${INSTALL_ROOT}/test
 COPY ./ml ${INSTALL_ROOT}/ml
 COPY ./scripts ${INSTALL_ROOT}/scripts
-COPY ./examples ${INSTALL_ROOT}/examples
-
 
 COPY ./pyproject.toml ${INSTALL_ROOT}/pyproject.toml
 COPY ./setup.py ${INSTALL_ROOT}/setup.py
@@ -183,8 +181,7 @@ ENV VLLM_WORKER_MULTIPROC_METHOD=spawn
 ENV VLLM_LOGGING_LEVEL=DEBUG
 # https://github.com/vllm-project/vllm-ascend/issues/1048
 ENV VLLM_PLUGINS=ascend,ascend_enhanced_model
-# For CPU mode, don't set CUDA_VISIBLE_DEVICES at all since there are no CUDA devices
-# ENV CUDA_VISIBLE_DEVICES="0"
+
 RUN pip install -e .[training]
 
 # Build SLURM plugin

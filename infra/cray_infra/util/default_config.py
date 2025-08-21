@@ -10,7 +10,7 @@ class Config(BaseModel):
     #model: str = "microsoft/DialoGPT-medium"
     # Generation model (vLLM)
     #model: str = "openai-community/gpt2"
-    
+
     # Embedding model (separate service)
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     embedding_service_url: str = "http://localhost:8002"
@@ -30,11 +30,11 @@ class Config(BaseModel):
     megatron_refresh_period: int = 30 # seconds
 
     vllm_api_url: str = "http://localhost:8001"
-    
+
     # vLLM Engine Configuration
     vllm_use_http: bool = True  # Use HTTP API (True) or direct engine calls (False)
     vllm_http_timeout: float = 30.0  # HTTP timeout in seconds
-    
+
     # Direct engine configuration (when vllm_use_http=False)
     enable_lora: bool = True
     max_lora_rank: int = 16
@@ -56,6 +56,7 @@ class Config(BaseModel):
 
     gpu_memory_utilization: float = 0.50
     max_model_length: int = 1024  # Restored for DialoGPT-medium compatibility
+    default_max_output_tokens: int = 128
     dtype: str = "float32"
 
     max_log_length: int = 100

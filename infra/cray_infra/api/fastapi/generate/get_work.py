@@ -60,4 +60,4 @@ async def get_work(request: GetWorkRequest):
 
     logger.info(f"Got the following request ids: {[req.request_id for req in requests]}")
 
-    return GetWorkResponses(requests=requests)
+    return GetWorkResponses(requests=requests, get_adaptors_response=await get_adaptors(request))
