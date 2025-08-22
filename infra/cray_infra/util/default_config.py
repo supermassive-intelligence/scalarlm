@@ -11,9 +11,6 @@ class Config(BaseModel):
     # Generation model (vLLM)
     #model: str = "openai-community/gpt2"
     
-    # Embedding model (separate service)
-    embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
-    embedding_service_url: str = "http://localhost:8002"
 
     # 10GB using 1024 for KB, 1024 for MB, 1024 for GB
     max_upload_file_size: int = 1024 * 1024 * 1024 * 10

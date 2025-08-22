@@ -86,6 +86,19 @@ class VLLMEngineInterface(ABC):
         """Clean up any resources used by the engine."""
         pass
     
+    @abstractmethod
+    async def get_free_kv_cache_tokens(self) -> int:
+        """
+        Get the number of free KV cache tokens available.
+        
+        This method queries the vLLM engine for the current number of 
+        free tokens available in the KV cache, used for dynamic batch sizing.
+        
+        Returns:
+            Number of free tokens available in KV cache
+        """
+        pass
+    
     @property
     @abstractmethod
     def engine_type(self) -> str:

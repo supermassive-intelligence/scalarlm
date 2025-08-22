@@ -4,7 +4,6 @@ These endpoints are exposed directly under /v1/ to match OpenAI API spec.
 """
 
 from vllm.entrypoints.openai.protocol import (
-    EmbeddingRequest,
     CompletionRequest,
     ChatCompletionRequest,
 )
@@ -37,28 +36,6 @@ async def list_models():
                 status_code=resp.status
             )
 
-
-@openai_v1_router.post("/embeddings")
-async def create_embeddings(request: EmbeddingRequest, raw_request: Request):
-    """Create embeddings - proxy to vLLM server."""
-    session = get_global_session()
-    config = get_config()
-    
-    logger.info(f"Received embeddings request: {request.dict()}")
-    
-    async with session.post(
-        config["vllm_api_url"] + "/v1/embeddings", 
-        json=request.dict()
-    ) as resp:
-        if resp.status == 200:
-            return await resp.json()
-        else:
-            error_text = await resp.text()
-            logger.error(f"vLLM embeddings error ({resp.status}): {error_text}")
-            return JSONResponse(
-                content={"error": f"Failed to create embeddings: {error_text}"}, 
-                status_code=resp.status
-            )
 
 
 @openai_v1_router.post("/completions")

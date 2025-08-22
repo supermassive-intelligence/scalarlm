@@ -158,6 +158,8 @@ python_files = ["test_*.py", "*_health.py", "vllm_health.py", "sanity.py", "get_
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = "--verbose --ignore=test/legacy --ignore=test/collectives --ignore=test/benchmark --ignore=test/deployment --ignore=test/ml"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 
 [tool.mypy]
 python_version = "3.8"
