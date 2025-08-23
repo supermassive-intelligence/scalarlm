@@ -62,7 +62,7 @@ async def create_vllm(server_status, port):
         f"--no-enable-server-load-tracking",
         #f"--swap-space=0",
         # NOTE: GPT-2 doesn't support LoRA, so we don't enable it
-        # "--enable-lora",
+        "--enable-lora",
     ]
 
     # CPU backend only supports V1 scheduler

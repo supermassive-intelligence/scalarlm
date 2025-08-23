@@ -18,7 +18,7 @@ dataset = ["Hello, how are you?", "What is 10 + 15?", "Tell me a story"]
 results = llm.generate(
     prompts=dataset,
     max_tokens=200,
-    model_name="291ae1f17b6f6e008976697698866ba297674886e2fa280aacdc77576ec9ae40",
+    model_name="584f8bc8bfaf6ee2d9a5a0616ee8994122ec1320a9059f4e4c563172be64c915",
 )
 
 print(results)

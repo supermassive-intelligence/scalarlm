@@ -94,7 +94,7 @@ async def create_generate_worker(server_status):
 
             work_data = await get_work_response.json()
 
-            adaptors = work_data["new_adaptors"]
+            adaptors = work_data["new_adaptors"]["new_adaptors"]
 
             loaded_adaptor_count = await add_adaptors(app, adaptors, loaded_adaptor_count)
 
