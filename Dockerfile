@@ -11,8 +11,6 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 RUN python -m venv $VIRTUAL_ENV --system-site-packages
 RUN . $VIRTUAL_ENV/bin/activate
 
-ARG MAX_JOBS=8
-
 # Put HPC-X MPI in the PATH, i.e. mpirun
 ENV PATH=$PATH:/opt/hpcx/ompi/bin
 ENV LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}:/opt/hpcx/ompi/lib
@@ -47,7 +45,6 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 RUN python3 -m venv $VIRTUAL_ENV
 RUN . $VIRTUAL_ENV/bin/activate
 
-ARG MAX_JOBS=4
 #ENV DNNL_DEFAULT_FPMATH_MODE=F32
 
 ARG TORCH_VERSION="2.7.1"
@@ -66,7 +63,6 @@ ENV BASE_NAME=cpu
 ###############################################################################
 # AMD BASE IMAGE
 FROM gdiamos/rocm-base:v0.95 AS amd
-ARG MAX_JOBS=8
 
 ENV BASE_NAME=amd
 
@@ -112,14 +108,17 @@ ARG VLLM_REPO=https://github.com/supermassive-intelligence/vllm.git
 
 # Handle vLLM source - keep it simple with bind mount approach
 COPY scripts/build-copy-vllm.sh ${INSTALL_ROOT}/build-copy-vllm.sh
-RUN --mount=type=bind,source=.,target=/workspace \
-    bash ${INSTALL_ROOT}/build-copy-vllm.sh ${VLLM_SOURCE} ${INSTALL_ROOT}/vllm /workspace/vllm ${VLLM_REPO} ${VLLM_BRANCH}
+RUN --mount=type=bind,source=./vllm,target=/workspace/vllm \
+    bash ${INSTALL_ROOT}/build-copy-vllm.sh ${VLLM_SOURCE} ${INSTALL_ROOT}/vllm \
+    /workspace/vllm ${VLLM_REPO} ${VLLM_BRANCH}
 
 # Set build environment variables for CPU compilation
+ARG TORCH_CUDA_ARCH_LIST="7.5"
 ARG VLLM_TARGET_DEVICE=cpu
+
+ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}
 ENV VLLM_TARGET_DEVICE=${VLLM_TARGET_DEVICE}
 ENV CMAKE_BUILD_TYPE=Release
-ENV MAX_JOBS=${MAX_JOBS}
 
 # Build vLLM from source with CPU target
 WORKDIR ${INSTALL_ROOT}/vllm
@@ -128,10 +127,13 @@ WORKDIR ${INSTALL_ROOT}/vllm
 # This handles cases where git history might be incomplete
 ENV SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM=0.6.3.post1
 
-RUN echo "Building vLLM for CPU with target device: ${VLLM_TARGET_DEVICE}" && \
-    echo "Max jobs: ${MAX_JOBS}" && \
-    VLLM_TARGET_DEVICE=cpu python setup.py build_ext --inplace && \
-    VLLM_TARGET_DEVICE=cpu pip install -e . --verbose
+RUN \
+    --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=cache,target=/root/.cache/ccache \
+    echo "Building vLLM for CPU with target device: ${VLLM_TARGET_DEVICE}" && \
+    MAX_JOBS=$(nproc) echo "Max jobs: ${MAX_JOBS}" && \
+    MAX_JOBS=$(nproc) python setup.py build_ext --inplace && \
+    pip install -e . --verbose
 
 WORKDIR ${INSTALL_ROOT}
 
@@ -146,7 +148,7 @@ RUN python3 ${INSTALL_ROOT}/infra/cray_infra/training/gpu_aware_mpi/setup.py bdi
 
 RUN apt-get update -y  \
     && apt-get install -y build-essential \
-    less curl wget net-tools vim iputils-ping strace gdb \
+    less curl wget net-tools vim iputils-ping strace gdb python3-dbg python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Setup python path
@@ -154,11 +156,21 @@ ENV PYTHONPATH="${PYTHONPATH}:${INSTALL_ROOT}/infra"
 ENV PYTHONPATH="${PYTHONPATH}:${INSTALL_ROOT}/sdk"
 ENV PYTHONPATH="${PYTHONPATH}:${INSTALL_ROOT}/ml"
 ENV PYTHONPATH="${PYTHONPATH}:${INSTALL_ROOT}/test"
+
 # Add vLLM clone directly to Python path (primary method)
 ENV PYTHONPATH="${PYTHONPATH}:${INSTALL_ROOT}/vllm"
 
 RUN mkdir -p ${INSTALL_ROOT}/jobs
 RUN mkdir -p ${INSTALL_ROOT}/nfs
+
+COPY ./pyproject.toml ${INSTALL_ROOT}/pyproject.toml
+COPY ./setup.py ${INSTALL_ROOT}/setup.py
+
+# Fix setuptools-scm version detection in Docker
+ENV SETUPTOOLS_SCM_PRETEND_VERSION=0.2.0
+
+# Install ScaleLLM platform dependencies
+RUN pip install -e .[training]
 
 # Copy the rest of the platform code
 COPY ./infra ${INSTALL_ROOT}/infra
@@ -167,12 +179,7 @@ COPY ./test ${INSTALL_ROOT}/test
 COPY ./ml ${INSTALL_ROOT}/ml
 COPY ./scripts ${INSTALL_ROOT}/scripts
 
-COPY ./pyproject.toml ${INSTALL_ROOT}/pyproject.toml
-COPY ./setup.py ${INSTALL_ROOT}/setup.py
-
 WORKDIR ${INSTALL_ROOT}
-# Fix setuptools-scm version detection in Docker
-ENV SETUPTOOLS_SCM_PRETEND_VERSION=0.2.0
 
 # Set vLLM environment variables for CPU mode
 ENV VLLM_TARGET_DEVICE=cpu
@@ -182,7 +189,6 @@ ENV VLLM_LOGGING_LEVEL=DEBUG
 # https://github.com/vllm-project/vllm-ascend/issues/1048
 ENV VLLM_PLUGINS=ascend,ascend_enhanced_model
 
-RUN pip install -e .[training]
 
 # Build SLURM plugin
 RUN /app/cray/infra/slurm_src/compile.sh

@@ -5,7 +5,8 @@ import json
 import os
 
 import logging
-from typing import Optional
+
+from typing import Optional, NoReturn
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -16,9 +17,11 @@ from vllm.entrypoints.openai.api_server import (
     create_completion,
 )
 
-from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                              CompletionRequest,
-                                              LoadLoraAdapterRequest)
+from vllm.entrypoints.openai.protocol import (
+    ChatCompletionRequest,
+    CompletionRequest,
+    LoadLoRAAdapterRequest,
+)
 
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 
@@ -34,7 +37,7 @@ from cray_infra.util.get_config import get_config
 logger = logging.getLogger(__name__)
 
 
-async def create_generate_worker(running_status):
+async def create_generate_worker(server_status):
     """
     Create a worker that processes generate requests from the queue.
     Uses configurable vLLM engine (HTTP or direct) for processing.
@@ -46,7 +49,7 @@ async def create_generate_worker(running_status):
     config = get_config()
     api_base = config["api_url"]
 
-    app = await running_status.get_app()
+    app = await server_status.get_app()
 
     # Main worker loop
     session: Optional[aiohttp.ClientSession] = None
@@ -68,12 +71,12 @@ async def create_generate_worker(running_status):
                 await asyncio.sleep(0.1)
                 continue
 
-            logger.debug("Checking for work...")
+            logger.debug(f"Checking for work with batch size: {batch_size}, loaded adaptors: {loaded_adaptor_count}...")
 
             try:
                 get_work_response = await session.post(
                     f"{api_base}/v1/generate/get_work",
-                    json={"batch_size": batch_size},
+                    json={"batch_size": batch_size, "loaded_adaptor_count": loaded_adaptor_count},
                     timeout=aiohttp.ClientTimeout(total=config["inference_work_queue_timeout"]),
                 )
 
@@ -91,11 +94,9 @@ async def create_generate_worker(running_status):
 
             work_data = await get_work_response.json()
 
-            adaptors = work_data.get("adaptors", [])
+            adaptors = work_data["new_adaptors"]
 
-            loaded_adaptor_count = await add_adaptors(
-                app, adaptors, loaded_adaptor_count
-            )
+            loaded_adaptor_count = await add_adaptors(app, adaptors, loaded_adaptor_count)
 
             requests = work_data.get("requests", [])
 
@@ -104,9 +105,15 @@ async def create_generate_worker(running_status):
                 await asyncio.sleep(1)
                 continue
 
-            new_task = process_requests(app, requests)
+            new_task = await process_requests(app, requests)
 
             tasks.append(new_task)
+
+    except Exception as e:
+        # print backtrace for debugging
+        logger.error(f"Worker encountered an error: {e}", exc_info=True)
+        logger.error("Shutting down worker due to error")
+
 
     finally:
         # Cleanup resources
@@ -115,17 +122,20 @@ async def create_generate_worker(running_status):
 
         logger.info("Generate worker shutting down")
 
+
 def clear_finished_tasks(tasks):
-    """
-    Clear finished tasks from the list.
-    This is necessary to prevent memory leaks and keep the task list manageable.
-    """
+    # Handle exceptions
+    for task in tasks:
+        if task.done():
+            try:
+                task.result()  # Get the result to raise any exceptions
+            except Exception as e:
+                logger.error(f"Task raised an exception: {e}", exc_info=True)
+
     tasks[:] = [task for task in tasks if not task.done()]
 
     # Log the number of remaining tasks
     logger.debug(f"Remaining tasks: {len(tasks)}")
-
-
 
 
 async def get_batch_size(app):
@@ -147,7 +157,7 @@ async def get_batch_size(app):
     return batch_size
 
 
-async def add_adaptors(app, loaded_adaptor_count):
+async def add_adaptors(app, adaptors, loaded_adaptor_count):
     config = get_config()
 
     params = {
@@ -156,15 +166,8 @@ async def add_adaptors(app, loaded_adaptor_count):
 
     try:
         session = get_global_session()
-        async with session.post(
-            config["api_url"] + "/v1/generate/get_adaptors",
-            json=params,
-        ) as resp:
-            assert resp.status == 200
 
-            data = await resp.json()
-
-        for new_adaptor in data["new_adaptors"]:
+        for new_adaptor in adaptors:
             logger.info("Loading new adaptor: %s", new_adaptor)
             try:
                 await add_new_adaptor(app, new_adaptor)
@@ -184,7 +187,9 @@ async def add_new_adaptor(app: FastAPI, new_adaptor: str):
 
     new_adaptor_path = os.path.join(base_path, new_adaptor)
 
-    lora_adaptor_request = LoadLoraAdapterRequest(lora_name=new_adaptor, lora_path=new_adaptor_path)
+    logger.info("Loading new adaptor from path: %s", new_adaptor_path)
+
+    lora_adaptor_request = LoadLoRAAdapterRequest(lora_name=new_adaptor, lora_path=new_adaptor_path)
 
     raw_request = Request(
         scope={
@@ -196,7 +201,7 @@ async def add_new_adaptor(app: FastAPI, new_adaptor: str):
         receive=pass_receive,
     )
 
-    response = await load_lora_adapter(lora_adaptor_request, raw_request)
+    response = await load_lora_adapter(lora_adaptor_request, raw_request=raw_request)
 
     if isinstance(response, JSONResponse):
         if response.status_code != 200:
@@ -211,7 +216,8 @@ async def add_new_adaptor(app: FastAPI, new_adaptor: str):
         else:
             logger.info("Successfully loaded new adaptor: %s", new_adaptor)
 
-def process_requests(app, requests):
+
+async def process_requests(app, requests):
     """
     Process a batch of requests using the vLLM engine.
     This function creates tasks for each request and returns them.
@@ -221,18 +227,25 @@ def process_requests(app, requests):
     return asyncio.create_task(process_requests_task(app, requests))
 
 
-def process_requests_task(app, requests):
-    logger.info(f"Processing {len(requests)} requests with {vllm_engine.engine_type} engine")
+async def process_requests_task(app, requests):
+    logger.info(f"Processing {len(requests)} requests ")
 
     config = get_config()
 
-    logger.info("Got work: %s", truncate_fields(data))
+    logger.info("Got work: %s", truncate_fields({"requests": requests}))
 
-    completion_tasks = [
-        async_generate_task(request, app, state) for request in data["requests"]
-    ]
+    completion_tasks = [async_generate_task(request, app) for request in requests]
 
-    results = await asyncio.gather(*completion_tasks)
+    results = await asyncio.gather(*completion_tasks, return_exceptions=True)
+
+    # Handle exceptions
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            logger.error(f"Task {i} raised an exception: {result}", exc_info=True)
+            results[i] = {
+                "request_id": requests[i]["request_id"],
+                "error": str(result),
+            }
 
     params = {"requests": results}
 
@@ -261,16 +274,17 @@ def truncate_fields(data):
     return data
 
 
-async def pass_receive() -> typing.NoReturn:
+async def pass_receive() -> NoReturn:
+    await asyncio.sleep(10.0)
     return {"type": "http.request"}
 
 
-async def async_generate_task(request, app, state):
+async def async_generate_task(request, app):
     if request["request_type"] == "generate":
         if is_chat_completion_task(request):
-            return await async_chat_completion_task(request, app, state)
+            return await async_chat_completion_task(request, app)
         else:
-            return await async_completion_task(request, app, state)
+            return await async_completion_task(request, app)
     else:
         raise ValueError(f"Invalid request type: {request['request_type']}")
 
@@ -282,7 +296,7 @@ def is_chat_completion_task(request):
     return True
 
 
-async def async_chat_completion_task(request, app, state):
+async def async_chat_completion_task(request, app):
     completion_request = ChatCompletionRequest(
         model=request["model"],
         messages=convert_prompt_to_openai_format(request["prompt"]),
@@ -390,7 +404,7 @@ def compute_flop_count(model_config):
     return total_flops
 
 
-async def async_completion_task(request, app, state):
+async def async_completion_task(request, app):
     completion_request = CompletionRequest(
         model=request["model"],
         prompt=request["prompt"],
@@ -403,7 +417,7 @@ async def async_completion_task(request, app, state):
         receive=pass_receive,
     )
 
-    response = await create_completion(completion_request, raw_request)
+    response = await create_completion(completion_request, raw_request=raw_request)
 
     response_data = json.loads(response.body.decode("utf-8"))
 
@@ -426,5 +440,3 @@ async def async_completion_task(request, app, state):
     app.state.engine_client.check_health()
 
     return response
-
-

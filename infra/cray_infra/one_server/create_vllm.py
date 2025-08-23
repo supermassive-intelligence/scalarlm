@@ -20,16 +20,24 @@ from cray_infra.util.get_config import get_config
 from cray_infra.huggingface.get_hf_token import get_hf_token
 
 from vllm.entrypoints.openai.api_server import build_app, decorate_logs, \
-    init_app_state, maybe_register_tokenizer_info_endpoint
+    init_app_state, maybe_register_tokenizer_info_endpoint, setup_server, \
+    load_log_config, build_async_engine_client
+
+from vllm.entrypoints.openai.tool_parsers import ToolParserManager
+from vllm.entrypoints.launcher import serve_http
+
 from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm.utils import FlexibleArgumentParser
+
+from vllm.entrypoints.utils import (log_non_default_args)
+import vllm.envs as envs
 
 import uvicorn
 import logging
 
 logger = logging.getLogger(__name__)
 
-async def create_vllm(running_status, port):
+async def create_vllm(server_status, port):
 
     print(f"DEBUG: BEFORE CONFIG - Environment variables:")
     print(f"  VLLM_TARGET_DEVICE: {os.environ.get('VLLM_TARGET_DEVICE', 'NOT SET')}")
@@ -51,6 +59,7 @@ async def create_vllm(running_status, port):
         f"--max-seq-len-to-capture={config['max_model_length']}",
         f"--gpu-memory-utilization={config['gpu_memory_utilization']}",
         f"--max-log-len={config['max_log_length']}",
+        f"--no-enable-server-load-tracking",
         #f"--swap-space=0",
         # NOTE: GPT-2 doesn't support LoRA, so we don't enable it
         # "--enable-lora",
@@ -81,19 +90,18 @@ async def create_vllm(running_status, port):
 
     logger.info(f"Running vLLM with args: {args}")
 
-    await run_server(running_status, args)
+    await run_server(server_status, args)
 
-async def run_server(running_status, args, **uvicorn_kwargs) -> None:
+async def run_server(server_status, args, **uvicorn_kwargs) -> None:
     """Run a single-worker API server."""
 
     # Add process-specific prefix to stdout and stderr.
     decorate_logs("APIServer")
 
     listen_address, sock = setup_server(args)
-    await run_server_worker(running_status, listen_address, sock, args, **uvicorn_kwargs)
+    await run_server_worker(server_status, listen_address, sock, args, **uvicorn_kwargs)
 
-
-async def run_server_worker(running_status, listen_address,
+async def run_server_worker(server_status, listen_address,
                             sock,
                             args,
                             client_config=None,
@@ -117,7 +125,7 @@ async def run_server_worker(running_status, listen_address,
 
         maybe_register_tokenizer_info_endpoint(args)
         app = build_app(args)
-        running_status.set_app(app)
+        server_status.set_app(app)
 
         vllm_config = await engine_client.get_vllm_config()
         await init_app_state(engine_client, vllm_config, app.state, args)

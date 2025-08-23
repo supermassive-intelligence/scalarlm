@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 async def start_cray_server(server_list: list):
 
-    running_status = ServerStatus()
+    server_status = ServerStatus()
 
     logger.debug(f"Starting servers: {server_list}")
 
@@ -20,9 +20,9 @@ async def start_cray_server(server_list: list):
     if ("api" in server_list) or ("all" in server_list):
         logger.debug("Starting API server")
         api_task = asyncio.create_task(
-            create_api(port=8000, running_status=running_status)
+            create_api(port=8000, server_status=server_status)
         )
-        running_status.tasks.append(api_task)
+        server_status.tasks.append(api_task)
         started_any_server = True
 
     if ("vllm" in server_list) or ("all" in server_list):
@@ -30,23 +30,23 @@ async def start_cray_server(server_list: list):
         vllm_task = asyncio.create_task(
             create_vllm(server_status=server_status, port=8001)
         )
-        running_status.tasks.append(vllm_task)
+        server_status.tasks.append(vllm_task)
         started_any_server = True
 
         # Start the generate worker
         logger.debug("Starting Generate Worker")
         worker_task = asyncio.create_task(
-            create_generate_worker(running_status=running_status)
+            create_generate_worker(server_status=server_status)
         )
-        running_status.tasks.append(worker_task)
+        server_status.tasks.append(worker_task)
         logger.info("✓ Generate worker started to process queue requests")
 
     if "megatron" in server_list:
         logger.debug("Megatron server doesn't need python")
         megatron_task = asyncio.create_task(
-            create_megatron(running_status=running_status)
+            create_megatron(server_status=server_status)
         )
-        running_status.tasks.append(megatron_task)
+        server_status.tasks.append(megatron_task)
         started_any_server = True
 
     if not started_any_server:
@@ -54,7 +54,7 @@ async def start_cray_server(server_list: list):
             "No valid server type provided. Please specify 'api', 'vllm', 'megatron', or 'all'."
         )
 
-    return running_status
+    return server_status
 
 
 class ServerStatus:

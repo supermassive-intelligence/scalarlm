@@ -1,7 +1,7 @@
 from pydantic import BaseModel
 from cray_infra.api.fastapi.routers.request_types.get_adaptors_response import (
     GetAdaptorsResponse,
-}
+)
 
 from typing import Optional, Union
 
