@@ -6,6 +6,7 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
 import logging
+import subprocess
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,45 @@ async def slurm_status():
 async def get_squeue():
     """Get SLURM queue information."""
     return await squeue()
+
+
+@slurm_router.post("/cancel/{job_id}")
+async def cancel_job(job_id: str):
+    """Cancel a SLURM job by ID."""
+    try:
+        result = subprocess.run(
+            ["scancel", job_id],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        
+        return {
+            "status": "success", 
+            "message": f"Job {job_id} cancelled successfully",
+            "job_id": job_id
+        }
+        
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Failed to cancel job {job_id}: {e.stderr}")
+        return JSONResponse(
+            content={
+                "status": "error",
+                "error": f"Failed to cancel job {job_id}: {e.stderr}",
+                "job_id": job_id
+            },
+            status_code=400
+        )
+    except Exception as e:
+        logger.exception(f"Error cancelling job {job_id}")
+        return JSONResponse(
+            content={
+                "status": "error", 
+                "error": str(e),
+                "job_id": job_id
+            },
+            status_code=500
+        )
 
 
 @slurm_router.get("/endpoints")
