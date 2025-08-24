@@ -1,4 +1,5 @@
 from pydantic import BaseModel
+from typing import Optional
 
 
 class Config(BaseModel):
@@ -29,7 +30,7 @@ class Config(BaseModel):
     vllm_api_url: str = "http://localhost:8001"
     
     # vLLM Engine Configuration
-    vllm_use_http: bool = True  # Use HTTP API (True) or direct engine calls (False)
+    vllm_use_http: bool = False  # Use HTTP API (True) or direct engine calls (False)
     vllm_http_timeout: float = 30.0  # HTTP timeout in seconds
     
     # Direct engine configuration (when vllm_use_http=False)
@@ -42,6 +43,7 @@ class Config(BaseModel):
     max_seq_len_to_capture: int = 8192
     max_logprobs: int = 20
     disable_sliding_window: bool = False
+    limit_mm_per_prompt: Optional[str] = None  # Limit multi-modal items per prompt, e.g. '{"image":2}'
 
     generate_batch_size: int = 1024
 

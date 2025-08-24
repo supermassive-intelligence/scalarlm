@@ -54,10 +54,9 @@ async def create_vllm(port):
         "--enable-lora"
     ]
 
-    # TODO: add this support back it got removed in the refactor
-    # Handle multimodal limits
-    # if config['limit_mm_per_prompt'] is not None:
-    #    args.append(f"--limit-mm-per-prompt={config['limit_mm_per_prompt']}")
+    # Handle multimodal limits (restored from original)
+    if config['limit_mm_per_prompt'] is not None:
+        args.append(f"--limit-mm-per-prompt={config['limit_mm_per_prompt']}")
 
         
     # CPU backend only supports V1 scheduler
