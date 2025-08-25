@@ -166,7 +166,7 @@ COPY ./sdk ${INSTALL_ROOT}/sdk
 COPY ./test ${INSTALL_ROOT}/test
 COPY ./ml ${INSTALL_ROOT}/ml
 COPY ./scripts ${INSTALL_ROOT}/scripts
-COPY ./examples ${INSTALL_ROOT}/examples
+
 
 
 COPY ./pyproject.toml ${INSTALL_ROOT}/pyproject.toml
