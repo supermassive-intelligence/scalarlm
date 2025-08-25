@@ -14,4 +14,3 @@ sortedcontainers
 fastapi-utils
 typing-inspect
 cachetools
-sentence-transformers>=2.2.2  # For embedding service
