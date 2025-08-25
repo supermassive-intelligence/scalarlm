@@ -22,9 +22,12 @@ RUN pip install uv
 
 RUN git clone --branch v0.0.28.post1 https://github.com/facebookresearch/xformers.git
 RUN uv pip install ninja
-RUN cd xformers && \
+RUN if [ ${TORCH_CUDA_ARCH_LIST} -ne "12.0" ]; then cd xformers && \
     git submodule update --init --recursive && \
-    TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} pip install . --no-deps
+    TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} pip install . --no-deps ; \
+    else \
+       echo "Skipping installation"; \
+    fi
 
 ARG INSTALL_ROOT=/app/cray
 WORKDIR ${INSTALL_ROOT}

@@ -100,21 +100,7 @@ Thumbs.db
 **/.nv_cache/
 **/__nv_cache__/
 
-# Tensorboard logs
-runs/
-tensorboard_logs/
-
-# MLflow
-mlruns/
-
-# Weights & Biases
-wandb/
-
-# Old embedded vLLM (after migration)
-# infra/cray_infra/vllm/
-
-
 tmp/
 patches/
 # Local vLLM clone for development
-vllm/
+vllm/***
