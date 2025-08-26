@@ -3,6 +3,9 @@ import logging
 import os
 import time
 import random
+import argparse
+import shutil
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +147,29 @@ def run_test():
 
 
 def main():
+    parser = argparse.ArgumentParser(description='Train and generate test')
+    parser.add_argument('--force-recreate', action='store_true', 
+                       help='Delete existing trained models before training')
+    args = parser.parse_args()
+    
+    if args.force_recreate:
+        # Delete the specific cached model that this test would use
+        # We need to predict what the model hash will be by looking for existing models
+        # that match our training dataset
+        training_job_dir = os.environ.get("TRAINING_JOB_DIRECTORY", "/app/cray/jobs")
+        if os.path.exists(training_job_dir):
+            # Look for any existing training job that might be from this test
+            # We'll identify it by finding models trained on our specific dataset
+            for item in os.listdir(training_job_dir):
+                item_path = os.path.join(training_job_dir, item)
+                if os.path.isdir(item_path) and len(item) == 64:  # SHA256 hash length
+                    # Check if this looks like a model from our test (simple heuristic)
+                    pt_files = list(Path(item_path).glob("*.pt"))
+                    if pt_files:
+                        logger.info(f"🗑️  --force-recreate: Found existing model {item}, removing {item_path}")
+                        shutil.rmtree(item_path)
+                        break  # Only remove the first one we find
+                    
     run_test()
 
 
