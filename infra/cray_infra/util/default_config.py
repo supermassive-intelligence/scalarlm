@@ -30,7 +30,7 @@ class Config(BaseModel):
     vllm_api_url: str = "http://localhost:8001"
     
     # vLLM Engine Configuration
-    vllm_use_http: bool = False  # Use HTTP API (True) or direct engine calls (False)
+    vllm_use_http: bool = True  # Use HTTP API (True) or direct engine calls (False)
     vllm_http_timeout: float = 30.0  # HTTP timeout in seconds
     
     # Direct engine configuration (when vllm_use_http=False)

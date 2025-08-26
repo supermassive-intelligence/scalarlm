@@ -31,7 +31,6 @@ from cray_infra.api.fastapi.routers.request_types.get_work_response import (
 )
 
 from cray_infra.api.fastapi.aiohttp.get_global_session import get_global_session
-from cray_infra.api.kv_cache.kv_cache_manager import get_kv_cache_manager, initialize_kv_cache_manager
 
 from cray_infra.util.get_config import get_config
 
@@ -49,23 +48,6 @@ async def create_generate_worker(server_status):
 
     config = get_config()
     api_base = config["api_url"]
-
-    # Initialize KV cache manager if not already initialized
-    try:
-        await get_kv_cache_manager()
-        logger.info("KV Cache Manager already initialized")
-    except RuntimeError:
-        # Calculate total KV cache tokens based on GPU memory and model size
-        # Default to reasonable values based on config
-        total_kv_tokens = config.get("max_model_length", 1024) * 100  # 100 slots
-        max_tokens_per_request = config.get("max_model_length", 1024)
-        
-        initialize_kv_cache_manager(
-            total_tokens=total_kv_tokens,
-            max_tokens_per_request=max_tokens_per_request,
-            max_batch_size=1024
-        )
-        logger.info(f"KV Cache Manager initialized: total_tokens={total_kv_tokens}, max_per_request={max_tokens_per_request}")
 
     app = await server_status.get_app()
 
@@ -93,19 +75,17 @@ async def create_generate_worker(server_status):
 
             try:
                 get_work_response = await session.post(
-                    f"{api_base}/v1/work/get_work_and_adaptors",
-                    json={"requested_batch_size": batch_size},
+                    f"{api_base}/v1/generate/get_work",
+                    json={"batch_size": batch_size, "loaded_adaptor_count": loaded_adaptor_count},
                     timeout=aiohttp.ClientTimeout(total=config["inference_work_queue_timeout"]),
                 )
 
             except asyncio.TimeoutError:
                 logger.debug("Timeout waiting for kv cache space")
                 await asyncio.sleep(0.1)
-                continue
             except Exception as e:
                 logger.error(f"Worker error: {e}")
                 await asyncio.sleep(1)
-                continue
 
             if get_work_response.status != 200:
                 logger.error(f"Failed to get work: {get_work_response.status}")
@@ -114,12 +94,9 @@ async def create_generate_worker(server_status):
 
             work_data = await get_work_response.json()
 
-            # Use the new unified API format that includes adaptors_loaded
-            adaptors_loaded = work_data.get("adaptors_loaded", [])
-            logger.info(f"Received {len(adaptors_loaded)} loaded adaptors from work orchestrator")
-            
-            # Update our loaded adaptor count (the orchestrator handles the actual loading)
-            loaded_adaptor_count = len(adaptors_loaded)
+            adaptors = work_data["new_adaptors"]["new_adaptors"]
+
+            loaded_adaptor_count = await add_adaptors(app, adaptors, loaded_adaptor_count)
 
             requests = work_data.get("requests", [])
 
@@ -162,13 +139,20 @@ def clear_finished_tasks(tasks):
 
 
 async def get_batch_size(app):
-    kv_manager = await get_kv_cache_manager()
-    batch_size = await kv_manager.calculate_batch_size()
+    vllm_engine_client = app.state.engine_client
+    current_kv_cache_size = await vllm_engine_client.get_current_kv_cache_size()
+
+    config = get_config()
+
+    batch_size = current_kv_cache_size // config["max_model_length"]
 
     if batch_size <= 0:
         logger.debug("Batch size is 0, waiting for kv cache space")
-        await asyncio.sleep(0.1)
-        batch_size = await kv_manager.calculate_batch_size()
+        await vllm_engine_client.wait_for_kv_cache_size_update()
+
+    current_kv_cache_size = await vllm_engine_client.get_current_kv_cache_size()
+
+    batch_size = current_kv_cache_size // config["max_model_length"]
 
     return batch_size
 

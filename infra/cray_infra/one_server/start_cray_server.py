@@ -33,13 +33,13 @@ async def start_cray_server(server_list: list):
         server_status.tasks.append(vllm_task)
         started_any_server = True
         
-        # Start the request handler when vLLM is started
-        logger.debug("Starting Request Handler")
-        handler_task = asyncio.create_task(
+        # Start the generate worker
+        logger.debug("Starting Generate Worker")
+        worker_task = asyncio.create_task(
             create_generate_worker(server_status=server_status)
         )
-        server_status.tasks.append(handler_task)
-        logger.info("✓ Request handler started to process all queue requests")
+        server_status.tasks.append(worker_task)
+        logger.info("✓ Generate worker started to process queue requests")
         
 
     if "megatron" in server_list:

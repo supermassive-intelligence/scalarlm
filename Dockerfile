@@ -108,12 +108,16 @@ RUN pip install numpy packaging setuptools-scm wheel cmake ninja
 # Configure vLLM source - can use either local directory or remote repo
 ARG VLLM_SOURCE=remote
 ARG VLLM_BRANCH=rschiavi/vllm-adapter
-ARG VLLM_REPO=https://github.com/funston/vllm.git
+ARG VLLM_REPO=https://github.com/supermassive-intelligence/vllm.git
 
 # Handle vLLM source - keep it simple with bind mount approach
 COPY scripts/build-copy-vllm.sh ${INSTALL_ROOT}/build-copy-vllm.sh
 RUN --mount=type=bind,source=.,target=/workspace \
-    bash ${INSTALL_ROOT}/build-copy-vllm.sh ${VLLM_SOURCE} ${INSTALL_ROOT}/vllm /workspace/vllm ${VLLM_REPO} ${VLLM_BRANCH}
+bash ${INSTALL_ROOT}/build-copy-vllm.sh local ${INSTALL_ROOT}/vllm /workspace/vllm ${VLLM_REPO} ${VLLM_BRANCH}
+
+# Remove torch requirements to use pre-installed PyTorch from base image
+RUN cd ${INSTALL_ROOT}/vllm && python use_existing_torch.py
+
 
 # Set build environment variables for CPU compilation
 ARG VLLM_TARGET_DEVICE=cpu
