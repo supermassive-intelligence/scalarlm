@@ -2,19 +2,6 @@
 import os
 import torch
 
-# Set device target before vLLM imports for proper device inference
-if not torch.cuda.is_available():
-    print("No CUDA available, forcing CPU platform")
-    os.environ["VLLM_TARGET_DEVICE"] = "cpu"
-    os.environ["VLLM_LOGGING_LEVEL"] = "DEBUG"  # Enable debug logging as suggested by error
-    # Set additional vLLM CPU environment variables
-    os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-    os.environ["VLLM_USE_MODELSCOPE"] = "False"
-    # Remove CUDA_VISIBLE_DEVICES for CPU mode to avoid device conflicts
-    if "CUDA_VISIBLE_DEVICES" in os.environ:
-        del os.environ["CUDA_VISIBLE_DEVICES"]
-else:
-    print(f"CUDA available with {torch.cuda.device_count()} GPU(s), using GPU platform")
 
 from cray_infra.util.get_config import get_config
 from cray_infra.huggingface.get_hf_token import get_hf_token
@@ -36,8 +23,23 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+def set_cpu():
+    # Set device target before vLLM imports for proper device inference
+    if not torch.cuda.is_available():
+        print("No CUDA available, forcing CPU platform")
+        os.environ["VLLM_TARGET_DEVICE"] = "cpu"
+        os.environ["VLLM_LOGGING_LEVEL"] = "DEBUG"  # Enable debug logging as suggested by error
+        # Set additional vLLM CPU environment variables
+        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+        os.environ["VLLM_USE_MODELSCOPE"] = "False"
+
+        # Remove CUDA_VISIBLE_DEVICES for CPU mode to avoid device conflicts
+        if "CUDA_VISIBLE_DEVICES" in os.environ:
+            del os.environ["CUDA_VISIBLE_DEVICES"]
+    else:
+        print(f"CUDA available with {torch.cuda.device_count()} GPU(s), using GPU platform")
+
 async def create_vllm(server_status, port):
-    
     print(f"DEBUG: BEFORE CONFIG - Environment variables:")
     print(f"  VLLM_TARGET_DEVICE: {os.environ.get('VLLM_TARGET_DEVICE', 'NOT SET')}")
     print(f"  CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'NOT SET')}")
@@ -46,6 +48,23 @@ async def create_vllm(server_status, port):
     os.environ["HUGGING_FACE_HUB_TOKEN"] = get_hf_token()
 
     config = get_config()
+
+    if config['dtype'] == 'auto':
+        # Set to float32 on the cpu
+        if not torch.cuda.is_available():
+            config['dtype'] = 'float32'
+
+    # Set backend to FLASHMLA on cuda sm version less than 8.0
+    if torch.cuda.is_available():
+        sm_version = torch.cuda.get_device_capability()[0]
+        if sm_version < 8:
+            os.environ["VLLM_ATTENTION_BACKEND"] = "FLASHMLA"
+            config['dtype'] = 'float32'
+            os.environ["VLLM_USE_STANDALONE_COMPILE"] = "0"
+            print(f"DEBUG: Setting VLLM_BACKEND=flashmla for sm_version {sm_version}")
+        else:
+            print(f"DEBUG: Using default VLLM_BACKEND for sm_version {sm_version}")
+
 
     parser = FlexibleArgumentParser(
         description="vLLM OpenAI-Compatible RESTful API server."
@@ -61,32 +80,12 @@ async def create_vllm(server_status, port):
         "--enable-lora",
     ]
 
-    # Handle multimodal limits (restored from original)
-    if config.get('limit_mm_per_prompt') is not None:
-        args.append(f"--limit-mm-per-prompt={config['limit_mm_per_prompt']}")
-
-    # Handle LoRA rank configuration
-    if config.get('max_lora_rank') is not None:
-        args.append(f"--max-lora-rank={config['max_lora_rank']}")
-        
-    # CPU backend only supports V1 scheduler
-    if not torch.cuda.is_available():
-        os.environ["VLLM_USE_V1"] = "1"
-        logger.info("Setting VLLM_USE_V1=1 for CPU backend")
-        # V1 doesn't support --disable-async-output-proc
-    else:
-        # Only add this for GPU mode
-        args.append("--disable-async-output-proc")
-
-    # Device is automatically detected by platform detection now
-    # No need to explicitly set --device argument
-
     print(f"DEBUG: About to parse args: {args}")
     print(f"DEBUG: Environment variables:")
     print(f"  VLLM_TARGET_DEVICE: {os.environ.get('VLLM_TARGET_DEVICE', 'NOT SET')}")
     print(f"  CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'NOT SET')}")
     print(f"  torch.cuda.is_available(): {torch.cuda.is_available()}")
-    
+
     args = parser.parse_args(args=args)
 
     args.port = port

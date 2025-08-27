@@ -9,10 +9,8 @@ import logging
 logger = logging.getLogger(__name__)
 
 async def get_adaptors(request):
-    if request is None:
-        already_loaded_adaptor_count = 0
-    else:
-        already_loaded_adaptor_count = request.loaded_adaptor_count
+
+    already_loaded_adaptor_count = request.loaded_adaptor_count
 
     vllm_model_manager = get_vllm_model_manager()
 
