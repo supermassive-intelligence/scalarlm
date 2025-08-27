@@ -1,3 +1,4 @@
+
 [build-system]
 requires = ["setuptools>=61.0", "wheel", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
@@ -29,7 +30,7 @@ classifiers = [
 requires-python = ">=3.8"
 dependencies = [
     "torch>=2.0.0",
-    "transformers>=4.40.0,<4.50.0",
+    "transformers>=4.40.0,<=4.56.0",
     "peft",
     "psutil",
     "typing_extensions>=4.10",

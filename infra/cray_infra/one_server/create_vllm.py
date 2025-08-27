@@ -74,9 +74,7 @@ async def create_vllm(server_status, port):
         os.environ["VLLM_USE_V1"] = "1"
         logger.info("Setting VLLM_USE_V1=1 for CPU backend")
         # V1 doesn't support --disable-async-output-proc
-    else:
-        # Only add this for GPU mode
-        args.append("--disable-async-output-proc")
+
 
     # Device is automatically detected by platform detection now
     # No need to explicitly set --device argument

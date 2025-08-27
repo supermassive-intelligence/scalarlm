@@ -117,7 +117,7 @@ bash ${INSTALL_ROOT}/build-copy-vllm.sh local ${INSTALL_ROOT}/vllm /workspace/vl
 
 # Remove torch requirements to use pre-installed PyTorch from base image
 RUN cd ${INSTALL_ROOT}/vllm && python use_existing_torch.py
-
+RUN pip install torchvision==0.22.1
 
 # Set build environment variables for CPU compilation
 ARG VLLM_TARGET_DEVICE=cpu
