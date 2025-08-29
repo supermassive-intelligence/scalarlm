@@ -1,9 +1,11 @@
 from pydantic import BaseModel
+from cray_infra.api.fastapi.routers.request_types.get_adaptors_response import (
+    GetAdaptorsResponse,
+)
 
 from typing import Optional, Union
-from cray_infra.api.fastapi.routers.request_types.get_adaptors_response import GetAdaptorsResponse
 
-PromptType = Union[str, dict[str, str]]
+PromptType = Union[str, dict[str, Union[str, list[str]]]]
 
 class GetWorkResponse(BaseModel):
     prompt: PromptType

@@ -28,11 +28,11 @@ async def start_cray_server(server_list: list):
     if ("vllm" in server_list) or ("all" in server_list):
         logger.debug("Starting VLLM server")
         vllm_task = asyncio.create_task(
-            create_vllm(server_status, port=8001)
+            create_vllm(server_status=server_status, port=8001)
         )
         server_status.tasks.append(vllm_task)
         started_any_server = True
-        
+
         # Start the generate worker
         logger.debug("Starting Generate Worker")
         worker_task = asyncio.create_task(
@@ -40,7 +40,6 @@ async def start_cray_server(server_list: list):
         )
         server_status.tasks.append(worker_task)
         logger.info("✓ Generate worker started to process queue requests")
-        
 
     if "megatron" in server_list:
         logger.debug("Megatron server doesn't need python")

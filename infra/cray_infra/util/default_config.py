@@ -43,7 +43,7 @@ class Config(BaseModel):
     max_seq_len_to_capture: int = 8192
     max_logprobs: int = 20
     disable_sliding_window: bool = False
-    limit_mm_per_prompt: Optional[str] = None  # Limit multi-modal items per prompt, e.g. '{"image":2}'
+    limit_mm_per_prompt: str = None  # "image=2"
 
     generate_batch_size: int = 1024
 
@@ -55,7 +55,8 @@ class Config(BaseModel):
 
     gpu_memory_utilization: float = 0.50
     max_model_length: int = 1024  # Restored for DialoGPT-medium compatibility
-    dtype: str = "float32"
+    dtype: str = "auto"
+    default_max_output_tokens: int = 128
 
     max_log_length: int = 100
 
