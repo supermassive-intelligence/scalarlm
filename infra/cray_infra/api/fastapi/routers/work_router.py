@@ -17,7 +17,6 @@ from cray_infra.api.kv_cache.work_orchestrator import (
 
 router = APIRouter(prefix="/v1/work", tags=["work"])
 
-
 class WorkRequest(BaseModel):
     """Request for work acquisition"""
     requested_batch_size: Optional[int] = None
@@ -30,7 +29,7 @@ class WorkResponse(BaseModel):
     adaptors_loaded: List[str]
     kv_tokens_reserved: int
     batch_id: str
-    
+
     @classmethod
     def from_result(cls, result: WorkResult) -> "WorkResponse":
         """Create response from WorkResult"""
@@ -78,14 +77,14 @@ async def get_work_and_adaptors(request: WorkRequest):
     - Easier to reason about and debug
     """
     try:
-        work_manager = await get_work_orchestrator()
+        work_orchestrator = await get_work_orchestrator()
     except RuntimeError:
         # Initialize if not already done
         initialize_work_orchestrator()
-        work_manager = await get_work_orchestrator()
+        work_orchestrator = await get_work_orchestrator()
     
     # Get work atomically
-    result = await work_manager.get_work_atomic(
+    result = await work_orchestrator.get_work_atomic(
         requested_batch_size=request.requested_batch_size
     )
     
@@ -106,8 +105,8 @@ async def complete_work(request: WorkCompleteRequest):
     Call this when a request has finished processing.
     """
     try:
-        work_manager = await get_work_orchestrator()
-        await work_manager.complete_work(
+        work_orchestrator = await get_work_orchestrator()
+        await work_orchestrator.complete_work(
             request_id=request.request_id,
             total_tokens_used=request.total_tokens_used
         )
@@ -124,8 +123,8 @@ async def update_tokenization(request: TokenizationUpdateRequest):
     Call this after tokenization when you know the actual token count.
     """
     try:
-        work_manager = await get_work_orchestrator()
-        await work_manager.update_tokenization(
+        work_orchestrator = await get_work_orchestrator()
+        await work_orchestrator.update_tokenization(
             request_id=request.request_id,
             actual_tokens=request.actual_tokens
         )
@@ -138,32 +137,9 @@ async def update_tokenization(request: TokenizationUpdateRequest):
 async def get_stats():
     """Get work manager statistics"""
     try:
-        work_manager = await get_work_orchestrator()
-        stats = await work_manager.get_stats()
+        work_orchestrator = await get_work_orchestrator()
+        stats = await work_orchestrator.get_stats()
         return stats
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-
-# Backwards compatibility endpoints (deprecated)
-@router.post("/get_work", deprecated=True)
-async def get_work_deprecated(request: WorkRequest):
-    """
-    DEPRECATED: Use /get_work_and_adaptors instead.
-    
-    This endpoint is maintained for backwards compatibility but should not
-    be used for new code as it can cause race conditions.
-    """
-    # Redirect to unified endpoint
-    return await get_work_and_adaptors(request)
-
-
-@router.post("/get_adaptors", deprecated=True)
-async def get_adaptors_deprecated():
-    """
-    DEPRECATED: Adaptors are now loaded with get_work_and_adaptors.
-    
-    This endpoint is maintained for backwards compatibility but returns
-    empty as adaptors are now handled in the unified endpoint.
-    """
-    return {"adaptors": [], "message": "Use /get_work_and_adaptors instead"}
