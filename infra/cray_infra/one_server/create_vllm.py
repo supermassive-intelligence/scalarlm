@@ -25,19 +25,17 @@ logger = logging.getLogger(__name__)
 
 def set_cpu():
     # Set device target before vLLM imports for proper device inference
-    if not torch.cuda.is_available():
-        print("No CUDA available, forcing CPU platform")
-        os.environ["VLLM_TARGET_DEVICE"] = "cpu"
-        os.environ["VLLM_LOGGING_LEVEL"] = "DEBUG"  # Enable debug logging as suggested by error
-        # Set additional vLLM CPU environment variables
-        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-        os.environ["VLLM_USE_MODELSCOPE"] = "False"
+    print("No CUDA available, forcing CPU platform")
+    os.environ["VLLM_TARGET_DEVICE"] = "cpu"
+    os.environ["VLLM_LOGGING_LEVEL"] = "DEBUG"  # Enable debug logging as suggested by error
+    # Set additional vLLM CPU environment variables
+    os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+    os.environ["VLLM_USE_MODELSCOPE"] = "False"
+    os.environ["VLLM_USE_V1"] = "1"
 
-        # Remove CUDA_VISIBLE_DEVICES for CPU mode to avoid device conflicts
-        if "CUDA_VISIBLE_DEVICES" in os.environ:
-            del os.environ["CUDA_VISIBLE_DEVICES"]
-    else:
-        print(f"CUDA available with {torch.cuda.device_count()} GPU(s), using GPU platform")
+    # Remove CUDA_VISIBLE_DEVICES for CPU mode to avoid device conflicts
+    if "CUDA_VISIBLE_DEVICES" in os.environ:
+        del os.environ["CUDA_VISIBLE_DEVICES"]
 
 async def create_vllm(server_status, port):
     print(f"DEBUG: BEFORE CONFIG - Environment variables:")
@@ -77,14 +75,19 @@ async def create_vllm(server_status, port):
         f"--max-seq-len-to-capture={config['max_model_length']}",
         f"--gpu-memory-utilization={config['gpu_memory_utilization']}",
         f"--max-log-len={config['max_log_length']}",
+        f"--swap-space=0",
         "--enable-lora",
     ]
 
-    print(f"DEBUG: About to parse args: {args}")
-    print(f"DEBUG: Environment variables:")
-    print(f"  VLLM_TARGET_DEVICE: {os.environ.get('VLLM_TARGET_DEVICE', 'NOT SET')}")
-    print(f"  CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'NOT SET')}")
-    print(f"  torch.cuda.is_available(): {torch.cuda.is_available()}")
+
+    if config['limit_mm_per_prompt'] is not None:
+        args.append(f"--limit-mm-per-prompt={config['limit_mm_per_prompt']}")
+
+    if torch.cuda.is_available():
+        args.append("--device=cuda")
+    #else:
+    #    set_cpu()
+
 
     args = parser.parse_args(args=args)
 

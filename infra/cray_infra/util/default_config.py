@@ -7,11 +7,10 @@ class Config(BaseModel):
 
     #model: str = "masint/tiny-random-qwen2-vl"
     model: str = "masint/tiny-random-llama"
-    #model: str = "sentence-transformers/all-MiniLM-L6-v2"
-    #model: str = "microsoft/DialoGPT-medium"
-    # Generation model (vLLM)
-    #model: str = "openai-community/gpt2"
-    
+    #model: str = "Snowflake/Arctic-Text2SQL-R1-7B"
+    #model: str = "Qwen/Qwen2-7B-Instruct"
+    #model: str = "Qwen/Qwen2-VL-7B-Instruct"
+
 
     # 10GB using 1024 for KB, 1024 for MB, 1024 for GB
     max_upload_file_size: int = 1024 * 1024 * 1024 * 10
@@ -43,7 +42,6 @@ class Config(BaseModel):
     max_seq_len_to_capture: int = 8192
     max_logprobs: int = 20
     disable_sliding_window: bool = False
-    limit_mm_per_prompt: str = None  # "image=2"
 
     generate_batch_size: int = 1024
 
@@ -53,10 +51,12 @@ class Config(BaseModel):
 
     inference_work_queue_path: str = "/app/cray/inference_work_queue.sqlite"
 
-    gpu_memory_utilization: float = 0.50
-    max_model_length: int = 1024  # Restored for DialoGPT-medium compatibility
+    gpu_memory_utilization: float = 0.95
+    max_model_length: int = 8192
+    # 0.10.0 vllm issue: https://github.com/vllm-project/vllm/issues/21615
+    limit_mm_per_prompt:str = '{"image":2}'
+    
     dtype: str = "auto"
-    default_max_output_tokens: int = 128
 
     max_log_length: int = 100
 
