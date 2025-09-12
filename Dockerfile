@@ -95,7 +95,7 @@ RUN pip install setuptools-scm
 # Configure vLLM source - can use either local directory or remote repo
 ARG VLLM_SOURCE=remote
 ARG VLLM_BRANCH=main
-ARG VLLM_REPO=https://github.com/supermassive-intelligence/vllm-fork.git
+ARG VLLM_REPO=https://github.com/supermassive-intelligence/vllm.git
 
 # Handle vLLM source - support both local and remote modes
 COPY scripts/build-copy-vllm.sh ${INSTALL_ROOT}/build-copy-vllm.sh
@@ -106,12 +106,27 @@ RUN if [ "${VLLM_SOURCE}" = "remote" ]; then \
         /dev/null ${VLLM_REPO} ${VLLM_BRANCH}; \
     fi
 
-# Local mode: mount ./vllm directory and copy
-RUN --mount=type=bind,source=./vllm,target=/workspace/vllm \
-    if [ "${VLLM_SOURCE}" = "local" ]; then \
-        bash ${INSTALL_ROOT}/build-copy-vllm.sh ${VLLM_SOURCE} ${INSTALL_ROOT}/vllm \
-        /workspace/vllm ${VLLM_REPO} ${VLLM_BRANCH}; \
+
+# Choose vLLM source: "local" (use ./vllm) or "remote" (clone from GitHub)
+# Local mode: mount ./vllm directory and copy, 
+# if local then use docker build --build-arg VLLM_SOURCE=local -f cray/Dockerfile .
+# Create placeholder for bind mount
+RUN mkdir -p ./vllm
+RUN --mount=type=bind,source=.,target=/build-context \
+    if [ "$VLLM_SOURCE" = "local" ] && [ -d "/build-context/vllm" ]; then \
+        echo "Using local vLLM"; \
+        cp -r /build-context/vllm /workspace/vllm; \
+        rm -rf /app/cray/vllm && \
+        bash /app/cray/build-copy-vllm.sh local /app/cray/vllm /workspace/vllm "" ""; \
+    else \
+        echo "Cloning remote vLLM"; \
+        rm -rf /app/cray/vllm && \
+        bash /app/cray/build-copy-vllm.sh remote /app/cray/vllm /workspace/vllm ${VLLM_REPO} ${VLLM_BRANCH}; \
     fi
+
+# Fix license format
+RUN cd /app/cray/vllm && \
+    sed -i 's/license = "Apache-2.0"/license = {text = "Apache-2.0"}/' pyproject.toml
 
 WORKDIR ${INSTALL_ROOT}/vllm
 
