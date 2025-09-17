@@ -21,5 +21,4 @@ spec:
           - tunnel
           - --no-autoupdate
           - run
-          - --token=eyJhIjoiNTFhYzZjZDk4NjNiZDEwODhjMDQ0MWY1NzdmNGFlNGYiLCJ0IjoiNWNlZTJmZmUtZjlhNi00ZjhkLTkwNWEtOTBjOWIyODRiNGNmIiwicyI6IllqRXdZbU16TVdJdE9UWmpPQzAwWmprNExXSmlNekF0WldNNVlXVTRaREppWkRnMiJ9
-
+          - --token=<INSERT_TOKEN_HERE>
