@@ -26,8 +26,8 @@ spec:
         options:
           - name: ndots
             value: "1"
-      nodeSelector:
-        zone: greg
+              #nodeSelector:
+              #zone: greg
       containers:
         - name: {{ .Chart.Name }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"

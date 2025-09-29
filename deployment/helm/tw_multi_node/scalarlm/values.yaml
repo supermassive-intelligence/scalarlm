@@ -1,6 +1,6 @@
 image:
   repository: gdiamos/scalarlm-amd
-  tag: v0.95
+  tag: v0.951
   pullPolicy: Always
 
 service:
@@ -22,7 +22,7 @@ slurm_config_pvc:
   size: 10Gi
 
 cloudflared:
-  tunnelToken: YOUR_TOKEN_HERE
+  tunnelToken: eyJhIjoiMDhmMjU0OGRjYWJmOGJhNDI0Y2M2ZTY0MDdkYmQzZDQiLCJ0IjoiMDdjOTE0NTgtMDhiOC00Yjg5LWJiMTAtZjE0MDI2ZjY5ZGY0IiwicyI6Ik5UaGhaVGRoTlRFdE9UVm1aaTAwTkdabExUZzFNV1l0WVdOaE9ETTBZamt3WkdFMSJ9
 
 model: meta-llama/Llama-3.2-3B-Instruct
 max_model_length: 8192
