@@ -6,7 +6,8 @@ class Config(BaseModel):
     api_url: str = "http://localhost:8000"
 
     #model: str = "masint/tiny-random-qwen2-vl"
-    model: str = "masint/tiny-random-llama"
+    #model: str = "masint/tiny-random-llama"
+    model: str = "google/embeddinggemma-300m"
     #model: str = "Snowflake/Arctic-Text2SQL-R1-7B"
     #model: str = "Qwen/Qwen2-7B-Instruct"
     #model: str = "Qwen/Qwen2-VL-7B-Instruct"
@@ -45,7 +46,7 @@ class Config(BaseModel):
 
     max_log_length: int = 100
 
-    server_list: str = "all"
+    server_list: Optional[list] = ["api", "megatron"]
 
     tokenformer_r: int = 32
     tokenformer_num_heads: int = 4

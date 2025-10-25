@@ -114,11 +114,10 @@ class TrainingLoop:
         start_time = time.time()
 
         # forward pass
-        loss = self.training_state.model_info["model"](
-            input_ids=batch["input_ids"].to(device),
-            attention_mask=batch["attention_mask"].to(device),
+        loss = self.training_state.model_info["loss"].forward(
+            sentence_features=[{key[len("sentence1_"):]:batch[key].to(device)} for key in batch if key != "labels"],
             labels=batch["labels"].to(device),
-        ).loss
+        )
 
         # Synchronize loss across all ranks
         loss, avg_loss = self.sync_loss(loss)
