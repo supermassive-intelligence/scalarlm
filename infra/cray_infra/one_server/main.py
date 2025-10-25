@@ -58,7 +58,7 @@ def run_all_servers(sockets):
 async def run_all_servers_async():
     config = get_config()
 
-    server_status = await start_cray_server(server_list=[config["server_list"]])
+    server_status = await start_cray_server(server_list=config["server_list"])
 
     logger.info(f"Running with {len(server_status.tasks)} servers")
 

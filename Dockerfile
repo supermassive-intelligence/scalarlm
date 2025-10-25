@@ -100,7 +100,7 @@ COPY scripts/build-copy-vllm.sh ${INSTALL_ROOT}/build-copy-vllm.sh
 # Handle vLLM source - single RUN command with conditional mount
 # For remote: clone from repository
 # For local: mount and copy from ./vllm directory
-RUN --mount=type=bind,source=./,target=/workspace,rw \
+RUN --mount=type=bind,source=./vllm,target=/workspace/vllm,rw \
     bash ${INSTALL_ROOT}/build-copy-vllm.sh ${VLLM_SOURCE} ${INSTALL_ROOT}/vllm \
     /workspace/vllm ${VLLM_REPO} ${VLLM_BRANCH}
 
@@ -160,6 +160,8 @@ COPY ./infra/requirements-megatron.txt ${INSTALL_ROOT}/requirements-megatron.txt
 RUN if [ "$VLLM_TARGET_DEVICE" != "cpu" ]; then \
         uv pip install --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements-megatron.txt; \
     fi
+
+RUN uv pip install sentence-transformers
 
 # SDK and Infra dependencies
 COPY ./requirements.txt ${INSTALL_ROOT}/requirements.txt

@@ -18,8 +18,9 @@ def load_dataset(model, tokenizer, epoch):
         make_dataset_generator(),
         features=datasets.Features(
             {
-                "input": datasets.Value(dtype="string"),
-                "output": datasets.Value(dtype="string"),
+                "sentence1": datasets.Value(dtype="string"),
+                "sentence2": datasets.Value(dtype="string"),
+                "score": datasets.Value(dtype="float"),
             }
         ),
     )
@@ -30,17 +31,13 @@ def load_dataset(model, tokenizer, epoch):
         get_tokenize_function(model, tokenizer),
         batched=True,
         remove_columns=[
-            "input",
-            "output",
+            "sentence1",
+            "sentence2",
+            "score",
         ],
     )
 
-    packed_dataset = tokenized_dataset.map(
-        get_pack_function(model),
-        batched=True,
-    )
-
-    torch_dataset = packed_dataset.with_format("torch")
+    torch_dataset = tokenized_dataset.with_format("torch")
 
     return torch_dataset
 
@@ -75,79 +72,35 @@ def split_dataset_by_node(dataset):
 
     return filtered_dataset
 
-
 def get_tokenize_function(model, tokenizer):
 
     def tokenize(dataset):
-        text = [
-            input_text + output_text
-            for input_text, output_text in zip(dataset["input"], dataset["output"])
-        ]
 
-        tokens = tokenizer(text)
+        sentence1_tokens = tokenizer(dataset["sentence1"])
+        sentence2_tokens = tokenizer(dataset["sentence2"])
 
-        tokens = add_eos_token(tokens, model, tokenizer)
+        job_config = get_job_config()
 
-        # Get the length of the input sequence in tokens
-        input_text_lengths = [
-            len(tokenizer(input_text)["input_ids"]) for input_text in dataset["input"]
-        ]
+        max_length = job_config["max_token_block_size"]
 
-        # labels are -100 for the input_text and input_ids for the output_text
-        tokens["labels"] = [
-            [-100] * input_text_length + input_ids[input_text_length:]
-            for input_text_length, input_ids in zip(
-                input_text_lengths, tokens["input_ids"]
-            )
-        ]
+        tokens = {"sentence1_input_ids": [], "sentence2_input_ids": []}
+
+        for s1_ids, s2_ids in zip(
+            sentence1_tokens["input_ids"], sentence2_tokens["input_ids"]
+        ):
+            padding_length_s1 = max_length - len(s1_ids)
+            padding_length_s2 = max_length - len(s2_ids)
+
+            s1_ids = s1_ids + ([tokenizer.pad_token_id] * padding_length_s1)
+            s2_ids = s2_ids + ([tokenizer.pad_token_id] * padding_length_s2)
+
+            tokens["sentence1_input_ids"].append(s1_ids)
+            tokens["sentence2_input_ids"].append(s2_ids)
+
+        tokens["labels"] = dataset["score"]
 
         return tokens
 
     return tokenize
 
 
-def add_eos_token(tokens, model, tokenizer):
-    # add stop token to the end of the sequence
-    if model.generation_config is None:
-        eos_token = tokenizer.eos_token_id
-    elif model.generation_config.eos_token_id is None:
-        eos_token = tokenizer.eos_token_id
-    else:
-        if isinstance(model.generation_config.eos_token_id, list):
-            eos_token = model.generation_config.eos_token_id[-1]
-        else:
-            eos_token = model.generation_config.eos_token_id
-
-    tokens["input_ids"] = [input_ids + [eos_token] for input_ids in tokens["input_ids"]]
-    tokens["attention_mask"] = [
-        attention_mask + [1] for attention_mask in tokens["attention_mask"]
-    ]
-
-    return tokens
-
-
-def get_pack_function(model):
-    job_config = get_job_config()
-
-    block_size = min(
-        model.config.max_position_embeddings, job_config["max_token_block_size"]
-    )
-
-    def pack(dataset):
-        # Concatenate all texts.
-        concatenated_dataset = {k: sum(dataset[k], []) for k in dataset.keys()}
-        total_length = len(concatenated_dataset[list(dataset.keys())[0]])
-        # We drop the small remainder, we could add padding instead, you can
-        # customize this part to your needs.
-        if total_length >= block_size:
-            total_length = (total_length // block_size) * block_size
-
-        # Split by chunks of max_len.
-        result = {
-            k: [t[i : i + block_size] for i in range(0, total_length, block_size)]
-            for k, t in concatenated_dataset.items()
-        }
-
-        return result
-
-    return pack

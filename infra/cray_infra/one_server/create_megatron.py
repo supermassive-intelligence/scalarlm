@@ -19,7 +19,7 @@ async def create_megatron(server_status):
     server_config = uvicorn.Config(
         "cray_infra.one_server.create_megatron:app",
         host="0.0.0.0",
-        port=8000,
+        port=8002,
         log_level="info",
     )
     server = uvicorn.Server(server_config)
