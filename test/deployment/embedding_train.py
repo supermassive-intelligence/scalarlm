@@ -31,6 +31,7 @@ status = llm.train(
         "gpus": 1,
         "max_token_block_size": 32,
         "steps_per_checkpoint": 10000,
+        "batch_size": 16,
     },
 )
 
