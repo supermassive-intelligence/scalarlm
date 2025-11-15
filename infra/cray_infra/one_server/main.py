@@ -17,8 +17,47 @@ import traceback
 
 logger = logging.getLogger(__name__)
 
-logging.basicConfig(level=logging.DEBUG)
+def get_log_file_handlers():
+    config = get_config()
 
+    log_base_path = config["log_directory"]
+    os.makedirs(log_base_path, exist_ok=True)
+
+    server_list = config["server_list"]
+
+    server_names = []
+
+    for server in server_list.split(","):
+        server_names.append(server.strip())
+
+    if server_names[0] == "all":
+        server_names = ["vllm", "megatron", "api"]
+
+    handlers = []
+
+    for server_name in server_names:
+        log_file_path = os.path.join(
+            log_base_path,
+            f"{server_name}.log"
+        )
+
+        file_handler = logging.FileHandler(log_file_path)
+        file_handler.setLevel(logging.DEBUG)
+
+        formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
+        file_handler.setFormatter(formatter)
+
+        handlers.append(file_handler)
+
+    return handlers
+
+logging.basicConfig(level=logging.DEBUG,
+    handlers=get_log_file_handlers() + [
+        logging.StreamHandler()
+    ]
+)
 
 def main():
     try:
@@ -97,6 +136,7 @@ async def run_all_servers_async():
             logger.error("Error in sleep loop:")
             logger.error(traceback.format_exc())
             raise
+
 
 
 if __name__ == "__main__":
