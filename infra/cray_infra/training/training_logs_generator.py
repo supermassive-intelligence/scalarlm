@@ -48,11 +48,7 @@ def training_logs_generator(model_name: str, starting_line_number: int):
                         line_number += 1
                         continue
 
-                    yield json.dumps(
-                        {"line": line.rstrip(), "line_number": line_number}
-                    ) + "\n"
+                    yield json.dumps({"line": line.rstrip(), "line_number": line_number}) + "\n"
                     line_number += 1
 
     return generate()
-
-
