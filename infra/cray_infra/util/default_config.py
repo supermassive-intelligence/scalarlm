@@ -18,6 +18,8 @@ class Config(BaseModel):
     train_job_entrypoint: str = "/app/cray/scripts/train_job_entrypoint.sh"
     training_job_directory: str = "/app/cray/jobs"
 
+    log_directory: str = "/app/cray/nfs/logs"
+
     max_train_time: int = 24 * 60 * 60
     extra_training_seconds: int = 300  # 5 minutes buffer before slurm kills the job
 
