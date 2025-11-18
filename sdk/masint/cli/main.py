@@ -1,4 +1,5 @@
 from masint.cli.view_logs import view_logs
+from masint.cli.view_service_logs import view_service_logs
 from masint.cli.plot import plot
 from masint.cli.ls import ls
 from masint.cli.squeue import squeue
@@ -18,36 +19,45 @@ logger = logging.getLogger(__name__)
 def main():
     setup_logging()
 
-    argumments, parser = parse_arguments()
+    arguments, parser = parse_arguments()
 
-    if argumments.command == "logs":
-        view_logs(
-            model_name=argumments.model,
-            tail=argumments.tail,
-            lines=argumments.lines,
-            follow=argumments.follow,
-        )
+    if arguments.command == "logs":
+        if arguments.service_name:
+            view_service_logs(
+                service_name=arguments.service_name,
+                tail=arguments.tail,
+                follow=arguments.follow,
+                lines=arguments.lines,
+            )
+        else:
+            # Default behavior: training job logs
+            view_logs(
+                model_name=arguments.model,
+                tail=arguments.tail,
+                lines=arguments.lines,
+                follow=arguments.follow,
+            )
 
-    elif argumments.command == "plot":
-        plot(models=argumments.model, smooth=int(argumments.smooth))
+    elif arguments.command == "plot":
+        plot(models=arguments.model, smooth=int(arguments.smooth))
 
-    elif argumments.command == "ls":
-        ls(all=argumments.all, limit=argumments.limit)
+    elif arguments.command == "ls":
+        ls(all=arguments.all, limit=arguments.limit)
 
-    elif argumments.command == "squeue":
+    elif arguments.command == "squeue":
         squeue()
 
-    elif argumments.command == "stats":
+    elif arguments.command == "stats":
         stats()
 
-    elif argumments.command == "clear_queue":
+    elif arguments.command == "clear_queue":
         clear_queue()
 
-    elif argumments.command == "cancel":
-        cancel(model_name=argumments.model)
+    elif arguments.command == "cancel":
+        cancel(model_name=arguments.model)
 
     else:
-        logger.error(f"Unknown command {argumments.command}")
+        logger.error(f"Unknown command {arguments.command}")
         parser.print_help()
         exit(1)
 
@@ -80,6 +90,15 @@ def parse_arguments():
 
 def add_logs_parser(subparsers):
     logs_parser = subparsers.add_parser("logs", help="View logs")
+
+    # Add optional positional argument for service name
+    logs_parser.add_argument(
+        "service_name",
+        nargs="?",  # Makes it optional
+        default=None,
+        help="The name of the service to view logs for (optional)"
+    )
+
     logs_parser.add_argument("--model", help="The model to view logs for", default="latest")
     logs_parser.add_argument(
         "--tail",
