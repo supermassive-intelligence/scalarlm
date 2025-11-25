@@ -63,4 +63,4 @@ async def finish_work_queue_item(request_id, inference_work_queue, in_memory_res
 
     await inference_work_queue.ack(current_status["work_queue_id"])
 
-    clear_in_memory_results(group_request_id)
+    await clear_in_memory_results(group_request_id)

@@ -24,7 +24,9 @@ class TokenformerAdapter(nn.Module):
             torch.zeros(self.num_heads, self.hidden_size, device=device)
         )
         self.tokenformer_v = nn.Parameter(
-            torch.zeros(self.num_heads, self.hidden_size * self.tokenformer_r, device=device)
+            torch.zeros(
+                self.num_heads, self.hidden_size * self.tokenformer_r, device=device
+            )
         )
 
         self.tokenformer_p = nn.Parameter(
@@ -42,10 +44,10 @@ class TokenformerAdapter(nn.Module):
         nn.init.zeros_(self.tokenformer_p)
 
     # Call layer with all inputs and kwargs
-    def forward(self, query: torch.Tensor):
-        all_base_layer_results = self.layer(query)
+    def forward(self, hidden_states: torch.Tensor, *args, **kwargs) -> torch.Tensor:
+        all_base_layer_results = self.layer(hidden_states, *args, **kwargs)
 
-        tokenformer_results = self.tokenformer_op(query)
+        tokenformer_results = self.tokenformer_op(hidden_states)
 
         if isinstance(all_base_layer_results, tuple):
             base_layer_results = all_base_layer_results[0]
@@ -53,18 +55,20 @@ class TokenformerAdapter(nn.Module):
             base_layer_results = all_base_layer_results
 
         # sum the two outputs
-        layer_and_adaptor_sum = base_layer_results + tokenformer_results
+        layer_and_adapter_sum = base_layer_results + tokenformer_results
 
         if isinstance(all_base_layer_results, tuple):
-            results = (layer_and_adaptor_sum,) + all_base_layer_results[1:]
+            results = (layer_and_adapter_sum,) + all_base_layer_results[1:]
         else:
-            results = layer_and_adaptor_sum
+            results = layer_and_adapter_sum
 
         return results
 
-    def tokenformer_op(self, query):
+    def tokenformer_op(self, query: torch.Tensor) -> torch.Tensor:
 
-        q = query.view(-1, self.num_heads, self.hidden_size // self.num_heads).transpose(0, 1)
+        q = query.view(
+            -1, self.num_heads, self.hidden_size // self.num_heads
+        ).transpose(0, 1)
         k = self.tokenformer_k.view(
             -1, self.num_heads, self.hidden_size // self.num_heads
         ).transpose(0, 1)
@@ -82,7 +86,9 @@ class TokenformerAdapter(nn.Module):
         )
 
         proj_down = (
-            result.transpose(0, 1).contiguous().view([-1, self.hidden_size, self.tokenformer_r])
+            result.transpose(0, 1)
+            .contiguous()
+            .view([-1, self.hidden_size, self.tokenformer_r])
         )
 
         # tokenformer_p dims are [tokenformer_r, hidden_size]
@@ -117,8 +123,10 @@ class TokenformerSurgeon(ABC):
         self.model = model
         self.device = device
 
-    def _is_mlp_layer(self, layer_name):
-        return "mlp" in layer_name.split(".")[-1]
+    def _is_adapter_layer(self, layer_name):
+        return (
+            "mlp" in layer_name.split(".")[-1]
+        )
 
     def _recursive_setattr(self, obj, attr, value):
         attr = attr.split(".", 1)
@@ -127,23 +135,31 @@ class TokenformerSurgeon(ABC):
         else:
             self._recursive_setattr(getattr(obj, attr[0]), attr[1], value)
 
-    def update_mlp(self, name, layer):
-        """Try to wrap the layer with a TokenformerAdaptor."""
-        if not self._is_mlp_layer(name):
+    def update_layer(self, name, layer):
+        """Try to wrap the layer with a TokenformerAdapter."""
+        if not self._is_adapter_layer(name):
             return
 
-        logger.info(f"Wrapping layer {name} with TokenformerAdaptor")
+        logger.info(f"Wrapping layer {name} with TokenformerAdapter")
+
+        if hasattr(self.model, "config"):
+            hidden_size = self.model.config.hidden_size
+        elif hasattr(self.model, "model_config"):
+            hidden_size = self.model.model_config.hidden_size
+        else:
+            logger.error("Model does not have config or model_config attribute")
+            return
 
         # Wrap the layer with a TokenformerAdapter
         self._recursive_setattr(
             self.model,
             name,
-            TokenformerAdapter(layer, self.model.config.hidden_size, device=self.device),
+            TokenformerAdapter(layer, hidden_size, device=self.device),
         )
 
     def insert_adapter_modules(self):
         # Add tokenformer adapters for mlp and attention
         for name, layer in self.model.named_modules():
-            self.update_mlp(name, layer)
+            self.update_layer(name, layer)
 
         return self.model
