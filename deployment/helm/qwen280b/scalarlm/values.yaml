@@ -1,6 +1,6 @@
 image:
   repository: gdiamos/scalarlm-amd
-  tag: v0.997
+  tag: v0.99
   pullPolicy: Always
 
 service:
