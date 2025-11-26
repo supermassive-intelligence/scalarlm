@@ -48,7 +48,7 @@ def create_tokenformer_model(model, device, train_lm_head=None):
     step5_start = time.time()
     unfrozen_count = 0
     for name, param in tokenformer_model.named_parameters():
-        if any(module_name in name for module_name in ["tokenformer"]):
+        if any(module_name in name for module_name in ["tokenformer", "q_proj", "k_proj", "v_proj"]):
             param.requires_grad = True
             unfrozen_count += 1
     step5_time = time.time() - step5_start

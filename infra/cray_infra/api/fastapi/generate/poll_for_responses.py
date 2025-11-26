@@ -1,8 +1,12 @@
-from cray_infra.api.work_queue.get_in_memory_results import get_in_memory_results
+from cray_infra.api.work_queue.get_in_memory_results import get_or_create_in_memory_results
 from cray_infra.api.work_queue.get_group_request_id import get_group_request_id
 from cray_infra.api.work_queue.group_request_id_to_status_path import (
     group_request_id_to_status_path,
 )
+from cray_infra.api.work_queue.group_request_id_to_response_path import (
+    group_request_id_to_response_path,
+)
+
 
 from cray_infra.api.fastapi.routers.request_types.generate_response import Result
 from cray_infra.api.fastapi.routers.request_types.generate_response import (
@@ -15,6 +19,7 @@ import time
 import asyncio
 import copy
 import json
+import os
 
 import logging
 
@@ -44,12 +49,12 @@ async def poll_for_responses(group_request_id):
                 continue
 
             group_request_id = get_group_request_id(request_id)
-            in_memory_results = await get_in_memory_results(group_request_id)
+            results = await get_results(group_request_id, total_requests=len(request_ids))
 
-            if request_id not in in_memory_results["results"]:
+            if request_id not in results["results"]:
                 continue
 
-            response = in_memory_results["results"][request_id]
+            response = results["results"][request_id]
 
             logger.info("Received response for request_id: "
                 f"{request_id} - {truncate_fields(response)}")
@@ -94,3 +99,18 @@ def get_request_ids(group_request_id):
     request_ids = [f"{group_request_id}_{i}" for i in range(total_requests)]
 
     return request_ids
+
+async def get_results(group_request_id, total_requests):
+    in_memory_results = await get_or_create_in_memory_results(group_request_id, total_requests)
+    if len(in_memory_results["results"]) > 0:
+        return in_memory_results
+
+    path = group_request_id_to_response_path(group_request_id)
+
+    if not os.path.exists(path):
+        return in_memory_results
+
+    with open(path, "r") as response_file:
+        in_memory_results = json.load(response_file)
+
+    return in_memory_results
