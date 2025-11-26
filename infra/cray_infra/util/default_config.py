@@ -23,6 +23,7 @@ class Config(BaseModel):
 
     max_train_time: int = 24 * 60 * 60
     extra_training_seconds: int = 300  # 5 minutes buffer before slurm kills the job
+    tensor_parallel_size: int = 1
 
     slurm_wait_time: int = 30 # seconds
     node_info_time_limit: int = 3600 # seconds
