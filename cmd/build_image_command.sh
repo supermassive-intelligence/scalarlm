@@ -28,6 +28,7 @@ else
 fi
 
 docker_build_command="docker build --platform ${docker_platform} --build-arg BASE_NAME=${target} --build-arg TORCH_CUDA_ARCH_LIST=${sm_arch} --build-arg VLLM_TARGET_DEVICE=${vllm_target_device} -t cray:latest ."
+mkdir -p vllm
 
 # Run docker build command
 echo $(green_bold Building image with command: ${docker_build_command})
