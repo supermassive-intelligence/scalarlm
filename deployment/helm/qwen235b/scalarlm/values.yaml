@@ -10,15 +10,15 @@ service:
   externalIP: 64.139.222.102
 
 jobs_pvc:
-  storageClass: longhorn
+  storageClass: local-path
   size: 100Gi
 
 cache_pvc:
-  storageClass: longhorn
+  storageClass: local-path
   size: 400Gi
 
 slurm_config_pvc:
-    storageClass: longhorn
+    storageClass: local-path
     size: 10Gi
 
 cloudflared:
@@ -31,7 +31,6 @@ dtype: bfloat16
 
 training_replicas: 0
 inference_replicas: 1
-api_replicas: 1
 tensor_parallel_size: 4
 
 max_train_time: 86400

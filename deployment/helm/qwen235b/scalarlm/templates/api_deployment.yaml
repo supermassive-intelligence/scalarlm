@@ -38,9 +38,6 @@ spec:
               mountPath: /app/cray/jobs
             - name: scalarlm-cache
               mountPath: /root/.cache/huggingface
-          resources:
-            limits:
-              amd.com/gpu: {{ .Values.api_replicas }}
       volumes:
         - name: scalarlm-jobs
           persistentVolumeClaim:

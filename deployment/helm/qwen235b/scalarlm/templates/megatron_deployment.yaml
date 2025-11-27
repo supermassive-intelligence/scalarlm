@@ -4,7 +4,7 @@ metadata:
   name: {{ include "scalarlm.megatronname" . }}
 spec:
   serviceName: {{ include "scalarlm.megatronname" . }}-headless
-  replicas: {{ .Values.training_gpus }}
+  replicas: {{ .Values.training_replicas }}
   selector:
     matchLabels:
       {{- include "scalarlm.megatronlabels" . | nindent 6 }}

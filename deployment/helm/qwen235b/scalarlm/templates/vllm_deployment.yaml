@@ -16,8 +16,6 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
     {{- end }}
-      nodeSelector:
-        zone: scalar
       containers:
         - name: {{ .Chart.Name }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
@@ -38,9 +36,11 @@ spec:
               mountPath: /app/cray/jobs
             - name: scalarlm-cache
               mountPath: /root/.cache/huggingface
+            - name: shm
+              mountPath: /dev/shm
           resources:
             limits:
-              amd.com/gpu: 1
+              amd.com/gpu: {{ .Values.tensor_parallel_size }}
       volumes:
         - name: scalarlm-jobs
           persistentVolumeClaim:
@@ -56,4 +56,7 @@ spec:
           hostPath:
             path: {{ .hostPath }}
       {{- end }}
-
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 2Gi
