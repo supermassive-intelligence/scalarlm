@@ -83,7 +83,7 @@ async def create_generate_worker(server_status):
                         "batch_size": batch_size,
                         "loaded_adaptor_count": loaded_adaptor_count,
                     },
-                    timeout=aiohttp.ClientTimeout(
+                    timeout=2*aiohttp.ClientTimeout(
                         total=config["inference_work_queue_timeout"]
                     ),
                 )
