@@ -21,6 +21,8 @@ logger = logging.getLogger(__name__)
 async def get_work(request: GetWorkRequest):
     batch_size = request.batch_size
 
+    logger.info(f"Worker requesting work with batch size: {batch_size}")
+
     inference_work_queue = await get_inference_work_queue()
 
     requests = []

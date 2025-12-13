@@ -72,13 +72,20 @@ async def create_generate_worker(server_status):
                 await asyncio.sleep(0.1)
                 continue
 
-            logger.debug(f"Checking for work with batch size: {batch_size}, loaded adaptors: {loaded_adaptor_count}...")
+            logger.debug(
+                f"Checking for work with batch size: {batch_size}, loaded adaptors: {loaded_adaptor_count}..."
+            )
 
             try:
                 get_work_response = await session.post(
                     f"{api_base}/v1/generate/get_work",
-                    json={"batch_size": batch_size, "loaded_adaptor_count": loaded_adaptor_count},
-                    timeout=aiohttp.ClientTimeout(total=config["inference_work_queue_timeout"]),
+                    json={
+                        "batch_size": batch_size,
+                        "loaded_adaptor_count": loaded_adaptor_count,
+                    },
+                    timeout=aiohttp.ClientTimeout(
+                        total=config["inference_work_queue_timeout"]
+                    ),
                 )
 
             except asyncio.TimeoutError:
@@ -99,7 +106,9 @@ async def create_generate_worker(server_status):
 
             adaptors = work_data["new_adaptors"]["new_adaptors"]
 
-            loaded_adaptor_count = await add_adaptors(app, adaptors, loaded_adaptor_count)
+            loaded_adaptor_count = await add_adaptors(
+                app, adaptors, loaded_adaptor_count
+            )
 
             requests = work_data.get("requests", [])
 
@@ -192,7 +201,9 @@ async def add_new_adaptor(app: FastAPI, new_adaptor: str):
 
     logger.info("Loading new adaptor from path: %s", new_adaptor_path)
 
-    lora_adaptor_request = LoadLoRAAdapterRequest(lora_name=new_adaptor, lora_path=new_adaptor_path)
+    lora_adaptor_request = LoadLoRAAdapterRequest(
+        lora_name=new_adaptor, lora_path=new_adaptor_path
+    )
 
     raw_request = Request(
         scope={
@@ -271,10 +282,16 @@ def truncate_fields(data):
     data = copy.deepcopy(data)
 
     for request in data["requests"]:
-        for key, value in request.items():
-            if isinstance(value, str) and len(value) > 100:
-                request[key] = value[:100] + "..."
+        truncate_dict(request)
     return data
+
+
+def truncate_dict(d):
+    for key, value in d.items():
+        if isinstance(value, str) and len(value) > 100:
+            request[key] = value[:100] + "..."
+        if isinstance(value, dict):
+            truncate_dict(value)
 
 
 async def pass_receive() -> NoReturn:
@@ -352,10 +369,15 @@ def convert_prompt_to_openai_format(
                 list_of_content.append({"type": "text", "text": value})
             elif key == "images":
                 list_of_content.extend(
-                    [{"type": "image_url", "image_url": {"url": image}} for image in value]
+                    [
+                        {"type": "image_url", "image_url": {"url": image}}
+                        for image in value
+                    ]
                 )
             else:
-                raise ValueError(f"Invalid prompt sub-field: {key}. Must be 'text' or 'image'.")
+                raise ValueError(
+                    f"Invalid prompt sub-field: {key}. Must be 'text' or 'image'."
+                )
         return [{"role": "user", "content": list_of_content}]
     else:
         raise ValueError(f"Invalid prompt type: {type(prompt)}")
@@ -369,10 +391,14 @@ def compute_flop_count(model_config):
     head_size = model_config.get_head_size()
 
     num_layers = getattr(model_config.hf_text_config, "num_hidden_layers", 12)
-    num_attention_heads = getattr(model_config.hf_text_config, "num_attention_heads", 12)
+    num_attention_heads = getattr(
+        model_config.hf_text_config, "num_attention_heads", 12
+    )
     num_kv_heads = model_config.get_total_num_kv_heads()
 
-    intermediate_size = getattr(model_config.hf_text_config, "intermediate_size", 4 * hidden_size)
+    intermediate_size = getattr(
+        model_config.hf_text_config, "intermediate_size", 4 * hidden_size
+    )
 
     q_proj_flops = hidden_size * (num_attention_heads * head_size)
     kv_proj_flops = hidden_size * (num_kv_heads * head_size * 2)  # K and V
@@ -387,7 +413,9 @@ def compute_flop_count(model_config):
     # Output projection: [batch, seq_len, hidden] @ [hidden, hidden]
     o_proj_flops = hidden_size * hidden_size
 
-    attention_flops_per_layer = q_proj_flops + kv_proj_flops + qk_flops + av_flops + o_proj_flops
+    attention_flops_per_layer = (
+        q_proj_flops + kv_proj_flops + qk_flops + av_flops + o_proj_flops
+    )
     total_attention_flops = attention_flops_per_layer * num_layers
 
     fc1_flops = hidden_size * intermediate_size
@@ -401,7 +429,10 @@ def compute_flop_count(model_config):
     embedding_flops = hidden_size * vocab_size
 
     total_flops = (
-        total_attention_flops + total_mlp_flops + embedding_flops + output_projection_flops
+        total_attention_flops
+        + total_mlp_flops
+        + embedding_flops
+        + output_projection_flops
     )
 
     return total_flops
@@ -443,6 +474,7 @@ async def async_completion_task(request, app):
     await app.state.engine_client.check_health()
 
     return response
+
 
 def kill_vllm_container():
     # Kill instances of pt_thread_main process

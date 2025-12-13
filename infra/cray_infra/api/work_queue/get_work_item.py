@@ -29,6 +29,8 @@ async def get_work_item(work_queue):
 
         item, id = in_memory_work_queue.pop(0)
 
+    logger.info(f"Dispatching work item {id}")
+
     return item, id
 
 async def get_work_item_no_wait(work_queue):
@@ -40,6 +42,8 @@ async def get_work_item_no_wait(work_queue):
             return None, None
 
         item, id = in_memory_work_queue.pop(0)
+
+    logger.info(f"Dispatching work item {id}")
 
     return item, id
 
