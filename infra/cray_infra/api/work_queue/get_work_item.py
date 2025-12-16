@@ -88,7 +88,7 @@ async def fill_work_queue(work_queue):
             break
 
 def make_id(group_request_id, index):
-    return f"{group_request_id}_{index:06d}"
+    return f"{group_request_id}_{index:09d}"
 
 def strip_request_id(item_path):
     base_name = os.path.basename(item_path)
