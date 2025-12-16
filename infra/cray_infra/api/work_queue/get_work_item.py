@@ -4,6 +4,10 @@ from cray_infra.api.work_queue.group_request_id_to_status_path import (
     group_request_id_to_status_path,
 )
 
+from cray_infra.api.work_queue.group_request_id_to_response_path import (
+    group_request_id_to_response_path,
+)
+
 import asyncio
 import json
 import os
@@ -51,30 +55,40 @@ async def get_work_item_no_wait(work_queue):
 async def fill_work_queue(work_queue):
     logger.debug("Filling work queue")
 
-    request, id = await work_queue.get()
+    while True:
+        request, id = await work_queue.get()
 
-    if request is None:
-        logger.debug("Nothing in the work queue")
-        return
+        if request is None:
+            logger.debug("Nothing in the work queue")
+            return
 
-    item_path = request["path"]
-
-    async with acquire_file_lock(item_path):
-        with open(item_path, "r") as f:
-            requests = json.load(f)
-
-        logger.debug(f"Loaded {len(requests)} requests from {item_path} to work queue")
+        item_path = request["path"]
 
         group_request_id = strip_request_id(item_path)
 
-        global in_memory_work_queue
-        in_memory_work_queue = [
-            (request, make_id(group_request_id, index))
-            for index, request in enumerate(requests)
-        ]
+        # Skip if already processed
+        response_path = group_request_id_to_response_path(group_request_id)
+
+        if os.path.exists(response_path):
+            logger.debug(f"Skipping already processed request {group_request_id}")
+            continue
+
+        async with acquire_file_lock(item_path):
+            with open(item_path, "r") as f:
+                requests = json.load(f)
+
+            logger.debug(f"Loaded {len(requests)} requests from {item_path} to work queue")
+
+            global in_memory_work_queue
+            in_memory_work_queue = [
+                (request, make_id(group_request_id, index))
+                for index, request in enumerate(requests)
+            ]
+
+            break
 
 def make_id(group_request_id, index):
-    return f"{group_request_id}_{index}"
+    return f"{group_request_id}_{index:06d}"
 
 def strip_request_id(item_path):
     base_name = os.path.basename(item_path)
