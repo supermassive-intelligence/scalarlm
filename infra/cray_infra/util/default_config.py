@@ -5,8 +5,8 @@ from typing import Optional
 class Config(BaseModel):
     api_url: str = "http://localhost:8000"
 
-    model: str = "masint/tiny-random-llama"
-
+    model: str = "yujiepan/qwen3-moe-tiny-random"
+    #model: str = "masint/tiny-random-llama"
     #model: str = "masint/tiny-random-qwen2-vl"
     #model: str = "Snowflake/Arctic-Text2SQL-R1-7B"
     #model: str = "Qwen/Qwen2-7B-Instruct"

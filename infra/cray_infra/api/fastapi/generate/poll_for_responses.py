@@ -101,14 +101,11 @@ def get_request_ids(group_request_id):
     return request_ids
 
 async def get_results(group_request_id, total_requests):
-    in_memory_results = await get_or_create_in_memory_results(group_request_id, total_requests)
-    if len(in_memory_results["results"]) > 0:
-        return in_memory_results
 
     path = group_request_id_to_response_path(group_request_id)
 
     if not os.path.exists(path):
-        return in_memory_results
+        return await get_or_create_in_memory_results(group_request_id, total_requests)
 
     with open(path, "r") as response_file:
         in_memory_results = json.load(response_file)

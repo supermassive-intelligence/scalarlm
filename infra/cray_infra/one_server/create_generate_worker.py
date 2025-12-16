@@ -83,8 +83,8 @@ async def create_generate_worker(server_status):
                         "batch_size": batch_size,
                         "loaded_adaptor_count": loaded_adaptor_count,
                     },
-                    timeout=2*aiohttp.ClientTimeout(
-                        total=config["inference_work_queue_timeout"]
+                    timeout=aiohttp.ClientTimeout(
+                        total=2*float(config["inference_work_queue_timeout"])
                     ),
                 )
 
@@ -166,7 +166,9 @@ async def get_batch_size(app):
 
     batch_size = current_kv_cache_size // config["max_model_length"]
 
-    return batch_size
+    maximum_batch_size = config["generate_batch_size"]
+
+    return min(batch_size, maximum_batch_size)
 
 
 async def add_adaptors(app, adaptors, loaded_adaptor_count):
