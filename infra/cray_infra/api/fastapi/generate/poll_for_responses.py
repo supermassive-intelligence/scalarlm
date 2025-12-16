@@ -96,7 +96,7 @@ def get_request_ids(group_request_id):
 
     total_requests = status["total_requests"]
 
-    request_ids = [f"{group_request_id}_{i}" for i in range(total_requests)]
+    request_ids = [f"{group_request_id}_{i:09d}" for i in range(total_requests)]
 
     return request_ids
 
