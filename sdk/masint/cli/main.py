@@ -39,7 +39,7 @@ def main():
             )
 
     elif arguments.command == "plot":
-        plot(models=arguments.model, smooth=int(arguments.smooth))
+        plot(models=arguments.model, smooth=int(arguments.smooth), y_limit=arguments.y_limit)
 
     elif arguments.command == "ls":
         ls(all=arguments.all, limit=arguments.limit)
@@ -124,6 +124,7 @@ def add_plot_parser(subparsers):
 
     plot_parser.add_argument("--model", help="The model to plot results for", default=[], action="append")
     plot_parser.add_argument("--smooth", help="The number of steps to smooth over", default=1)
+    plot_parser.add_argument("--y-limit", help="The y-axis limit for the plot", default=None, type=float)
 
 
 def add_ls_parser(subparsers):

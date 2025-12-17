@@ -13,7 +13,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def plot(models, smooth):
+def plot(models, smooth, y_limit=None):
 
     if len(models) == 0:
         models = ["latest"]
@@ -21,14 +21,14 @@ def plot(models, smooth):
     logger.info(f"Plotting models {models}")
 
     try:
-        asyncio.run(plot_async(models=models, smooth=smooth))
+        asyncio.run(plot_async(models=models, smooth=smooth, y_limit=y_limit))
     except Exception as e:
         logger.error(f"Failed to plot model {model_name}")
         logger.error(e)
         logger.error(traceback.format_exc())
 
 
-async def plot_async(models, smooth):
+async def plot_async(models, smooth, y_limit):
     histories = []
     model_names = []
 
@@ -45,10 +45,10 @@ async def plot_async(models, smooth):
         model_names.append(model_name)
 
     # Plot loss against step
-    plot_loss(histories, model_names, smooth)
+    plot_loss(histories, model_names, smooth, y_limit)
 
 
-def plot_loss(histories, model_names, smooth):
+def plot_loss(histories, model_names, smooth, y_limit):
 
     for history, model_name in zip(histories, model_names):
         steps = [int(entry["step"]) for entry in history]
@@ -63,6 +63,8 @@ def plot_loss(histories, model_names, smooth):
     plt.ylabel("Loss")
     plt.title("Training loss for model " + model_name)
     plt.grid(True)
+    if y_limit is not None:
+        plt.ylim(0, y_limit)
 
     base_path = "/app/cray/data"
 

@@ -52,6 +52,7 @@ async def list_models():
                 "step": get_current_step(status),
                 "max_steps": status.get("max_steps", 0),
                 "train_time": get_train_time(status),
+                "loss": get_loss(status),
             }
         )
 
@@ -76,3 +77,20 @@ def get_train_time(status):
     last_time = history[-1].get("time", 0)
 
     return last_time
+
+def get_loss(status):
+
+    # Compute expontial moving average of loss with alpha=0.9
+    history = status.get("history", [])
+
+    if len(history) == 0:
+        return 0.0
+
+    alpha = 0.9
+
+    ema_loss = history[0].get("loss", 0.0)
+    for entry in history[1:]:
+        loss = entry.get("loss", 0.0)
+        ema_loss = alpha * ema_loss + (1 - alpha) * loss
+
+    return ema_loss
