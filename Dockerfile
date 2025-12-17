@@ -157,12 +157,12 @@ ENV PYTHONPATH="${PYTHONPATH}:${INSTALL_ROOT}/vllm"
 # Megatron dependencies (GPU only)
 # note this has to happen after vllm because it overrides some packages installed by vllm
 COPY ./infra/requirements-megatron-cpu.txt ${INSTALL_ROOT}/requirements-megatron-cpu.txt
-RUN if [ "$VLLM_TARGET_DEVICE" != "cpu" ]; then \
+RUN if [ "$VLLM_TARGET_DEVICE" == "cpu" ]; then \
         uv pip install --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements-megatron-cpu.txt; \
     fi
 
 COPY ./infra/requirements-megatron.txt ${INSTALL_ROOT}/requirements-megatron.txt
-RUN uv pip install --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements-megatron-cpu.txt
+RUN uv pip install --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements-megatron.txt
 
 # SDK and Infra dependencies
 COPY ./requirements.txt ${INSTALL_ROOT}/requirements.txt
