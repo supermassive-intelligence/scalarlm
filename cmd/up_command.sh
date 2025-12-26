@@ -32,6 +32,7 @@ else
 fi
 
 mkdir -p vllm
+mkdir -p chat-ui
 
 echo "SM arch is ${sm_arch}"
 

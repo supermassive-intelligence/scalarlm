@@ -72,12 +72,149 @@ WORKDIR ${INSTALL_ROOT}
 ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/app/venv/lib/python3.12/site-packages/torch/lib:/usr/local/rdma-lib
 
 ###############################################################################
+# FRONTEND BUILD STAGE
+
+FROM ${BASE_NAME} AS ui_base
+
+RUN \
+    apt-get update -y \
+    && apt-get install -y git curl
+
+# Install node 24.0
+RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
+    && apt-get install -y nodejs \
+    && node --version \
+    && npm --version
+
+ARG INSTALL_ROOT=/app
+WORKDIR /app
+
+# Configure Huggingface Chat UI source - can use either local directory or remote repo
+ARG UI_SOURCE=remote
+ARG UI_BRANCH=main
+ARG UI_REPO=https://github.com/supermassive-intelligence/chat-ui-fork.git
+
+# Handle Chat UI source - support both local and remote modes
+COPY scripts/build-copy-chat-ui.sh ${INSTALL_ROOT}/build-copy-chat-ui.sh
+
+# Handle Chat UI source - single RUN command with conditional mount
+# For remote: clone from repository
+# For local: mount and copy from ./chat-ui directory
+RUN --mount=type=bind,source=./chat-ui,target=/workspace/chat-ui,rw \
+    bash ${INSTALL_ROOT}/build-copy-chat-ui.sh ${UI_SOURCE} ${INSTALL_ROOT}/chat-ui \
+    /workspace/chat-ui ${UI_REPO} ${UI_BRANCH}
+
+# install dotenv-cli
+RUN npm install -g dotenv-cli
+
+USER root
+RUN apt-get update
+RUN apt-get install -y libgomp1 libcurl4 curl dnsutils nano
+
+# mkdir for ui and adjust ownership
+RUN mkdir -p /app/ui
+RUN touch /app/ui/.env.local
+
+RUN cp ${INSTALL_ROOT}/chat-ui/.env /app/ui/.env
+RUN cp ${INSTALL_ROOT}/chat-ui/entrypoint.sh /app/ui/entrypoint.sh
+RUN cp ${INSTALL_ROOT}/chat-ui/package.json /app/ui/package.json
+RUN cp ${INSTALL_ROOT}/chat-ui/package-lock.json /app/ui/package-lock.json
+
+RUN chmod +x /app/ui/entrypoint.sh
+
+FROM node:24 AS ui_builder
+
+WORKDIR /app
+ARG INSTALL_ROOT=/temp
+
+USER root
+RUN \
+    apt-get update -y \
+    && apt-get install -y git
+
+# Configure Huggingface Chat UI source - can use either local directory or remote repo
+ARG UI_SOURCE=remote
+ARG UI_BRANCH=main
+ARG UI_REPO=https://github.com/supermassive-intelligence/chat-ui-fork.git
+
+# Handle Chat UI source - support both local and remote modes
+COPY scripts/build-copy-chat-ui.sh ${INSTALL_ROOT}/build-copy-chat-ui.sh
+
+# Handle Chat UI source - single RUN command with conditional mount
+# For remote: clone from repository
+# For local: mount and copy from ./chat-ui directory
+RUN --mount=type=bind,source=./chat-ui,target=/workspace/chat-ui,rw \
+    bash ${INSTALL_ROOT}/build-copy-chat-ui.sh ${UI_SOURCE} ${INSTALL_ROOT}/chat-ui \
+    /workspace/chat-ui ${UI_REPO} ${UI_BRANCH}
+
+RUN cp ${INSTALL_ROOT}/chat-ui/package-lock.json ${INSTALL_ROOT}/chat-ui/package.json ./
+
+ARG APP_BASE=
+ARG PUBLIC_APP_COLOR=
+ENV BODY_SIZE_LIMIT=15728640
+
+RUN --mount=type=cache,target=/app/.npm \
+    npm set cache /app/.npm && \
+    npm ci
+
+RUN cp -R ${INSTALL_ROOT}/chat-ui/. /app/
+RUN npm install -D @sveltejs/adapter-static
+
+RUN git config --global --add safe.directory /app && \
+    npm run build
+
+# mongo image
+FROM mongo:7 AS mongo
+
+# image to be used if INCLUDE_DB is true
+FROM ui_base AS local_db
+
+# copy mongo from the other stage
+COPY --from=mongo /usr/bin/mongo* /usr/bin/
+
+ENV MONGODB_URL=mongodb://localhost:27017
+USER root
+RUN mkdir -p /data/db
+
+# final image
+FROM local_db AS ui_final
+
+# build arg to determine if the database should be included
+ENV INCLUDE_DB=true
+
+# svelte requires APP_BASE at build time so it must be passed as a build arg
+ARG APP_BASE=
+ARG PUBLIC_APP_COLOR=
+ARG PUBLIC_COMMIT_SHA=
+ENV PUBLIC_COMMIT_SHA=${PUBLIC_COMMIT_SHA}
+ENV BODY_SIZE_LIMIT=15728640
+
+#import the build & dependencies
+COPY --from=ui_builder /app/build /app/build
+COPY --from=ui_builder /app/node_modules /app/node_modules
+
+COPY frontend/entrypoint.sh /app/ui/entrypoint.sh
+COPY frontend/.env.local /app/ui/.env.local
+
+#CMD ["/bin/bash", "-c", "/app/entrypoint.sh"]
+
+###############################################################################
 # VLLM BUILD STAGE
-FROM ${BASE_NAME} AS vllm
+FROM ui_final AS vllm
+
+# Copy all of the frontend libraries and code
+COPY --from=ui_final --chown=1000 /app /app/ui
+
+# Copy all of the mongo binaries
+COPY --from=ui_final /usr/bin/mongo* /usr/bin/
+
+# Set environment variables from ui
+ENV MONGODB_URL=mongodb://localhost:27017
+ENV INCLUDE_DB=true
 
 RUN --mount=type=cache,target=/var/cache/apt \
     apt-get update -y \
-    && apt-get install -y curl ccache git vim numactl gcc-12 g++-12 libomp-dev libnuma-dev \
+    && apt-get install -y curl git ccache vim numactl gcc-12 g++-12 libomp-dev libnuma-dev \
     && apt-get install -y ffmpeg libsm6 libxext6 libgl1 libdnnl-dev \
     && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12
 
@@ -156,13 +293,13 @@ ENV PYTHONPATH="${PYTHONPATH}:${INSTALL_ROOT}/vllm"
 
 # Megatron dependencies (GPU only)
 # note this has to happen after vllm because it overrides some packages installed by vllm
-COPY ./infra/requirements-megatron-cpu.txt ${INSTALL_ROOT}/requirements-megatron-cpu.txt
-RUN if [ "$VLLM_TARGET_DEVICE" == "cpu" ]; then \
-        uv pip install --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements-megatron-cpu.txt; \
+COPY ./infra/requirements-megatron.txt ${INSTALL_ROOT}/requirements-megatron.txt
+RUN if [ "$VLLM_TARGET_DEVICE" != "cpu" ]; then \
+        uv pip install --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements-megatron.txt; \
     fi
 
-COPY ./infra/requirements-megatron.txt ${INSTALL_ROOT}/requirements-megatron.txt
-RUN uv pip install --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements-megatron.txt
+COPY ./infra/requirements-megatron-cpu.txt ${INSTALL_ROOT}/requirements-megatron-cpu.txt
+RUN uv pip install --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements-megatron-cpu.txt
 
 # SDK and Infra dependencies
 COPY ./requirements.txt ${INSTALL_ROOT}/requirements.txt
