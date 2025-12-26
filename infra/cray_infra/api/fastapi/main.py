@@ -34,7 +34,6 @@ app.include_router(health_router, prefix="/v1")
 app.include_router(generate_router, prefix="/v1")
 app.include_router(slurm_router)
 
-
 origins = [
     "http://localhost:3000",
 ]
