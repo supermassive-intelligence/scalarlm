@@ -2,6 +2,9 @@ from cray_infra.util.get_config import get_config
 
 import os
 import json
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def get_latest_model():
@@ -27,10 +30,15 @@ def get_latest_model():
 
 
 def get_start_time(path):
-    with open(os.path.join(path, "status.json")) as f:
-        status = json.load(f)
+    try:
+        with open(os.path.join(path, "status.json")) as f:
+            status = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        logger.warning(f"Could not read status.json in {path}")
+        return 0
 
     if "history" not in status:
+        logger.warning(f"No history found in status.json in {path}")
         return 0
 
     return status.get("start_time", 0)

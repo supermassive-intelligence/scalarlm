@@ -29,7 +29,7 @@ class VLLMModelManager:
     def find_model(self, model_name):
         import os
         from pathlib import Path
-        
+
         config = get_config()
 
         # Check if it's the base model
@@ -43,9 +43,9 @@ class VLLMModelManager:
         # DYNAMIC DISCOVERY: Check if model exists in training directory
         training_dir = config.get("training_job_directory", "/app/cray/jobs")
         model_path = os.path.join(training_dir, model_name)
-        
+
         if os.path.exists(model_path):
-            # Verify it has model files (like .pt files) 
+            # Verify it has model files (like .pt files)
             pt_files = list(Path(model_path).glob("*.pt"))
             if len(pt_files) > 0:
                 # Auto-register the discovered model
