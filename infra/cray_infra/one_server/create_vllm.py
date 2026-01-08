@@ -62,6 +62,7 @@ async def create_vllm(server_status, port):
         f"--gpu-memory-utilization={config['gpu_memory_utilization']}",
         f"--max-log-len={config['max_log_length']}",
         f"--tensor-parallel-size={config['tensor_parallel_size']}",
+        f"--model_impl transformers",
         "--enable-lora",
         "--trust-remote-code",
     ]
