@@ -50,7 +50,7 @@ async def upload_async(data_file_path, api_url):
 
             async with session.post(api_url, data=mp, headers=headers) as resp:
                 if resp.status != 200:
-                    raise Exception(f"Failed to upload data: {await resp.text()}")
+                    raise Exception(f"Failed to upload generate data: {await resp.text()}")
                 return await resp.json()
 
 async def get_content_length(data_file_path):

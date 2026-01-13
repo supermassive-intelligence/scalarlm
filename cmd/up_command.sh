@@ -31,6 +31,7 @@ else
     fi
 fi
 
+mkdir -p models
 mkdir -p vllm
 mkdir -p chat-ui
 

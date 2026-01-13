@@ -35,6 +35,9 @@ def print_models(models):
 
 
 def print_all_model_info(models):
+    if len(models) == 0:
+        return
+
     keys = models[0].keys()
 
     max_lengths = {key: len(key) for key in keys}
