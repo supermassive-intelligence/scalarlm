@@ -15,6 +15,7 @@ services:
                 - VLLM_BRANCH=${VLLM_BRANCH:-main}
                 - VLLM_REPO=${VLLM_REPO:-https://github.com/supermassive-intelligence/vllm-fork.git}
         ports:
+            - "3000:3000"
             - "8000:8000"
             - "8001:8001"
         volumes:

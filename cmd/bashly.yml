@@ -15,16 +15,6 @@ commands:
       help: GPU streaming multiprocessor architecture, e.g. 7.5, 8.0, 8.6, 12.0, auto
       default: "auto"
 
-- name: depot-build
-  help: Build image from dockerfile and push to depot
-  args:
-    - name: target
-      allowed: ["cpu", "nvidia", "arm", "amd"]
-      default: "cpu"
-    - name: sm_arch
-      help: GPU streaming multiprocessor architecture, e.g. 7.5, 8.0, 8.6, 12.0, auto
-      default: "auto"
-
 - name: up
   help: Start the container
   args:
