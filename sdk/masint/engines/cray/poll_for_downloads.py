@@ -38,6 +38,13 @@ async def poll_for_downloads(result, api_url=None):
 
                     final_result = json.load(f)
 
+    # convert the results from a dict to a list
+    if "results" in final_result:
+        results_list = []
+        for key, response in final_result["results"].items():
+            results_list.append(response)
+        final_result["results"] = results_list
+
     return final_result
 
 
@@ -45,13 +52,23 @@ def is_download_finished(result):
     if result is None:
         return False
 
-    logger.debug(f"Download result status: {result['status']}")
-
-    if result["status"] != "completed":
+    if not "current_index" in result:
+        logger.warn(f"No current_index in download result : {result}")
         return False
 
-    for response in result["results"]:
-        if response["error"] is not None:
+    if not "total_requests" in result:
+        logger.warn(f"No total_requests in download result : {result}")
+        return False
+
+    if result["current_index"] < result["total_requests"]:
+        return False
+
+    if not "results" in result:
+        logger.warn(f"No results in download result : {result}")
+        return False
+
+    for key, response in result["results"].items():
+        if "error" in response and response["error"] is not None:
             raise Exception(response["error"])
 
     return True

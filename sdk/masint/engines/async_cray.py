@@ -18,7 +18,9 @@ class AsyncCray:
         self.api_url = api_url
 
     async def train(self, data, model_name, train_args):
-        return await submit_training_job(data, model_name, train_args, api_url=self.api_url)
+        return await submit_training_job(
+            data, model_name, train_args, api_url=self.api_url
+        )
 
     async def submit_slurm_job(self, code, train_args=None):
         return await submit_slurm_job(code, train_args, api_url=self.api_url)
@@ -28,9 +30,11 @@ class AsyncCray:
         upload_threshold = 128
 
         if len(prompts) > upload_threshold:
-            result = await upload_generate(prompts, model_name, max_tokens, api_url=self.api_url)
+            result = await upload_generate(
+                prompts, model_name, max_tokens, api_url=self.api_url
+            )
 
-            handle_error(result)
+            handle_upload_error(result)
 
             final_result = await poll_for_downloads(result, api_url=self.api_url)
         else:
@@ -119,6 +123,7 @@ class AsyncCray:
 
 
 def handle_error(result):
+
     if "error" in result and result["error"] is not None:
         logger.error(f"Error in response: {result['error']}")
         raise Exception(result["error"])
@@ -130,6 +135,12 @@ def handle_error(result):
     if not isinstance(result["results"], list):
         logger.error(f"Results is not a list: {result['results']}")
         raise Exception("Results is not a list")
+
+
+def handle_upload_error(result):
+    if "error" in result and result["error"] is not None:
+        logger.error(f"Error in response: {result['error']}")
+        raise Exception(result["error"])
 
 
 async def poll_for_responses(result, api_url):
