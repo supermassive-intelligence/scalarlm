@@ -1,5 +1,9 @@
 from cray_infra.api.work_queue.push_into_queue import push_into_queue
 
+from cray_infra.api.fastapi.routers.request_types.upload_response import (
+    UploadResult,
+)
+
 from cray_infra.util.get_config import get_config
 
 from fastapi import Request, HTTPException, status
@@ -18,6 +22,7 @@ import hashlib
 import time
 import uuid
 import shutil
+import json
 
 import logging
 
@@ -56,11 +61,21 @@ async def upload(request: Request):
 
         request_path = get_request_path(file_hash.hexdigest())
 
+        # skip the move if the file already exists
+        if os.path.exists(request_path):
+            os.remove(temp_filepath)
+            logger.info(f"File with hash {file_hash.hexdigest()} already exists, skipping")
+            return UploadResult(request_id=file_hash.hexdigest())
+
         # rename the file to its final destination
         os.makedirs(os.path.dirname(request_path), exist_ok=True)
         shutil.move(temp_filepath, request_path)
 
-        await push_into_queue(request_path)
+        request_count = get_request_count(request_path)
+
+        await push_into_queue(request_count, request_path)
+
+        return UploadResult(request_id=file_hash.hexdigest())
 
     except ClientDisconnect:
         logger.warning("Client Disconnected")
@@ -87,6 +102,13 @@ async def upload(request: Request):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="File is missing"
         )
+
+
+def get_request_count(filepath: str) -> int:
+    with open(filepath, "r") as f:
+        data = json.load(f)
+        request_count = len(data)
+    return request_count
 
 
 def get_temp_filepath() -> str:

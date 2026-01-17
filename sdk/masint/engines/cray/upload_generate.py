@@ -10,6 +10,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
 async def upload_generate(prompts, model_name, max_tokens, api_url=None):
 
     with make_upload_json_file(prompts, model_name, max_tokens) as upload_path:
@@ -18,13 +19,18 @@ async def upload_generate(prompts, model_name, max_tokens, api_url=None):
 
         return await upload_async(upload_path, api_url)
 
+
 @contextlib.contextmanager
 def make_upload_json_file(prompts, model_name, max_tokens):
-    requests_object = {
-        "prompts": prompts,
-        "model_name": model_name,
-        "max_tokens": max_tokens
-    }
+    requests_object = [
+        {
+            "prompt": prompt,
+            "model": model_name,
+            "max_tokens": max_tokens,
+            "request_type": "generate",
+        }
+        for prompt in prompts
+    ]
 
     with tempfile.NamedTemporaryFile(mode="w+", delete=True) as f:
         json.dump(requests_object, f)
@@ -50,8 +56,11 @@ async def upload_async(data_file_path, api_url):
 
             async with session.post(api_url, data=mp, headers=headers) as resp:
                 if resp.status != 200:
-                    raise Exception(f"Failed to upload data: {await resp.text()}")
+                    raise Exception(
+                        f"Failed to upload generate data: {await resp.text()}"
+                    )
                 return await resp.json()
+
 
 async def get_content_length(data_file_path):
     with make_multipart_writer(data_file_path) as mp:
@@ -69,6 +78,7 @@ async def get_content_length(data_file_path):
 
         return content_length
 
+
 @contextlib.contextmanager
 def make_multipart_writer(data_file_path):
     with aiohttp.MultipartWriter("form-data") as mp:
@@ -76,6 +86,7 @@ def make_multipart_writer(data_file_path):
         part.set_content_disposition("form-data", name="file", filename="requests.json")
 
     yield mp
+
 
 async def file_sender(file_path):
     chunk_size = 64 * 1024
