@@ -291,7 +291,7 @@ def truncate_fields(data):
 def truncate_dict(d):
     for key, value in d.items():
         if isinstance(value, str) and len(value) > 100:
-            request[key] = value[:100] + "..."
+            d[key] = value[:100] + "..."
         if isinstance(value, dict):
             truncate_dict(value)
 
