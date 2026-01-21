@@ -299,7 +299,9 @@ RUN if [ "$VLLM_TARGET_DEVICE" != "cpu" ]; then \
     fi
 
 COPY ./infra/requirements-megatron-cpu.txt ${INSTALL_ROOT}/requirements-megatron-cpu.txt
-RUN uv pip install --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements-megatron-cpu.txt
+RUN if [ "$VLLM_TARGET_DEVICE" != "cuda" ]; then \
+        uv pip install --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements-megatron-cpu.txt; \
+    fi
 
 # SDK and Infra dependencies
 COPY ./requirements.txt ${INSTALL_ROOT}/requirements.txt
