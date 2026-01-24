@@ -2,32 +2,36 @@ ARG BASE_NAME=cpu
 
 ###############################################################################
 # NVIDIA BASE IMAGE
-FROM nvcr.io/nvidia/pytorch:25.05-py3 AS nvidia
+FROM nvcr.io/nvidia/pytorch:25.10-py3 AS nvidia
 
 RUN apt-get update -y && apt-get install -y python3-venv slurm-wlm libslurm-dev
 
 ENV VIRTUAL_ENV=/app/.venv
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
-RUN python -m venv $VIRTUAL_ENV --system-site-packages
-RUN . $VIRTUAL_ENV/bin/activate
+RUN python -m venv $VIRTUAL_ENV --system-site-packages && \
+    . $VIRTUAL_ENV/bin/activate
 
 # Put HPC-X MPI in the PATH, i.e. mpirun
 ENV PATH=$PATH:/opt/hpcx/ompi/bin
 ENV LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}:/opt/hpcx/ompi/lib
 
-ARG TORCH_VERSION="2.8.0"
+ARG TORCH_VERSION="2.9.1"
 ARG TORCH_CUDA_ARCH_LIST="7.5"
 
-RUN pip install uv
-RUN uv pip install ninja
+RUN pip install uv && \
+    uv pip install ninja && \
+    pip install --upgrade "protobuf>=6.30.0"
 
+ENV PIP_CONSTRAINT=""
 
 ARG INSTALL_ROOT=/app/cray
 WORKDIR ${INSTALL_ROOT}
 
 ENV BASE_NAME=nvidia
 
-ENV VLLM_USE_STANDALONE_COMPILE=0
+ENV TORCHINDUCTOR_MAX_AUTOTUNE=0
+ENV TORCHINDUCTOR_COORDINATE_DESCENT_TUNING=0
+ENV TORCH_COMPILE_DISABLE=1
 
 ###############################################################################
 # CPU BASE IMAGE
@@ -41,13 +45,14 @@ RUN --mount=type=cache,target=/var/cache/apt \
 
 ENV VIRTUAL_ENV=/app/.venv
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
-RUN python3 -m venv $VIRTUAL_ENV
-RUN . $VIRTUAL_ENV/bin/activate
+RUN python3 -m venv $VIRTUAL_ENV && \
+    . $VIRTUAL_ENV/bin/activate
 
 ARG TORCH_VERSION="2.7.1"
 
-RUN pip install uv
-RUN uv pip install torch==${TORCH_VERSION}+cpu --index-url https://download.pytorch.org/whl/cpu
+RUN pip install uv && \
+    uv pip install torch==${TORCH_VERSION}+cpu --index-url https://download.pytorch.org/whl/cpu && \
+    uv pip install ninja
 
 # Put torch on the LD_LIBRARY_PATH
 ENV LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}:/app/.venv/lib64/python3.12/site-packages/torch/lib
@@ -76,15 +81,14 @@ ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/app/venv/lib/python3.12/site-packages/torc
 
 FROM ${BASE_NAME} AS ui_base
 
-RUN \
-    apt-get update -y \
-    && apt-get install -y git curl
+RUN apt-get update -y && \
+    apt-get install -y git curl libgomp1 libcurl4 dnsutils nano
 
 # Install node 24.0
-RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
-    && apt-get install -y nodejs \
-    && node --version \
-    && npm --version
+RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && \
+    apt-get install -y nodejs && \
+    node --version && \
+    npm --version
 
 ARG INSTALL_ROOT=/app
 WORKDIR /app
@@ -108,19 +112,15 @@ RUN --mount=type=bind,source=./chat-ui,target=/workspace/chat-ui,rw \
 RUN npm install -g dotenv-cli
 
 USER root
-RUN apt-get update
-RUN apt-get install -y libgomp1 libcurl4 curl dnsutils nano
 
 # mkdir for ui and adjust ownership
-RUN mkdir -p /app/ui
-RUN touch /app/ui/.env.local
-
-RUN cp ${INSTALL_ROOT}/chat-ui/.env /app/ui/.env
-RUN cp ${INSTALL_ROOT}/chat-ui/entrypoint.sh /app/ui/entrypoint.sh
-RUN cp ${INSTALL_ROOT}/chat-ui/package.json /app/ui/package.json
-RUN cp ${INSTALL_ROOT}/chat-ui/package-lock.json /app/ui/package-lock.json
-
-RUN chmod +x /app/ui/entrypoint.sh
+RUN mkdir -p /app/ui && \
+    touch /app/ui/.env.local && \
+    cp ${INSTALL_ROOT}/chat-ui/.env /app/ui/.env && \
+    cp ${INSTALL_ROOT}/chat-ui/entrypoint.sh /app/ui/entrypoint.sh && \
+    cp ${INSTALL_ROOT}/chat-ui/package.json /app/ui/package.json && \
+    cp ${INSTALL_ROOT}/chat-ui/package-lock.json /app/ui/package-lock.json && \
+    chmod +x /app/ui/entrypoint.sh
 
 FROM node:24 AS ui_builder
 
@@ -157,8 +157,8 @@ RUN --mount=type=cache,target=/app/.npm \
     npm set cache /app/.npm && \
     npm ci
 
-RUN cp -R ${INSTALL_ROOT}/chat-ui/. /app/
-RUN npm install -D @sveltejs/adapter-static
+RUN cp -R ${INSTALL_ROOT}/chat-ui/. /app/ && \
+    npm install -D @sveltejs/adapter-static
 
 RUN git config --global --add safe.directory /app && \
     npm run build
@@ -192,7 +192,6 @@ ENV BODY_SIZE_LIMIT=15728640
 #import the build & dependencies
 COPY --from=ui_builder /app/build /app/build
 COPY --from=ui_builder /app/node_modules /app/node_modules
-
 COPY frontend/entrypoint.sh /app/ui/entrypoint.sh
 COPY frontend/.env.local /app/ui/.env.local
 
@@ -230,7 +229,6 @@ ARG VLLM_SOURCE=remote
 ARG VLLM_BRANCH=main
 ARG VLLM_REPO=https://github.com/supermassive-intelligence/vllm-fork.git
 
-
 # Handle vLLM source - support both local and remote modes
 COPY scripts/build-copy-vllm.sh ${INSTALL_ROOT}/build-copy-vllm.sh
 
@@ -253,19 +251,14 @@ ENV CMAKE_BUILD_TYPE=Release
 
 # vLLM dependencies
 COPY ./infra/requirements-vllm.txt ${INSTALL_ROOT}/requirements-vllm.txt
-RUN uv pip install --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements-vllm.txt
-
-# Set fallback version for setuptools-scm in case git metadata is missing
-# This handles cases where git history might be incomplete
-ENV SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM=0.6.3.post1
-
-RUN python ${INSTALL_ROOT}/vllm/use_existing_torch.py
-
-RUN export MAX_JOBS=$(($(nproc) < $(free -g | awk '/^Mem:/ {print int($2/4)}') ? $(nproc) : $(free -g | awk '/^Mem:/ {print int($2/4)}')))
+RUN uv pip install --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements-vllm.txt && \
+    python ${INSTALL_ROOT}/vllm/use_existing_torch.py
 
 RUN \
     --mount=type=cache,target=/root/.cache/pip \
     --mount=type=cache,target=/root/.cache/ccache \
+    --mount=type=cache,target=/app/cray/vllm/.deps \
+    export MAX_JOBS=$(($(nproc) < $(free -g | awk '/^Mem:/ {print int($2/4)}') ? $(nproc) : $(free -g | awk '/^Mem:/ {print int($2/4)}'))) && \
     pip install --no-build-isolation -e . --verbose
 
 WORKDIR ${INSTALL_ROOT}
@@ -294,21 +287,18 @@ ENV PYTHONPATH="${PYTHONPATH}:${INSTALL_ROOT}/vllm"
 # Megatron dependencies (GPU only)
 # note this has to happen after vllm because it overrides some packages installed by vllm
 COPY ./infra/requirements-megatron.txt ${INSTALL_ROOT}/requirements-megatron.txt
+COPY ./infra/requirements-megatron-cpu.txt ${INSTALL_ROOT}/requirements-megatron-cpu.txt
+COPY ./requirements.txt ${INSTALL_ROOT}/requirements.txt
+
 RUN if [ "$VLLM_TARGET_DEVICE" != "cpu" ]; then \
         uv pip install --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements-megatron.txt; \
-    fi
-
-COPY ./infra/requirements-megatron-cpu.txt ${INSTALL_ROOT}/requirements-megatron-cpu.txt
-RUN if [ "$VLLM_TARGET_DEVICE" != "cuda" ]; then \
+    fi && \
+    if [ "$VLLM_TARGET_DEVICE" != "cuda" ]; then \
         uv pip install --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements-megatron-cpu.txt; \
-    fi
+    fi && \
+    uv pip install --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements.txt
 
-# SDK and Infra dependencies
-COPY ./requirements.txt ${INSTALL_ROOT}/requirements.txt
-RUN uv pip install --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements.txt
-
-RUN mkdir -p ${INSTALL_ROOT}/jobs
-RUN mkdir -p ${INSTALL_ROOT}/nfs
+RUN mkdir -p ${INSTALL_ROOT}/jobs ${INSTALL_ROOT}/nfs
 
 # Copy the rest of the platform code
 COPY ./infra ${INSTALL_ROOT}/infra
@@ -323,7 +313,7 @@ WORKDIR ${INSTALL_ROOT}
 RUN /app/cray/infra/slurm_src/compile.sh
 
 ENV LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:${PYTHONPATH}:/usr/local/lib/slurm
-
 ENV SLURM_CONF=${INSTALL_ROOT}/nfs/slurm.conf
 ENV VLLM_CPU_MOE_PREPACK=0
+
 

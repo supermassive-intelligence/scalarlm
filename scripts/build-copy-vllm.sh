@@ -29,8 +29,18 @@ if [ "$VLLM_SOURCE" = "local" ]; then
     echo "📋 Copying local vLLM to $DEST_DIR..."
     cp -r "$LOCAL_PATH" "$DEST_DIR"
 
-    # Keep .git directory for setuptools-scm version detection
-    # setuptools-scm needs git metadata to determine version
+    # Copy only essential git metadata for version detection (not objects)
+    rm -rf $DEST_DIR/.git
+
+    # Create a minimal but valid git repository
+    cd "$DEST_DIR"
+    git init
+    git config user.name "Docker Build"
+    git config user.email "build@docker.local"
+    git add -A
+    git commit -m "Build snapshot" --no-verify
+    git tag -a v0.6.5 -m "Version 0.6.5"
+    cd -
     echo "📌 Keeping git metadata for version detection"
 
     echo "✅ Local vLLM copied successfully"

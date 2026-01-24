@@ -13,3 +13,4 @@ logs/
 *.log
 .DS_Store
 models/
+**/nfs

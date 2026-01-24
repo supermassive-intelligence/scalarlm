@@ -6,14 +6,14 @@ from cray_infra.util.get_config import get_config
 from cray_infra.huggingface.get_hf_token import get_hf_token
 
 from vllm.entrypoints.openai.api_server import build_app, decorate_logs, \
-    init_app_state, maybe_register_tokenizer_info_endpoint, setup_server, \
+    init_app_state, setup_server, \
     load_log_config, build_async_engine_client
 
-from vllm.entrypoints.openai.tool_parsers import ToolParserManager
+from vllm.tool_parsers import ToolParserManager
 from vllm.entrypoints.launcher import serve_http
 
 from vllm.entrypoints.openai.cli_args import make_arg_parser
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 from vllm.entrypoints.utils import (log_non_default_args)
 import vllm.envs as envs
@@ -56,13 +56,13 @@ async def create_vllm(server_status, port):
     parser = make_arg_parser(parser)
     args = [
         f"--dtype={config['dtype']}",
-        f"--max-model-len={config['max_model_length']}",
-        f"--max-num-batched-tokens={config['max_model_length']}",
-        f"--max-seq-len-to-capture={config['max_model_length']}",
+        f"--max-model-len=auto",
+        #f"--max-num-batched-tokens={config['max_model_length']}",
+        #f"--max-seq-len-to-capture={config['max_model_length']}",
         f"--gpu-memory-utilization={config['gpu_memory_utilization']}",
         f"--max-log-len={config['max_log_length']}",
         f"--tensor-parallel-size={config['tensor_parallel_size']}",
-        f"--model_impl transformers",
+        #f"--model_impl transformers",
         "--enable-lora",
         "--trust-remote-code",
     ]
@@ -105,6 +105,9 @@ async def run_server_worker(server_status, listen_address,
     if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
         ToolParserManager.import_tool_parser(args.tool_parser_plugin)
 
+    if args.reasoning_parser_plugin and len(args.reasoning_parser_plugin) > 3:
+        ReasoningParserManager.import_reasoning_parser(args.reasoning_parser_plugin)
+
     server_index = client_config.get("client_index", 0) if client_config else 0
 
     # Load logging config for uvicorn if specified
@@ -117,12 +120,10 @@ async def run_server_worker(server_status, listen_address,
             client_config=client_config,
     ) as engine_client:
 
-        maybe_register_tokenizer_info_endpoint(args)
         app = build_app(args)
         server_status.set_app(app)
 
-        vllm_config = await engine_client.get_vllm_config()
-        await init_app_state(engine_client, vllm_config, app.state, args)
+        await init_app_state(engine_client, app.state, args)
 
         logger.info("Starting vLLM API server %d on %s", server_index,
                     listen_address)
@@ -141,6 +142,8 @@ async def run_server_worker(server_status, listen_address,
             ssl_certfile=args.ssl_certfile,
             ssl_ca_certs=args.ssl_ca_certs,
             ssl_cert_reqs=args.ssl_cert_reqs,
+            h11_max_incomplete_event_size=args.h11_max_incomplete_event_size,
+            h11_max_header_count=args.h11_max_header_count,
             **uvicorn_kwargs,
         )
 

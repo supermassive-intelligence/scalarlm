@@ -10,15 +10,19 @@ import logging
 from typing import Optional, NoReturn
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from vllm.entrypoints.openai.api_server import (
-    load_lora_adapter,
     create_chat_completion,
     create_completion,
+    models,
+)
+from vllm.entrypoints.openai.serving_models import (
+    OpenAIServingModels,
 )
 
 from vllm.entrypoints.openai.protocol import (
+    ErrorResponse,
     ChatCompletionRequest,
     CompletionRequest,
     LoadLoRAAdapterRequest,
@@ -84,7 +88,7 @@ async def create_generate_worker(server_status):
                         "loaded_adaptor_count": loaded_adaptor_count,
                     },
                     timeout=aiohttp.ClientTimeout(
-                        total=2*float(config["inference_work_queue_timeout"])
+                        total=2 * float(config["inference_work_queue_timeout"])
                     ),
                 )
 
@@ -233,6 +237,17 @@ async def add_new_adaptor(app: FastAPI, new_adaptor: str):
             logger.info("Successfully loaded new adaptor: %s", new_adaptor)
 
 
+async def load_lora_adapter(request: LoadLoRAAdapterRequest, raw_request: Request):
+    handler: OpenAIServingModels = models(raw_request)
+    response = await handler.load_lora_adapter(request)
+    if isinstance(response, ErrorResponse):
+        return JSONResponse(
+            content=response.model_dump(), status_code=response.error.code
+        )
+
+    return Response(status_code=200, content=response)
+
+
 async def process_requests(app, requests):
     """
     Process a batch of requests using the vLLM engine.
@@ -349,7 +364,7 @@ async def async_chat_completion_task(request, app):
     if "usage" in response_data:
         response["token_count"] = response_data["usage"]["total_tokens"]
         response["flop_count"] = (
-            compute_flop_count(await app.state.engine_client.get_model_config())
+            compute_flop_count(app.state.engine_client.model_config)
             * response_data["usage"]["total_tokens"]
         )
 
@@ -469,7 +484,7 @@ async def async_completion_task(request, app):
     if "usage" in response_data:
         response["token_count"] = response_data["usage"]["total_tokens"]
         response["flop_count"] = (
-            compute_flop_count(await app.state.engine_client.get_model_config())
+            compute_flop_count(app.state.engine_client.model_config)
             * response_data["usage"]["total_tokens"]
         )
 
