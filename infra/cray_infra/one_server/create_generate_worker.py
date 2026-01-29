@@ -12,19 +12,32 @@ from typing import Optional, NoReturn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
-from vllm.entrypoints.openai.api_server import (
+from vllm.entrypoints.openai.chat_completion.api_router import (
     create_chat_completion,
+)
+from vllm.entrypoints.openai.completion.api_router import (
     create_completion,
+)
+from vllm.entrypoints.openai.models.api_router import (
     models,
 )
-from vllm.entrypoints.openai.serving_models import (
+from vllm.entrypoints.openai.models.serving import (
     OpenAIServingModels,
 )
 
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
+)
+
+from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
+)
+
+from vllm.entrypoints.openai.completion.protocol import (
     CompletionRequest,
+)
+
+from vllm.entrypoints.serve.lora.protocol import (
     LoadLoRAAdapterRequest,
 )
 

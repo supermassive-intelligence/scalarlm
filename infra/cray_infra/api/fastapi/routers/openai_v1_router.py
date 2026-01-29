@@ -3,8 +3,11 @@ OpenAI v1 API Router - Standard OpenAI-compatible endpoints.
 These endpoints are exposed directly under /v1/ to match OpenAI API spec.
 """
 
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.completion.protocol import (
     CompletionRequest,
+)
+
+from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
 

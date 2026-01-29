@@ -52,7 +52,7 @@ async def setup_frontend():
         logger.info("Frontend is already running. Skipping setup.")
         return
 
-    it await get_vllm_health() != 200:
+    if await get_vllm_health() != 200:
         logger.info("vLLM is not healthy. Waiting before starting frontend...")
         return
 
