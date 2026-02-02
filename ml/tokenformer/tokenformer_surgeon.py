@@ -143,7 +143,10 @@ class TokenformerSurgeon(ABC):
         logger.info(f"Wrapping layer {name} with TokenformerAdapter")
 
         if hasattr(self.model, "config"):
-            hidden_size = self.model.config.hidden_size
+            if hasattr(self.model.config, "text_config"):
+                hidden_size = self.model.config.text_config.hidden_size
+            else:
+                hidden_size = self.model.config.hidden_size
         elif hasattr(self.model, "model_config"):
             hidden_size = self.model.model_config.hidden_size
         else:

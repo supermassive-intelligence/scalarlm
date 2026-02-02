@@ -129,8 +129,13 @@ def add_eos_token(tokens, model, tokenizer):
 def get_pack_function(model):
     job_config = get_job_config()
 
+    if hasattr(model.config, "text_config"):
+        config = model.config.text_config
+    else:
+        config = model.config
+
     block_size = min(
-        model.config.max_position_embeddings, job_config["max_token_block_size"]
+        config.max_position_embeddings, job_config["max_token_block_size"]
     )
 
     def pack(dataset):

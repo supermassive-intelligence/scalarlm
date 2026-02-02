@@ -5,7 +5,7 @@ from typing import Optional
 class Config(BaseModel):
     api_url: str = "http://localhost:8000"
 
-    model: str = "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
+    model: str = "google/gemma-3-270m-it"
     #model: str = "yujiepan/qwen3-moe-tiny-random"
     #model: str = "masint/tiny-random-llama"
     #model: str = "masint/tiny-random-qwen2-vl"
@@ -44,7 +44,7 @@ class Config(BaseModel):
     inference_work_queue_path: str = "/app/cray/inference_work_queue.sqlite"
     upload_base_path: str = "/app/cray/inference_requests"
 
-    gpu_memory_utilization: float = 0.95
+    gpu_memory_utilization: float = 0.40
     max_model_length: int = 256
     default_max_output_tokens: int = 128
     dtype: str = "auto"
