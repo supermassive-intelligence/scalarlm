@@ -4,6 +4,7 @@ os.environ["VLLM_LOGGING_LEVEL"] = "DEBUG"
 os.environ["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "true"
 
 from cray_infra.one_server.start_cray_server import start_cray_server
+from cray_infra.one_server.create_generate_worker import kill_vllm_container
 from cray_infra.util.get_config import get_config
 
 from uvicorn.supervisors import ChangeReload
@@ -117,6 +118,7 @@ async def run_all_servers_async():
                 logger.error(traceback.format_exc())
 
         logger.info("Cray sever is shutting down")
+        kill_vllm_container()
 
         for pending_task in pending:
             try:

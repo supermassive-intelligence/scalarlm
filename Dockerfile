@@ -64,7 +64,7 @@ ENV BASE_NAME=cpu
 
 ###############################################################################
 # AMD BASE IMAGE
-FROM gdiamos/rocm-base:v0.997 AS amd
+FROM gdiamos/rocm-base:v0.9912 AS amd
 
 ENV BASE_NAME=amd
 
