@@ -1,4 +1,5 @@
 from masint.util.make_api_url import make_api_url
+from masint.util.get_session import get_session
 
 import aiofiles
 import aiohttp
@@ -24,7 +25,7 @@ async def submit_training_job(data, model_name, train_args, api_url):
 
 
 async def upload_async(data_file_path, api_url, train_args):
-    async with aiohttp.ClientSession() as session:
+    async with get_session() as session:
 
         content_length = await get_content_length(data_file_path, train_args)
 

@@ -1,4 +1,5 @@
 from masint.util.make_api_url import make_api_url
+from masint.util.get_session import get_session
 
 import aiohttp
 import asyncio
@@ -19,7 +20,7 @@ def squeue():
 
 
 async def squeue_async():
-    async with aiohttp.ClientSession() as session:
+    async with get_session() as session:
         async with session.get(make_api_url(f"v1/megatron/squeue")) as resp:
             data = await resp.json()
 

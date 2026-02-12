@@ -1,4 +1,5 @@
 from masint.util.make_api_url import make_api_url
+from masint.util.get_session import get_session
 
 import aiohttp
 import json
@@ -13,7 +14,7 @@ async def poll_for_downloads(result, api_url=None):
 
     request_id = result["request_id"]
 
-    async with aiohttp.ClientSession() as session:
+    async with get_session() as session:
         final_result = None
 
         while not is_download_finished(final_result):

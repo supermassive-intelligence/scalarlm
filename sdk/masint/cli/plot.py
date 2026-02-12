@@ -1,4 +1,5 @@
 from masint.util.make_api_url import make_api_url
+from masint.util.get_session import get_session
 
 import matplotlib.pyplot as plt
 
@@ -94,7 +95,7 @@ def apply_smoothing(data, smooth):
 
 
 async def get_status(model_name):
-    async with aiohttp.ClientSession() as session:
+    async with get_session() as session:
         async with session.get(make_api_url(f"v1/megatron/train/{model_name}")) as resp:
             data = await resp.json()
 

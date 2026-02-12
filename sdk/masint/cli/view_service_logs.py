@@ -1,4 +1,5 @@
 from masint.util.make_api_url import make_api_url
+from masint.util.get_session import get_session
 
 import masint
 
@@ -51,7 +52,7 @@ async def view_service_logs_async(service_name: str, tail: bool, lines: int, fol
 
 
 async def sample_log_stream(service_name: str, starting_line_number: int):
-    async with aiohttp.ClientSession() as session:
+    async with get_session() as session:
         async with session.get(
             make_api_url(f"v1/health/logs/{service_name}"),
             params={"starting_line_number": starting_line_number},
