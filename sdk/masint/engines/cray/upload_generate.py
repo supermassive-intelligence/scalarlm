@@ -1,4 +1,5 @@
 from masint.util.make_api_url import make_api_url
+from masint.util.get_session import get_session
 
 import aiohttp
 import aiofiles
@@ -44,7 +45,7 @@ def make_upload_json_file(prompts, model_name, max_tokens):
 
 
 async def upload_async(data_file_path, api_url):
-    async with aiohttp.ClientSession() as session:
+    async with get_session() as session:
 
         content_length = await get_content_length(data_file_path)
 

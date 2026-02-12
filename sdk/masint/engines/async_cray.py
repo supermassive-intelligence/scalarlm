@@ -1,4 +1,5 @@
 from masint.util.make_api_url import make_api_url
+from masint.util.get_session import get_session
 
 from masint.engines.cray.submit_training_job import submit_training_job
 from masint.engines.cray.submit_slurm_job import submit_slurm_job
@@ -50,8 +51,7 @@ class AsyncCray:
         api_url = make_api_url("v1/generate", api_url=self.api_url)
 
         # Create connector with proper cleanup settings
-        connector = aiohttp.TCPConnector(force_close=True)
-        async with aiohttp.ClientSession(connector=connector) as session:
+        async with get_session() as session:
             params = {"prompts": prompts}
 
             if model_name is not None:
@@ -65,7 +65,7 @@ class AsyncCray:
                 return await resp.json()
 
     async def get_results(self, request_ids):
-        async with aiohttp.ClientSession() as session:
+        async with get_session() as session:
             api_url = make_api_url("v1/generate/get_results", api_url=self.api_url)
             async with session.post(api_url, json={"request_ids": request_ids}) as resp:
                 assert resp.status == 200
@@ -73,31 +73,31 @@ class AsyncCray:
 
     async def list_models(self):
         api_url = make_api_url("v1/megatron/list_models", api_url=self.api_url)
-        async with aiohttp.ClientSession() as session:
+        async with get_session() as session:
             async with session.get(api_url) as resp:
                 return await resp.json()
 
     async def get_training_job(self, job_dir):
         api_url = make_api_url(f"v1/megatron/train/{job_dir}", api_url=self.api_url)
-        async with aiohttp.ClientSession() as session:
+        async with get_session() as session:
             async with session.get(api_url) as resp:
                 return await resp.json()
 
     async def health(self):
         api_url = make_api_url("v1/health", api_url=self.api_url)
-        async with aiohttp.ClientSession() as session:
+        async with get_session() as session:
             async with session.get(api_url) as resp:
                 return await resp.json()
 
     async def metrics(self):
         api_url = make_api_url("v1/generate/metrics", api_url=self.api_url)
-        async with aiohttp.ClientSession() as session:
+        async with get_session() as session:
             async with session.get(api_url) as resp:
                 return await resp.json()
 
     async def get_gpu_count(self):
         api_url = make_api_url("v1/megatron/gpu_count", api_url=self.api_url)
-        async with aiohttp.ClientSession() as session:
+        async with get_session() as session:
             async with session.get(api_url) as resp:
                 response = await resp.json()
                 logger.debug(f"get_gpu_count response: {response}")
@@ -105,7 +105,7 @@ class AsyncCray:
 
     async def get_node_count(self):
         api_url = make_api_url("v1/megatron/node_count", api_url=self.api_url)
-        async with aiohttp.ClientSession() as session:
+        async with get_session() as session:
             async with session.get(api_url) as resp:
                 response = await resp.json()
                 logger.debug(f"get_node_count response: {response}")
@@ -113,14 +113,14 @@ class AsyncCray:
 
     async def cancel(self, model_name):
         api_url = make_api_url(f"v1/megatron/cancel/{model_name}", api_url=self.api_url)
-        async with aiohttp.ClientSession() as session:
+        async with get_session() as session:
             async with session.post(api_url) as resp:
                 return await resp.json()
 
     async def clear_queue(self):
         api_url = make_api_url("v1/generate/clear_queue", api_url=self.api_url)
 
-        async with aiohttp.ClientSession() as session:
+        async with get_session() as session:
             async with session.post(api_url) as resp:
                 return await resp.json()
 
@@ -149,7 +149,7 @@ def handle_upload_error(result):
 async def poll_for_responses(result, api_url):
     api_url = make_api_url("v1/generate/get_results", api_url=api_url)
 
-    async with aiohttp.ClientSession() as session:
+    async with get_session() as session:
         while not is_finished(result):
             request_ids = [response["request_id"] for response in result["results"]]
             async with session.post(api_url, json={"request_ids": request_ids}) as resp:
