@@ -1,4 +1,6 @@
 from contextlib import asynccontextmanager
+import aiohttp
+import asyncio
 
 @asynccontextmanager
 async def get_session():
