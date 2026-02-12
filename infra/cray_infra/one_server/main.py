@@ -126,6 +126,8 @@ async def run_all_servers_async():
             except Exception as e:
                 logger.error(f"Error canceling task {pending_task.get_name()}:")
                 logger.error(traceback.format_exc())
+
+        kill_vllm_container()
     else:
         try:
             while True:

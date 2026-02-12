@@ -48,6 +48,7 @@ class TrainingLoop:
         self.training_state.model_info["model"].train()
 
         max_steps = get_max_steps()
+        gradient_accumulation_steps = get_gradient_accumulation_steps()
 
         self.training_state.optimizer = get_optimizer(
             self.training_state.model_info["model"]
@@ -74,11 +75,56 @@ class TrainingLoop:
             self.training_state.current_step = step
             self.training_state.epoch = data_loader.epoch
 
+            step_start_time = time.time()
+
             self.on_step_begin(step)
 
-            batch = next(data_iterator)
+            # Accumulate gradients over multiple micro-batches
+            accumulated_loss = 0.0
+            has_nan = False
+            self.training_state.optimizer.zero_grad()
 
-            self.training_step(batch)
+            for accum_step in range(gradient_accumulation_steps):
+                batch = next(data_iterator)
+
+                # Update epoch if it changed during accumulation
+                self.training_state.epoch = data_loader.epoch
+
+                loss = self.training_step_accumulate(
+                    batch,
+                    accum_step,
+                    gradient_accumulation_steps
+                )
+
+                # Check for NaN
+                if torch.isnan(torch.tensor(loss)):
+                    has_nan = True
+                    logger.warning(
+                        f"NaN loss detected at step {step}, microbatch {accum_step + 1}"
+                    )
+                    break
+
+                accumulated_loss += loss
+
+            # Skip optimizer step if NaN was detected
+            if has_nan:
+                logger.warning(
+                    f"Skipping optimizer step {step} due to NaN loss"
+                )
+                self.training_state.nan_steps += 1
+            else:
+                # Average the accumulated loss
+                avg_accumulated_loss = accumulated_loss / gradient_accumulation_steps
+
+                # Perform optimizer step after accumulation
+                self.optimizer_step()
+                step_time = time.time() - step_start_time
+
+                # Log the averaged loss
+                self.update_history(avg_accumulated_loss)
+
+                # Print training step info with averaged loss
+                self.print_training_step_info(avg_accumulated_loss, step_time)
 
             self.on_step_end(step)
 
@@ -95,6 +141,7 @@ class TrainingLoop:
 
         self.training_state.current_step = checkpoint["step"]
         self.training_state.epoch = checkpoint["epoch"]
+        self.training_state.nan_steps = checkpoint.get("nan_steps", 0)
         self.training_state.model_info["model"].load_state_dict(
             checkpoint["model_state_dict"], strict=False
         )
@@ -107,8 +154,8 @@ class TrainingLoop:
 
         self.training_state.history = self.training_harness.get_status()["history"]
 
-    def training_step(self, batch):
-
+    def training_step_accumulate(self, batch, accum_step, gradient_accumulation_steps):
+        """Perform a single forward/backward pass with gradient accumulation."""
         device = self.training_state.model_info["distribution_strategy"]["device"]
 
         start_time = time.time()
@@ -120,24 +167,40 @@ class TrainingLoop:
             labels=batch["labels"].to(device),
         ).loss
 
+        is_nan = torch.isnan(torch.tensor(loss))
+
+        if is_nan:
+            logger.warning(
+                f"NaN loss detected during forward pass at microbatch {accum_step + 1}"
+            )
+            logger.warning(f"Skipping backward pass for microbatch {accum_step + 1}")
+
+            # make the loss 0.0 of the same type as loss
+            loss = torch.tensor(0.0, dtype=loss.dtype, device=loss.device)
+
+        # Scale loss to account for accumulation
+        scaled_loss = loss / gradient_accumulation_steps
+
         # Synchronize loss across all ranks
-        loss, avg_loss = self.sync_loss(loss)
+        _, avg_loss = self.sync_loss(loss)
 
-        # backward pass
-        self.training_state.optimizer.zero_grad()
-        loss.backward()
+        # backward pass (accumulates gradients)
+        if not is_nan:
+            scaled_loss.backward()
 
+        # Log info for each micro-batch
+        self.print_microbatch_info(accum_step, avg_loss, start_time)
+
+        return avg_loss
+
+    def optimizer_step(self):
+        """Perform optimizer and scheduler step after gradient accumulation."""
         torch.nn.utils.clip_grad_norm_(
             self.training_state.model_info["model"].parameters(),
             get_gradient_clip_value(),
         )
         self.training_state.optimizer.step()
         self.training_state.scheduler.step()
-
-        # log loss
-        self.update_history(avg_loss)
-
-        self.print_training_step_info(avg_loss, start_time)
 
     def sync_loss(self, loss):
         device = self.training_state.model_info["distribution_strategy"]["device"]
@@ -170,6 +233,10 @@ class TrainingLoop:
         logger.info(
             f"Training finished successfully after {time.time() - self.training_state.start_time} seconds"
         )
+        if self.training_state.nan_steps > 0:
+            logger.warning(
+                f"Encountered {self.training_state.nan_steps} NaN steps during training"
+            )
         for callback in self.callbacks:
             if hasattr(callback, "on_train_end"):
                 callback.on_train_end()
@@ -194,6 +261,7 @@ class TrainingLoop:
             "scheduler_state_dict": self.training_state.scheduler.state_dict(),
             "step": self.training_state.current_step,
             "epoch": self.training_state.epoch,
+            "nan_steps": self.training_state.nan_steps,
         }
 
         checkpoint_name = f"checkpoint_{self.training_state.current_step}.pt"
@@ -231,13 +299,22 @@ class TrainingLoop:
         )
 
     @main_rank_only
-    def print_training_step_info(self, loss, start_time):
+    def print_training_step_info(self, loss, step_time):
         logger.info(
             f"Training step {self.training_state.current_step} "
             f"- epoch {self.training_state.epoch} "
-            f"- loss {loss:.4f} "
+            f"- avg loss {loss:.4f} "
             f"- learning rate {self.training_state.scheduler.get_last_lr()[0]:.6f} "
-            f"- step time {time.time() - start_time:.3f} seconds"
+            f"- step time {step_time:.3f} seconds"
+        )
+
+    @main_rank_only
+    def print_microbatch_info(self, accum_step, loss, start_time):
+        logger.debug(
+            f"  Microbatch {accum_step + 1} "
+            f"- step {self.training_state.current_step} "
+            f"- loss {loss:.4f} "
+            f"- time {time.time() - start_time:.3f}s"
         )
 
     @main_rank_only
@@ -298,11 +375,17 @@ class TrainingState:
         self.scheduler = None
         self.history = []
         self.start_time = None
+        self.nan_steps = 0
 
 
 def get_max_steps():
     job_config = get_job_config()
     return job_config["max_steps"]
+
+
+def get_gradient_accumulation_steps():
+    job_config = get_job_config()
+    return job_config.get("gradient_accumulation_steps", 4)
 
 
 def get_optimizer(model):
