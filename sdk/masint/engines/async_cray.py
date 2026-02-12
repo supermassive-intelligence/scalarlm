@@ -48,7 +48,10 @@ class AsyncCray:
 
     async def submit_generate(self, prompts, model_name, max_tokens):
         api_url = make_api_url("v1/generate", api_url=self.api_url)
-        async with aiohttp.ClientSession() as session:
+
+        # Create connector with proper cleanup settings
+        connector = aiohttp.TCPConnector(force_close=True)
+        async with aiohttp.ClientSession(connector=connector) as session:
             params = {"prompts": prompts}
 
             if model_name is not None:
