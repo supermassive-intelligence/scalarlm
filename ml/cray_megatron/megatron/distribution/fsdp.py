@@ -12,13 +12,14 @@ logger = logging.getLogger(__name__)
 
 
 class FSDPLayer(nn.Module):
-    def __init__(self, module, should_checkpoint=False):
+    def __init__(self, module, should_checkpoint=False, should_recurse=False):
         super().__init__()
         self.module = module
 
         self.module.register_full_backward_hook(self._full_backward_hook)
 
         self.should_checkpoint = should_checkpoint
+        self.should_recurse = should_recurse
 
         self.perf_metrics = {
             "shard": {
@@ -47,25 +48,32 @@ class FSDPLayer(nn.Module):
 
         logger.debug(f"Rank {rank}: Sharding parameters for {self.module}")
 
-        for name, param in list(self.module.named_parameters(recurse=False)):
+        for name, param in list(
+            self.module.named_parameters(recurse=self.should_recurse)
+        ):
+            local_name = name.split(".")[-1]
             shard, metadata_dict = shard_tensor(param)
 
             self.sharded_parameter_metadata[name] = metadata_dict
 
             logger.debug(
-                f" Rank {rank}: Sharding parameter {name} with shape {param.shape} into {metadata_dict}, new shape {shard.shape}"
+                f" Rank {rank}: Sharding parameter {name} with shape {param.shape} "
+                f"into {metadata_dict}, new shape {shard.shape}"
             )
+
+            parent_module = self.get_parent_module(self.module, param)
 
             setattr(
-                self.module,
-                "shard_" + name,
+                parent_module,
+                "shard_" + local_name,
                 nn.Parameter(shard, requires_grad=param.requires_grad),
             )
-            delattr(self.module, name)
-            setattr(self.module, name, shard)
+            delattr(parent_module, local_name)
+            setattr(parent_module, local_name, shard)
 
         logger.debug(
-            f" Rank {rank}: Sharded parameters are {[i[0] for i in self.module.named_parameters(recurse=False)]}"
+            f" Rank {rank}: Sharded parameters are "
+            f"{[i[0] for i in self.module.named_parameters(recurse=self.should_recurse)]}"
         )
 
     def forward(self, *args, **kwargs):
@@ -99,48 +107,71 @@ class FSDPLayer(nn.Module):
         rank = get_rank()
         logger.debug(f"Rank {rank}: Gathering parameters for {self.module}")
 
-        for name, param in self.module.named_parameters(recurse=False):
+        for name, param in self.module.named_parameters(recurse=self.should_recurse):
 
-            if not name.startswith("shard_"):
+            local_name = name.split(".")[-1]
+
+            prefix = name[:-len(local_name)]
+
+            if not local_name.startswith("shard_"):
                 logger.debug(f" Rank {rank}: Skipping parameter {name}")
                 continue
 
             # Remove _shard_ prefix
-            name = name[6:]
+            local_name = local_name[6:]
+
+            full_unsharded_name = prefix + local_name
+
+            parent_module = self.get_parent_module(self.module, param)
 
             # Get metadata for this parameter
-            metadata_dict = self.sharded_parameter_metadata[name]
+            metadata_dict = self.sharded_parameter_metadata[full_unsharded_name]
 
             # Gather all shards and reconstruct the full tensor
             full_tensor = all_gather_op(param, metadata_dict, self.perf_metrics)
 
             logger.debug(
-                f" Rank {rank}: Gathered parameter {name} with shape {full_tensor.shape}"
+                f" Rank {rank}: Gathered parameter {full_unsharded_name} with shape {full_tensor.shape}"
             )
 
             # Copy the full tensor back to the original parameter
-            setattr(self.module, name, full_tensor)
+            setattr(parent_module, local_name, full_tensor)
 
     def free_params(self):
-        for name, param in self.module.named_parameters(recurse=False):
+        for name, param in self.module.named_parameters(recurse=self.should_recurse):
+            local_name = name.split(".")[-1]
 
-            if not name.startswith("shard_"):
+            if not local_name.startswith("shard_"):
                 continue
 
             # Remove _shard_ prefix
-            name = name[6:]
+            local_name = local_name[6:]
 
-            if hasattr(self.module, name):
-                if getattr(self.module, name).data_ptr() != param.data.data_ptr():
-                    delattr(self.module, name)
+            parent_module = self.get_parent_module(self.module, param)
 
-            setattr(self.module, name, param.data)
+            if hasattr(parent_module, local_name):
+                if getattr(parent_module, local_name).data_ptr() != param.data.data_ptr():
+                    delattr(parent_module, local_name)
+
+            setattr(parent_module, local_name, param.data)
 
     def __getattr__(self, name):
         try:
             return super().__getattr__(name)
         except AttributeError:
             return getattr(self.module, name)
+
+    def get_parent_module(self, module, param):
+        for potential_param in module.parameters(recurse=False):
+            if potential_param is param:
+                return module
+
+        for name, child in module.named_children():
+            parent = self.get_parent_module(child, param)
+            if parent is not None:
+                return parent
+
+        return None
 
 
 class SimpleFSDP(nn.Module):
@@ -151,17 +182,18 @@ class SimpleFSDP(nn.Module):
         self._wrap_layers(model)
 
     def _wrap_layers(self, module):
-        for name, child in module.named_children():
-            params = list(child.parameters(recurse=False))
 
+        for name, child in module.named_children():
+            is_conditional_layer = self._get_is_conditional_layer(child)
             grand_children = list(child.children())
 
             has_grand_children = False
             if len(grand_children) > 0:
                 has_grand_children = True
 
-            all_params = list(child.parameters(recurse=False))
+            all_params = list(child.parameters(recurse=is_conditional_layer))
             any_requires_grad = any(param.requires_grad for param in all_params)
+
             # checkpoint if model memory footprint is > 32GB and has grand children and has any requires_grad
             should_checkpoint = (
                 self.model_memory_footprint > (32 * 1024**3)
@@ -169,12 +201,23 @@ class SimpleFSDP(nn.Module):
                 and any_requires_grad
             )
 
-            if len(params) > 0:
-                wrapped = FSDPLayer(child, should_checkpoint=should_checkpoint)
+            if len(all_params) > 0:
+                wrapped = FSDPLayer(
+                    child,
+                    should_checkpoint=should_checkpoint,
+                    should_recurse=is_conditional_layer,
+                )
                 setattr(module, name, wrapped)
 
-            if has_grand_children:
+            if has_grand_children and not is_conditional_layer:
                 self._wrap_layers(child)
+
+    def _get_is_conditional_layer(self, module):
+        # if any child is called experts, we assume this is a
+        # conditional layer and we should not wrap its children
+        for name, child in module.named_children():
+            if "expert" in name.lower():
+                return True
 
     def forward(self, *args, **kwargs):
         result = self.model(*args, **kwargs)
@@ -214,37 +257,41 @@ class SimpleFSDP(nn.Module):
         for name, child in module.named_children():
             if isinstance(child, FSDPLayer):
                 logger.debug(f" Rank {rank}: Unwrapping module {prefix}{name}")
+
                 for param_name, param in child.module.named_parameters(recurse=False):
                     if param.requires_grad:
-                        if param_name.startswith("shard_"):
+                        local_name = param_name.split(".")[-1]
+                        name_prefix = param_name[:-len(local_name)]
+
+                        if local_name.startswith("shard_"):
                             # Remove _shard_ prefix
-                            param_name = param_name[len("shard_") :]
+                            local_name = param_name[len("shard_") :]
+                            full_unsharded_name = name_prefix + local_name
 
                             # Get metadata for this parameter
-                            metadata_dict = child.sharded_parameter_metadata[param_name]
+                            metadata_dict = child.sharded_parameter_metadata[full_unsharded_name]
 
                             # Gather all shards and reconstruct the full tensor
                             full_tensor = all_gather_op(param, metadata_dict)
 
-                            unwrapped_state_dict[f"{prefix}{name}.{param_name}"] = (
+                            unwrapped_state_dict[f"{prefix}{name}.{full_unsharded_name}"] = (
                                 full_tensor.to(torch.device("cpu"))
                             )
 
                         else:
-                            unwrapped_state_dict[f"{prefix}{name}.{param_name}"] = (
-                                param.to(torch.device("cpu"))
+                            unwrapped_state_dict[f"{prefix}{name}.{param_name}"] = param.to(
+                                torch.device("cpu")
                             )
 
                         logger.debug(
                             f" Rank {rank}: Unwrapping parameter {prefix}{name}.{param_name}"
                         )
-            else:
-                logger.debug(f" Rank {rank}: Skipping module {prefix}{name}")
-                self.unwrap_layers(
-                    prefix=prefix + name + ".",
-                    module=child,
-                    unwrapped_state_dict=unwrapped_state_dict,
-                )
+
+            self.unwrap_layers(
+                prefix=prefix + name + ".",
+                module=child,
+                unwrapped_state_dict=unwrapped_state_dict,
+            )
 
 
 def get_fsdp_layers(module):

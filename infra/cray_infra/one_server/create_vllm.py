@@ -34,11 +34,6 @@ async def create_vllm(server_status, port):
 
     config = get_config()
 
-    if config['dtype'] == 'auto':
-        # Set to float32 on the cpu
-        if not torch.cuda.is_available():
-            config['dtype'] = 'float32'
-
     # Set backend to FLASHMLA on cuda sm version less than 8.0
     if torch.cuda.is_available():
         sm_version = torch.cuda.get_device_capability()[0]

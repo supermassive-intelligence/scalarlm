@@ -2,6 +2,7 @@ from cray_megatron.huggingface.download_model import download_model
 from cray_megatron.megatron.distribution.apply_distribution_strategy import (
     apply_distribution_strategy,
 )
+from gpu_aware_mpi import get_size, get_rank, allgather
 
 from ml.tokenformer.tokenformer_model import create_tokenformer_model
 
@@ -84,14 +85,18 @@ def materialize_model(model_info):
     start_time = time.time()
     config = get_config()
     config_dtype = config["dtype"]
-    dtype = (
-        torch.float16
-        if config_dtype == "float16"
-        else torch.float32 if config_dtype == "float32" else torch.bfloat16
-    )
-    logger.info(f"Converting model to {dtype}...")
 
-    model_info["model"] = model_info["model"].to(dtype=dtype)
+    if config_dtype != "auto":
+        dtype = (
+            torch.float16
+            if config_dtype == "float16"
+            else torch.float32 if config_dtype == "float32" else torch.bfloat16
+        )
+        logger.info(f"Converting model to {dtype}...")
+
+        model_info["model"] = model_info["model"].to(dtype=dtype)
+    else:
+        logger.info("Using model's native dtype, no conversion needed.")
 
     total_time = time.time() - start_time
     logger.info(f"model dtype conversion latency: {total_time:.2f}s ({total_time/60:.1f} minutes)")
@@ -112,3 +117,4 @@ def materialize_model(model_info):
 
 def load_checkpoint_weights_if_exist(model_info):
     return model_info
+

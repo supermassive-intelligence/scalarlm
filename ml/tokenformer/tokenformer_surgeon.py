@@ -65,14 +65,16 @@ class TokenformerAdapter(nn.Module):
         return results
 
     def tokenformer_op(self, query: torch.Tensor) -> torch.Tensor:
+        # Cast parameters to match query dtype
+        dtype = query.dtype
 
         q = query.view(
             -1, self.num_heads, self.hidden_size // self.num_heads
         ).transpose(0, 1)
-        k = self.tokenformer_k.view(
+        k = self.tokenformer_k.to(dtype).view(
             -1, self.num_heads, self.hidden_size // self.num_heads
         ).transpose(0, 1)
-        v = self.tokenformer_v.view(
+        v = self.tokenformer_v.to(dtype).view(
             -1, self.num_heads, self.hidden_size * self.tokenformer_r // self.num_heads
         ).transpose(0, 1)
 
@@ -82,7 +84,7 @@ class TokenformerAdapter(nn.Module):
             value=v,
             attn_mask=None,
             dropout_p=0.0,
-            is_causal=False,  # should be false for tokenformer
+            is_causal=False,
         )
 
         proj_down = (
@@ -91,20 +93,10 @@ class TokenformerAdapter(nn.Module):
             .view([-1, self.hidden_size, self.tokenformer_r])
         )
 
-        # tokenformer_p dims are [tokenformer_r, hidden_size]
-        # query dims are [batch size, length, 1, hidden_size]
-        # proj_down are [batch size, length, hidden_size, tokenformer_r]
-
         query_batch = query.view([-1, 1, self.hidden_size])
 
-        # logger.info(f"query shape: {query.shape}")
-        # logger.info(f"query batch shape: {query_batch.shape}")
-        # logger.info(f"proj_down shape: {proj_down.shape}")
-        # logger.info(f"tokenformer_p shape: {self.tokenformer_p.shape}")
-
-        result = torch.bmm(query_batch, proj_down) @ self.tokenformer_p
-
-        # logger.info(f"result shape: {result.shape}")
+        # Also cast tokenformer_p
+        result = torch.bmm(query_batch, proj_down) @ self.tokenformer_p.to(dtype)
 
         return result.view(query.shape)
 
