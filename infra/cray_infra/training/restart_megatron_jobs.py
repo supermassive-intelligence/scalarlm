@@ -6,6 +6,7 @@ from cray_infra.api.fastapi.aiohttp.get_global_session import get_global_session
 from cray_infra.util.get_config import get_config
 
 
+import traceback
 import os
 import json
 import yaml
@@ -57,13 +58,18 @@ async def get_running_jobs():
     for path in os.listdir(config["training_job_directory"]):
         root = os.path.join(config["training_job_directory"], path)
         if os.path.exists(os.path.join(root, "status.json")):
-            with open(os.path.join(root, "status.json")) as f:
-                status = json.load(f)
-                if (
-                    status["status"] == TrainingJobStatus.TRAINING
-                    or status["status"] == TrainingJobStatus.QUEUED
-                ):
-                    yield root
+            try:
+                with open(os.path.join(root, "status.json")) as f:
+                    status = json.load(f)
+                    if (
+                        status["status"] == TrainingJobStatus.TRAINING
+                        or status["status"] == TrainingJobStatus.QUEUED
+                    ):
+                        yield root
+            except Exception as e:
+                logger.error(f"Error reading status.json for job {root}: {e}")
+                # print exception info
+                traceback.print_exc()
 
 
 async def get_slurm_jobs():
