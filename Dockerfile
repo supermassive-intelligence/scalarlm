@@ -64,11 +64,11 @@ ENV BASE_NAME=cpu
 
 ###############################################################################
 # AMD BASE IMAGE
-FROM gdiamos/rocm-base:v0.9912 AS amd
+FROM gdiamos/rocm-base-mi300:v0.9926 AS amd
 
 ENV BASE_NAME=amd
 
-RUN pip install pyhip>=1.1.0
+#RUN pip install pyhip>=1.1.0
 ENV HIP_FORCE_DEV_KERNARG=1
 
 ARG INSTALL_ROOT=/app/cray
@@ -291,7 +291,7 @@ COPY ./infra/requirements-megatron-cpu.txt ${INSTALL_ROOT}/requirements-megatron
 COPY ./requirements.txt ${INSTALL_ROOT}/requirements.txt
 
 RUN if [ "$VLLM_TARGET_DEVICE" != "cpu" ]; then \
-        uv pip install --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements-megatron.txt; \
+        uv pip install --no-deps --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements-megatron.txt; \
     fi && \
     if [ "$VLLM_TARGET_DEVICE" != "cuda" ]; then \
         uv pip install --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements-megatron-cpu.txt; \
