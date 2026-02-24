@@ -188,6 +188,9 @@ class TrainingLoop:
         if not is_nan:
             scaled_loss.backward()
 
+        # Ensure gradients are synchronized across ranks during backward pass
+        self.training_state.model_info["model"].backward_sync()
+
         # Log info for each micro-batch
         self.print_microbatch_info(accum_step, avg_loss, start_time)
 
@@ -248,7 +251,7 @@ class TrainingLoop:
             logger.info("Unwrapping model")
             model_state_dict = self.training_state.model_info["model"].unwrap_model()
         else:
-            model_state_dict = filter_checkpoint(model, model.state_dict())
+            model_state_dict = filter_checkpoint(model.model, model.model.state_dict())
 
         self.save_checkpoint(model_state_dict)
 

@@ -111,7 +111,7 @@ class FSDPLayer(nn.Module):
 
             local_name = name.split(".")[-1]
 
-            prefix = name[:-len(local_name)]
+            prefix = name[: -len(local_name)]
 
             if not local_name.startswith("shard_"):
                 logger.debug(f" Rank {rank}: Skipping parameter {name}")
@@ -150,7 +150,10 @@ class FSDPLayer(nn.Module):
             parent_module = self.get_parent_module(self.module, param)
 
             if hasattr(parent_module, local_name):
-                if getattr(parent_module, local_name).data_ptr() != param.data.data_ptr():
+                if (
+                    getattr(parent_module, local_name).data_ptr()
+                    != param.data.data_ptr()
+                ):
                     delattr(parent_module, local_name)
 
             setattr(parent_module, local_name, param.data)
@@ -261,7 +264,7 @@ class SimpleFSDP(nn.Module):
                 for param_name, param in child.module.named_parameters(recurse=False):
                     if param.requires_grad:
                         local_name = param_name.split(".")[-1]
-                        name_prefix = param_name[:-len(local_name)]
+                        name_prefix = param_name[: -len(local_name)]
 
                         if local_name.startswith("shard_"):
                             # Remove _shard_ prefix
@@ -269,18 +272,20 @@ class SimpleFSDP(nn.Module):
                             full_unsharded_name = name_prefix + local_name
 
                             # Get metadata for this parameter
-                            metadata_dict = child.sharded_parameter_metadata[full_unsharded_name]
+                            metadata_dict = child.sharded_parameter_metadata[
+                                full_unsharded_name
+                            ]
 
                             # Gather all shards and reconstruct the full tensor
                             full_tensor = all_gather_op(param, metadata_dict)
 
-                            unwrapped_state_dict[f"{prefix}{name}.{full_unsharded_name}"] = (
-                                full_tensor.to(torch.device("cpu"))
-                            )
+                            unwrapped_state_dict[
+                                f"{prefix}{name}.{full_unsharded_name}"
+                            ] = full_tensor.to(torch.device("cpu"))
 
                         else:
-                            unwrapped_state_dict[f"{prefix}{name}.{param_name}"] = param.to(
-                                torch.device("cpu")
+                            unwrapped_state_dict[f"{prefix}{name}.{param_name}"] = (
+                                param.to(torch.device("cpu"))
                             )
 
                         logger.debug(
@@ -292,6 +297,9 @@ class SimpleFSDP(nn.Module):
                 module=child,
                 unwrapped_state_dict=unwrapped_state_dict,
             )
+
+    def backward_sync(self):
+        pass
 
 
 def get_fsdp_layers(module):
