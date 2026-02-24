@@ -1,7 +1,11 @@
-import torch
 from cray_megatron.megatron.distribution.fsdp import SimpleFSDP
+from cray_megatron.megatron.distribution.ddp import DDP
+from cray_megatron.megatron.distribution.no_distribution import NoDistribution
+from cray_infra.util.get_job_config import get_job_config
 
 from gpu_aware_mpi import get_size, get_rank
+
+import torch
 
 import socket
 import os
@@ -19,7 +23,20 @@ def load_distribution_strategy():
     }
 
     if get_size() > 1:
-        strategy["strategy"] = SimpleFSDP
+        distribution_strategy = get_job_config()["distribution_strategy"]
+
+        if distribution_strategy == "ddp":
+            logger.info("Using DDP distribution strategy.")
+            strategy["strategy"] = DDP
+        else:
+            logger.warning(
+                f"Unknown distribution strategy '{distribution_strategy}' "
+                "specified. Defaulting to SimpleFSDP."
+            )
+            strategy["strategy"] = SimpleFSDP
+    else:
+        logger.info("Using NoDistribution distribution strategy.")
+        strategy["strategy"] = NoDistribution
 
     return strategy
 
@@ -27,6 +44,7 @@ def load_distribution_strategy():
 def get_device():
     if torch.cuda.is_available():
 
+        gpu_count = torch.cuda.device_count()
         selected_gpu = select_gpu()
 
         if gpu_count > 1:

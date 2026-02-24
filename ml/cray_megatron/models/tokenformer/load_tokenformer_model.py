@@ -34,7 +34,9 @@ def load_tokenformer_model():
     model_info = load_checkpoint_weights_if_exist(model_info)
 
     total_time = time.time() - start_time
-    logger.info(f"Total model loading time: {total_time:.2f}s ({total_time/60:.1f} minutes)")
+    logger.info(
+        f"Total model loading time: {total_time:.2f}s ({total_time/60:.1f} minutes)"
+    )
     return model_info
 
 
@@ -66,14 +68,16 @@ def materialize_model(model_info):
     start_time = time.time()
     model_info["model"] = AutoModelForCausalLM.from_pretrained(
         model_info["model_name"],
-        torch_dtype="auto",           # Use model's native dtype
-        #device_map="auto",            # Enable Big Model Inference
-        #low_cpu_mem_usage=True,       # Reduce CPU memory usage
-        #_fast_init=True               # Skip weight initialization (default True)
-        )
+        torch_dtype="auto",  # Use model's native dtype
+        # device_map="auto",            # Enable Big Model Inference
+        # low_cpu_mem_usage=True,       # Reduce CPU memory usage
+        # _fast_init=True               # Skip weight initialization (default True)
+    )
 
     total_time = time.time() - start_time
-    logger.info(f"from_pretrained latency: {total_time:.2f}s ({total_time/60:.1f} minutes)")
+    logger.info(
+        f"from_pretrained latency: {total_time:.2f}s ({total_time/60:.1f} minutes)"
+    )
 
     start_time = time.time()
     model_info["model"] = create_tokenformer_model(
@@ -81,7 +85,9 @@ def materialize_model(model_info):
     )
     total_time = time.time() - start_time
 
-    logger.info(f"create_tokenformer_model latency: {total_time:.2f}s ({total_time/60:.1f} minutes)")
+    logger.info(
+        f"create_tokenformer_model latency: {total_time:.2f}s ({total_time/60:.1f} minutes)"
+    )
     start_time = time.time()
     config = get_config()
     config_dtype = config["dtype"]
@@ -99,15 +105,13 @@ def materialize_model(model_info):
         logger.info("Using model's native dtype, no conversion needed.")
 
     total_time = time.time() - start_time
-    logger.info(f"model dtype conversion latency: {total_time:.2f}s ({total_time/60:.1f} minutes)")
+    logger.info(
+        f"model dtype conversion latency: {total_time:.2f}s ({total_time/60:.1f} minutes)"
+    )
 
-    if (
-        "distribution_strategy" in model_info
-        and "strategy" in model_info["distribution_strategy"]
-    ):
-        model_info["model"] = model_info["distribution_strategy"]["strategy"](
-            model_info["model"]
-        )
+    model_info["model"] = model_info["distribution_strategy"]["strategy"](
+        model_info["model"]
+    )
 
     logger.info(f"Model: {model_info['model']}")
 
@@ -115,6 +119,6 @@ def materialize_model(model_info):
 
     return model_info
 
+
 def load_checkpoint_weights_if_exist(model_info):
     return model_info
-
