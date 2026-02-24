@@ -2,6 +2,7 @@ from cray_infra.one_server.wait_for_vllm import get_vllm_health
 
 import asyncio
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 frontend_task = None

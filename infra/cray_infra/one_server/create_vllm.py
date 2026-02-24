@@ -45,6 +45,11 @@ async def create_vllm(server_status, port):
         else:
             print(f"DEBUG: Using default VLLM_BACKEND for sm_version {sm_version}")
 
+    if config['dtype'] == 'auto':
+        # Set to float32 on the cpu
+        if not torch.cuda.is_available():
+            config['dtype'] = 'float32'
+
     parser = FlexibleArgumentParser(
         description="vLLM OpenAI-Compatible RESTful API server."
     )

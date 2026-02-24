@@ -17,6 +17,9 @@ from cray_infra.api.fastapi.routers.slurm_router import (
 from cray_infra.api.fastapi.tasks.add_megatron_tasks import (
     add_megatron_tasks,
 )
+from cray_infra.api.fastapi.routers.add_chat_proxy import (
+    add_chat_proxy,
+)
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -33,6 +36,8 @@ app.include_router(megatron_router, prefix="/v1")
 app.include_router(health_router, prefix="/v1")
 app.include_router(generate_router, prefix="/v1")
 app.include_router(slurm_router)
+
+add_chat_proxy(app)
 
 origins = [
     "http://localhost:3000",

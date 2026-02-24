@@ -73,14 +73,25 @@ def get_node_info():
     hostname = get_hostname()
     cpu_count = get_cpu_count()
     gpu_count = get_gpu_count()
+    machine_id = get_machine_id()
 
     return {
+        "machine_id": machine_id,
         "hostname": hostname,
         "cpu_count": cpu_count,
         "gpu_count": gpu_count,
         "gpu_type": get_gpu_type(),
         "gpu_indexes": get_gpu_indexes(),
     }
+
+def get_machine_id():
+    machine_id = None
+    try:
+        with open("/etc/machine-id", "r") as f:
+            machine_id = f.read().strip()
+    except Exception as e:
+        logger.error(f"Error reading machine ID: {e}")
+    return machine_id
 
 
 def get_hostname():
@@ -259,7 +270,8 @@ def write_node_config(node):
     """
     NodeName=hostname CPUs=64 Gres=gpu:6 State=UNKNOWN
     """
-    gres_string = f"Gres=gpu:{node['gpu_count']}" if node["gpu_count"] > 0 else ""
+    max_gpus_per_node = get_config()["max_gpus_per_node"]
+    gres_string = f"Gres=gpu:{min(max_gpus_per_node, node['gpu_count'])}" if node["gpu_count"] > 0 else ""
     node_config = f"NodeName={node['hostname']} CPUs={node['cpu_count']} {gres_string} State=UNKNOWN"
     return node_config + "\n"
 

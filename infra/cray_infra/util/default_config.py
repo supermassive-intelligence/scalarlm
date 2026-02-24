@@ -22,6 +22,7 @@ class Config(BaseModel):
 
     log_directory: str = "/app/cray/nfs/logs"
 
+    max_gpus_per_node: int = 1
     max_train_time: int = 24 * 60 * 60
     extra_training_seconds: int = 300  # 5 minutes buffer before slurm kills the job
     tensor_parallel_size: int = 1

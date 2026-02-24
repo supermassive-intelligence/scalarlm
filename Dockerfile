@@ -149,7 +149,7 @@ RUN --mount=type=bind,source=./chat-ui,target=/workspace/chat-ui,rw \
 
 RUN cp ${INSTALL_ROOT}/chat-ui/package-lock.json ${INSTALL_ROOT}/chat-ui/package.json ./
 
-ARG APP_BASE=
+ARG APP_BASE=/chat
 ARG PUBLIC_APP_COLOR=
 ENV BODY_SIZE_LIMIT=15728640
 
@@ -183,7 +183,7 @@ FROM local_db AS ui_final
 ENV INCLUDE_DB=true
 
 # svelte requires APP_BASE at build time so it must be passed as a build arg
-ARG APP_BASE=
+ARG APP_BASE=/chat
 ARG PUBLIC_APP_COLOR=
 ARG PUBLIC_COMMIT_SHA=
 ENV PUBLIC_COMMIT_SHA=${PUBLIC_COMMIT_SHA}
