@@ -84,14 +84,22 @@ def get_node_info():
         "gpu_indexes": get_gpu_indexes(),
     }
 
+
 def get_machine_id():
     machine_id = None
     try:
-        with open("/etc/machine-id", "r") as f:
-            machine_id = f.read().strip()
+        return get_board_serial()
     except Exception as e:
         logger.error(f"Error reading machine ID: {e}")
     return machine_id
+
+
+def get_board_serial() -> str | None:
+    result = subprocess.run(
+        ["dmidecode", "-s", "baseboard-serial-number"], capture_output=True, text=True
+    )
+    serial = result.stdout.strip()
+    return serial if serial else None
 
 
 def get_hostname():
@@ -271,7 +279,11 @@ def write_node_config(node):
     NodeName=hostname CPUs=64 Gres=gpu:6 State=UNKNOWN
     """
     max_gpus_per_node = get_config()["max_gpus_per_node"]
-    gres_string = f"Gres=gpu:{min(max_gpus_per_node, node['gpu_count'])}" if node["gpu_count"] > 0 else ""
+    gres_string = (
+        f"Gres=gpu:{min(max_gpus_per_node, node['gpu_count'])}"
+        if node["gpu_count"] > 0
+        else ""
+    )
     node_config = f"NodeName={node['hostname']} CPUs={node['cpu_count']} {gres_string} State=UNKNOWN"
     return node_config + "\n"
 
