@@ -3,9 +3,9 @@ from cray_megatron.megatron.distribution.apply_distribution_strategy import (
     apply_distribution_strategy,
 )
 from gpu_aware_mpi import get_size, get_rank, allgather
-from cray_megatron.collectives.main_rank_only import is_main_rank
+from cray_infra.training.main_rank_only import is_main_rank
 
-from ml.tokenformer.tokenformer_model import create_tokenformer_model
+from ml.adapters.add_adapters_to_model import add_adapters_to_model
 
 from cray_infra.util.get_job_config import get_job_config
 from cray_infra.util.get_config import get_config
@@ -22,17 +22,13 @@ import time
 logger = logging.getLogger(__name__)
 
 
-def load_tokenformer_model():
+def load_model():
     start_time = time.time()
     model_info = load_model_config()
-
-    model_info = apply_tokenformer_adapter(model_info)
 
     model_info = apply_distribution_strategy(model_info)
 
     model_info = materialize_model(model_info)
-
-    model_info = load_checkpoint_weights_if_exist(model_info)
 
     total_time = time.time() - start_time
     logger.info(
@@ -59,10 +55,6 @@ def load_model_config():
     return model_info
 
 
-def apply_tokenformer_adapter(model_info):
-    return model_info
-
-
 def materialize_model(model_info):
     download_model(model_info["model_name"])
 
@@ -82,8 +74,8 @@ def materialize_model(model_info):
     )
 
     start_time = time.time()
-    model_info["model"] = create_tokenformer_model(
-        model_info["model"], model_info["distribution_strategy"]["device"]
+    model_info["model"] = add_adapters_to_model(
+        model=model_info["model"], device=model_info["distribution_strategy"]["device"]
     )
     total_time = time.time() - start_time
 
@@ -118,12 +110,10 @@ def materialize_model(model_info):
     if is_main_rank():
         logger.info(f"Model: {model_info['model']}")
 
-    logger.info(f"Moving model to device: {model_info['distribution_strategy']['device']}...")
+    logger.info(
+        f"Moving model to device: {model_info['distribution_strategy']['device']}..."
+    )
 
     model_info["model"].to(model_info["distribution_strategy"]["device"])
 
-    return model_info
-
-
-def load_checkpoint_weights_if_exist(model_info):
     return model_info
