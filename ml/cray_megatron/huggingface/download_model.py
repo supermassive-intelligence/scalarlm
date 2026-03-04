@@ -1,4 +1,4 @@
-from cray_megatron.collectives.main_rank_only import main_rank_only
+from cray_infra.training.main_rank_only import main_rank_only
 
 from huggingface_hub import snapshot_download
 
