@@ -3,6 +3,7 @@ from cray_megatron.megatron.distribution.apply_distribution_strategy import (
     apply_distribution_strategy,
 )
 from gpu_aware_mpi import get_size, get_rank, allgather
+from cray_megatron.collectives.main_rank_only import is_main_rank
 
 from ml.tokenformer.tokenformer_model import create_tokenformer_model
 
@@ -45,9 +46,9 @@ def load_model_config():
 
     model_name = job_config["llm_name"]
 
-    model_config = AutoConfig.from_pretrained(model_name)
+    model_config = AutoConfig.from_pretrained(model_name, local_files_only=True)
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_name, local_files_only=True)
 
     model_info = {
         "model_name": model_name,
@@ -69,6 +70,7 @@ def materialize_model(model_info):
     model_info["model"] = AutoModelForCausalLM.from_pretrained(
         model_info["model_name"],
         torch_dtype="auto",  # Use model's native dtype
+        local_files_only=True,
         # device_map="auto",            # Enable Big Model Inference
         # low_cpu_mem_usage=True,       # Reduce CPU memory usage
         # _fast_init=True               # Skip weight initialization (default True)
@@ -113,7 +115,10 @@ def materialize_model(model_info):
         model_info["model"]
     )
 
-    logger.info(f"Model: {model_info['model']}")
+    if is_main_rank():
+        logger.info(f"Model: {model_info['model']}")
+
+    logger.info(f"Moving model to device: {model_info['distribution_strategy']['device']}...")
 
     model_info["model"].to(model_info["distribution_strategy"]["device"])
 
