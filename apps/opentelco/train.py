@@ -87,7 +87,6 @@ def get_dataset(data_path, reasoning_mode):
 
     return dataset
 
-
 if __name__ == '__main__':
     config = get_args()
     now = datetime.datetime.now().strftime("%Y_%m_%d__%H_%M_%S")
