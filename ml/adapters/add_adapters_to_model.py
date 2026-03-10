@@ -10,5 +10,7 @@ def add_adapters_to_model(model, device):
         return create_tokenformer_model(model=model, device=device)
     elif job_config["adapter_type"] == "lora":
         return create_lora_model(model=model, device=device)
+    elif job_config["adapter_type"] == "none":
+        return model
     else:
         raise ValueError(f"Unsupported adapter type: {job_config['adapter_type']}")
