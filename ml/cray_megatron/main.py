@@ -1,11 +1,3 @@
-import os
-#os.environ["TRANSFORMERS_OFFLINE"] = "1"
-#os.environ["HF_DATASETS_OFFLINE"] = "1"
-
-#del os.environ["CUDA_VISIBLE_DEVICES"]
-
-#del os.environ["ROCR_VISIBLE_DEVICES"]
-
 from cray_infra.training.training_harness import TrainingHarness
 from cray_infra.training.training_job_status import TrainingJobStatus
 from cray_infra.huggingface.get_hf_token import get_hf_token
