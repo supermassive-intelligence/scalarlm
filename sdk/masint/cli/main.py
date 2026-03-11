@@ -6,6 +6,7 @@ from masint.cli.squeue import squeue
 from masint.cli.stats import stats
 from masint.cli.clear_queue import clear_queue
 from masint.cli.cancel import cancel
+from masint.cli.delete import delete
 
 import masint
 
@@ -55,6 +56,9 @@ def main():
 
     elif arguments.command == "cancel":
         cancel(model_name=arguments.model)
+    
+    elif arguments.command == "delete":
+        delete(model_name=arguments.model)
 
     else:
         logger.error(f"Unknown command {arguments.command}")
