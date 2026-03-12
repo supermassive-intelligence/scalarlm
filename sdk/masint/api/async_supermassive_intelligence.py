@@ -62,6 +62,9 @@ class AsyncSupermassiveIntelligence:
 
     async def cancel(self, model_name):
         return await self.engine.cancel(model_name=model_name)
+    
+    async def delete(self, model_name):
+        return await self.engine.delete(model_name=model_name)
 
     async def clear_queue(self):
         return await self.engine.clear_queue()

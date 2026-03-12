@@ -66,6 +66,9 @@ class SupermassiveIntelligence:
 
     def cancel(self, model_name):
         return asyncio.run(self.async_api.cancel(model_name=model_name))
+    
+    def delete(self, model_name):
+        return asyncio.run(self.async_api.delete(model_name=model_name))
 
     def clear_queue(self):
         return asyncio.run(self.async_api.clear_queue())

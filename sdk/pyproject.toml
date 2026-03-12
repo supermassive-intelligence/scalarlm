@@ -4,9 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "scalarlm"
-version = "0.9928"
+version = "0.9929"
 authors = [
   { name="Greg Diamos", email="gregory.diamos@gmail.com" },
+  { name="Naila Farooqui", email="gtnaila@gmail.com" },
 ]
 description = "ScalarLM is a unified LLM inference and training platform"
 readme = "README.md"
