@@ -22,6 +22,7 @@ scripts/scalarlm
 
 # Python
 **/__pycache__/
+*.egg-info/
 
 # OS
 .DS_Store
