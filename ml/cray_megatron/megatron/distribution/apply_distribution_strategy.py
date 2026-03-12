@@ -10,6 +10,9 @@ import torch
 import socket
 import os
 import json
+import time
+import subprocess
+
 import logging
 
 logger = logging.getLogger(__name__)
@@ -67,7 +70,16 @@ def select_gpu():
     machine_id = get_machine_id()
     my_hostname = socket.gethostname()
 
-    hosts_on_this_machine = get_hosts_on_machine(machine_id)
+    attempts = 10
+
+    for attempt in range(attempts):
+        try:
+            hosts_on_this_machine = get_hosts_on_machine(machine_id)
+            break
+        except Exception as e:
+            logger.error(f"Error getting hosts on machine (attempt {attempt + 1}/{attempts}): {e}")
+            hosts_on_this_machine = []
+            time.sleep(1)
 
     gpu_index = 0
 
@@ -77,7 +89,8 @@ def select_gpu():
             break
 
     logger.info(
-        f"Rank {rank} on host {my_hostname} with machine ID {machine_id} assigned GPU {gpu_index}"
+        f"Rank {rank} on host {my_hostname} out of {len(hosts_on_this_machine)} with "
+        f"machine ID {machine_id} assigned GPU {gpu_index} out of {gpu_count} available GPUs."
     )
     return gpu_index
 
@@ -85,11 +98,19 @@ def select_gpu():
 def get_machine_id():
     machine_id = None
     try:
-        with open("/etc/machine-id", "r") as f:
-            machine_id = f.read().strip()
+        machine_id = get_board_serial()
     except Exception as e:
         logger.error(f"Error reading machine ID: {e}")
     return machine_id
+
+
+def get_board_serial() -> str | None:
+    result = subprocess.run(
+        ["dmidecode", "-s", "baseboard-serial-number"],
+        capture_output=True, text=True
+    )
+    serial = result.stdout.strip()
+    return serial if serial else None
 
 
 def get_hosts_on_machine(machine_id):

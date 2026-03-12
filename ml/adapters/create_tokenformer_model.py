@@ -1,7 +1,6 @@
 from tokenformer.tokenformer_surgeon import TokenformerSurgeon
 
 import time
-
 import logging
 
 logger = logging.getLogger(__name__)

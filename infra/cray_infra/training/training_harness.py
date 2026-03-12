@@ -1,6 +1,8 @@
 from cray_infra.util.get_config import get_config
 from cray_infra.util.get_job_config import get_job_config
 
+from cray_infra.training.main_rank_only import main_rank_only
+
 import torch
 
 import os
@@ -49,7 +51,7 @@ def get_training_job_directory():
 
     return job_config["job_directory"]
 
-
+@main_rank_only
 def save_status(job_status):
     try:
         contents = json.dumps(job_status)
