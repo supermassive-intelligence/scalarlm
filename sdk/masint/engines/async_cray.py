@@ -117,6 +117,12 @@ class AsyncCray:
             async with session.post(api_url) as resp:
                 return await resp.json()
 
+    async def delete(self, model_name):
+        api_url = make_api_url(f"v1/megatron/delete/{model_name}", api_url=self.api_url)
+        async with get_session() as session:
+            async with session.post(api_url) as resp:
+                return await resp.json()
+    
     async def clear_queue(self):
         api_url = make_api_url("v1/generate/clear_queue", api_url=self.api_url)
 
