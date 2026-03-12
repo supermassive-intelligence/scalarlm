@@ -1,22 +1,41 @@
-# ScalarLM Frequently Asked Questions
+# Frequently Asked Questions
+
+Full docs at [scalarlm.com](https://www.scalarlm.com).
+
+---
 
 ## Training and Fine-tuning
 
-#### Do I need special templates (special tokens) for training or inference prompts?
-Yes. The training and inference prompts follow the same format as the prompt template for the model published on HuggingFace. Each deployment is tied to a specific model, refer to the model card for the prompt template. For example, [this](https://www.llama.com/docs/model-cards-and-prompt-formats/llama3_1/) is the template for the ScalarLM deployment that supports Llama8B Instruct. 
+### Do I need special prompt templates for training or inference?
 
-### How can I monitor fine-tuning progress, such as loss function curves?
-Use the `scalarlm plot` CLI command after setting your API URL. We provide a pip-installable tool called `scalarlm` for this purpose.
+Yes. Training and inference prompts must follow the same format as the prompt template for the model published on Hugging Face. Each deployment is tied to a specific model — refer to the model card for the prompt template.
+
+### How can I monitor fine-tuning progress and loss curves?
+
+Use the `scalarlm plot` CLI command after setting your API URL:
+
+```bash
+pip install scalarlm
+export SCALARLM_API_URL="http://<your-deployment-ip>"
+scalarlm plot
+```
+
+---
 
 ## Job Management
 
-### What happens if I launch 5 fine‑tuning jobs at once?
-Jobs are queued automatically by the framework's built‑in scheduler—you don't need to implement your own queue.
+### What happens if I launch multiple fine-tuning jobs at once?
+
+Jobs are queued automatically by the framework's built-in scheduler — you don't need to implement your own queue.
+
+---
 
 ## Training Parameters
 
-### How do I change the "chunking" (token‑block) size?
+### How do I change the token-block (chunk) size?
+
 Pass `max_token_block_size` in `train_args`:
+
 ```python
 llm.train(
     dataset,
@@ -29,132 +48,155 @@ llm.train(
 ```
 
 ### Can I change the quantization / dtype?
-Yes — also via `train_args`:
+
+Yes, via `train_args`:
+
 ```python
 llm.train(
-    ...,
+    dataset,
     train_args={
-        "max_steps": count*50,
+        "max_steps": 200,
         "learning_rate": 3e-3,
         "gpus": 1,
         "dtype": "float32"
     }
 )
 ```
-At inference, VLLM will use the dtype defined in the default configuration at the time of deployment. When this type differs from the dtype of trained models, VLLM automatically converts the type when loading the model.
 
-### Which GPUs parameters should I use for multi‑GPU training?
-You can use
-- `gpus`: total GPUs to request (e.g. `"gpus": 2`)
-- Do not use `max_gpus` (it's only for debugging)
+At inference time, vLLM uses the dtype defined in the deployment configuration. When this differs from the dtype of a trained checkpoint, vLLM automatically converts the type when loading the model.
 
-### Are there additional parameters needed for inference on multi-GPU?
-No additional parameters are needed. Multi-GPU is configured in the deployment.
+### Which GPU parameters should I use for multi-GPU training?
 
-## Monitoring & Loss
+Use `gpus` to specify the total number of GPUs to request (e.g., `"gpus": 2`). Do not use `max_gpus` — that flag is for debugging only.
 
-### How can I view fine‑tuning progress and loss curves?
-Use the `scalarlm plot` CLI command after setting your API URL.
+### Are there additional parameters needed for multi-GPU inference?
 
-### How do I install the CLI for monitoring fine‑tuning progress?
-You can install it simply via pip
-```
+No. Multi-GPU inference is configured at deployment time via `values.yaml`.
+
+---
+
+## CLI Reference
+
+### How do I install and configure the CLI?
+
+```bash
 pip install scalarlm
+export SCALARLM_API_URL="http://<your-deployment-ip>"
 ```
-Then set your API endpoint:
-```
-export SCALARLM_API_URL="the-hosted-ip-for-craylm"
 
+Available commands:
+
+```
 scalarlm [-h] {logs,plot,ls,squeue} ...
 
-The command line interface for ScalarLM
-
 positional arguments:
-  {logs,plot,ls,squeue}
-    logs                View logs
-    plot                Plot the results of a model
-    ls                  List models
-    squeue              View the squeue
+  logs      View training logs
+  plot      Plot training loss curves
+  ls        List available models
+  squeue    View the job queue
 
 options:
-  -h, --help            show this help message and exit
+  -h, --help  show this help message and exit
 ```
 
-### How do I install and configure the framework?
-You can directly install the ScalarLM client from PyPI:
-```bash
-pip install scalarlm
-```
-The client requirements are listed in github.com/cray-lm/cray-lm/blob/main/sdk/pyproject.toml.
+### How do I modify training hyperparameters?
 
-If you want to modify hyperparameters during training, set your PYTHONPATH to the checked-out repository:
-```bash
-export PYTHONPATH=/path/to/checkout/cray/cray/sdk
+You can modify files in the `ml/` directory directly. For example, the optimizer configuration lives at:
+
 ```
-Then you can modify files in the ml directory, such as the optimizer configuration at github.com/cray-lm/cray-lm/blob/main/ml/cray_megatron/megatron/training_loop.py.
+ml/cray_megatron/megatron/training_loop.py
+```
+
+Set your `PYTHONPATH` to the checked-out repo's SDK before running:
+
+```bash
+export PYTHONPATH=/path/to/scalarlm/sdk
+```
+
+The `ml/` directory is packaged and shipped to the cluster automatically with each job submission — no Docker rebuild or redeployment required.
 
 ### Can I change the loss function?
-Yes — you can swap in a custom loss in the training loop (here)[https://github.com/cray‑lm/cray‑lm/blob/493250c3b93a3113a9dc9cf04993e795515cf746/ml/cray_megatron/megatron/training_loop.py#L105]
+
+Yes. Swap in a custom loss in the training loop at:
+
+```
+ml/cray_megatron/megatron/training_loop.py
+```
+
+See the [source on GitHub](https://github.com/tensorwavecloud/ScalarLM/blob/main/ml/cray_megatron/megatron/training_loop.py).
+
+---
 
 ## Caching & Performance
 
 ### Does ScalarLM cache inference results?
-No. Inference is sufficiently fast that no cache is provided.
 
-### Any performance limitations or known issues?
-Current limitations include:
+No. Inference is sufficiently fast that no result cache is provided.
+
+### What are the current known limitations?
+
 - Each deployment is tied to a single base model.
-- Large‑model training may not yet be fully optimized; benchmarks and speedups are in progress.
+- Large-model training may not yet be fully optimized; benchmarks and speedups are in progress.
+
+---
 
 ## Advanced Topics
 
 ### Can I implement RLHF?
-Yes. Use the ScalarLM inference endpoint to score or rank data with your reward model, then feed the selected data back into the training endpoint to update the model.
+
+Yes. Use the ScalarLM inference endpoint to score or rank data with your reward model, then feed the selected data back into the training endpoint to update the model. The closed-loop design is a primary use case ScalarLM was built around.
 
 ### Is early stopping available?
-The framework itself doesn't expose early-stop parameters, but since it's built on PyTorch/Hugging Face, you can integrate the Hugging Face early stopping callback into your training loop. You'll need to write new code to enable this and determine how to configure the relevant hyperparameters on the callback. See huggingface.co/docs/transformers/en/main_classes/callback for details.
 
-### Where can I see a full list of fine‑tuning parameters?
-Instead of providing a single config file listing all possible training parameters, ScalarLM lets you modify and write new code in the `ml/` directory to add/enhance/update training parameters as needed. This gives the user the highest level of autonomy and flexibility. ScalarLM is designed to allow users to experiment as seamlessly as possible.
+The framework does not expose early-stop parameters directly, but because it is built on PyTorch and Hugging Face, you can integrate the [Hugging Face early stopping callback](https://huggingface.co/docs/transformers/en/main_classes/callback) into your training loop in the `ml/` directory.
+
+### Where can I see a full list of fine-tuning parameters?
+
+Rather than a single config file, ScalarLM lets you modify and write new code in the `ml/` directory to add or change training parameters. This gives you maximum flexibility to experiment without rebuilding infrastructure.
 
 ### Can I use any Hugging Face model?
-In principle yes, but each deployment must be explicitly configured. 
 
-### How to set inference temperature?
-We recommend not changing it, because higher temperature means higher error. 
-If you must change it, it is a parameter to vllm. The [quickstart page](https://docs.vllm.ai/en/v0.6.1/getting_started/quickstart.html) shows examples of how to set it.
+In principle yes, but each deployment must be explicitly configured. See the supported and validated models in the [README](README.md) and on the [ScalarLM docs](https://www.scalarlm.com).
 
+### How do I set inference temperature?
 
-### What is the relationship between training steps and epochs in ScalarLM?**  
+Temperature is a parameter passed directly to vLLM. The default is recommended — higher temperature increases output variance and error rate. If you need to change it, refer to the [vLLM quickstart docs](https://docs.vllm.ai/en/stable/getting_started/quickstart.html) for examples.
 
-ScalarLM shifts away from classic batch-based training, so its definitions of “step” and “epoch” are {chunk and GPU} centric rather than {example and batch} driven. Here’s a breakdown:
+### What is the relationship between training steps and epochs in ScalarLM?
 
-1. **No Conventional Batching**  
-   - ScalarLM flattens all training examples into a single, continuous token stream.  
-   - There is **no** `batch_size` parameter—instead, you work directly on the token sequence. 
+ScalarLM shifts away from classic batch-based training. Its definitions of "step" and "epoch" are chunk- and GPU-centric rather than example- and batch-driven.
 
-2. **Token Chunks (Blocks)**  
-   - The continuous token stream is split into fixed-length chunks, controlled by the `max_token_block_size` setting.  
-   - Each chunk contains the same number of tokens, ensuring that every GPU processes an identical workload per step.
-   - [Here](https://github.com/tensorwavecloud/ScalarLM/blob/6a899c8ee1fa2681a2c706e1fb0ea43a94fadba9/ml/cray_megatron/megatron/dataset/load_dataset.py#L124) is the source code for chunking.
+**1. No conventional batching.** ScalarLM flattens all training examples into a single continuous token stream. There is no `batch_size` parameter.
 
-3. **Defining Steps vs. Epochs**  
-   - **Training Step:** One forward-and-backward pass over **one** chunk **on one** GPU.  
-   - **Epoch:** A complete pass through **all** chunks across **all** GPUs.  
-     - In traditional frameworks:  
-       ```text
-       steps_per_epoch = ceil(num_examples ÷ batch_size)
-       ```  
-     - In ScalarLM:  
-       ```text
-       steps_per_epoch = total_chunks ÷ num_GPUs
-       ```  
-   - Because there’s no batch size, you can’t apply the standard steps-per-epoch formula. Instead, an epoch is measured by each chunk being processed exactly once, spread evenly across your GPUs.
+**2. Token chunks (blocks).** The token stream is split into fixed-length chunks controlled by `max_token_block_size`. Each chunk contains the same number of tokens, so every GPU processes an identical workload per step. See the [chunking source](https://github.com/tensorwavecloud/ScalarLM/blob/main/ml/cray_megatron/megatron/dataset/load_dataset.py).
 
-4. **Shard-Based Parallelism for Multi-GPU Training**  
-   - The full set of chunks is partitioned into “shards,” one per GPU.  
-   - Each GPU iterates through its shard sequentially, performing one training step per chunk.
+**3. Steps vs. epochs.**
+
+- **Training step:** one forward-and-backward pass over one chunk on one GPU.
+- **Epoch:** a complete pass through all chunks across all GPUs.
+
+In traditional frameworks:
+```
+steps_per_epoch = ceil(num_examples ÷ batch_size)
+```
+
+In ScalarLM:
+```
+steps_per_epoch = total_chunks ÷ num_GPUs
+```
+
+**4. Shard-based parallelism.** The full set of chunks is partitioned into shards, one per GPU. Each GPU iterates through its shard sequentially, performing one training step per chunk.
+
+**Key takeaway:** Steps are chunk-level iterations; epochs are full passes over all chunks divided by the number of GPUs. This guarantees uniform token throughput and balanced GPU workloads without a traditional batch size.
 
 ---
 
-**Key Takeaway:** In ScalarLM, **steps** are chunk-level iterations and **epochs** are full passes over all chunks (divided by GPUs), rather than example-batch passes. This design guarantees uniform token throughput and balanced GPU workloads without relying on a traditional batch size.
+## Saving Models
+
+### Can I save a fine-tuned model to Hugging Face?
+
+Yes. See the [Save Fine-tuned Model to Hugging Face](https://www.scalarlm.com/save-fine-tuned-model-to-hugging-face/) guide for step-by-step instructions. Post-training checkpoints can also be pushed to the Hub automatically at the end of a training run.
+
+---
+
+*For more, visit [scalarlm.com](https://www.scalarlm.com) or open a [GitHub issue](https://github.com/tensorwavecloud/scalarlm/issues).*
