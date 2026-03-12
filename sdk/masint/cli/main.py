@@ -86,6 +86,7 @@ def parse_arguments():
     add_stats_parser(subparsers)
     add_clear_queue_parser(subparsers)
     add_cancel_parser(subparsers)
+    add_delete_parser(subparsers)
 
     args = parser.parse_args()
 
@@ -150,6 +151,9 @@ def add_cancel_parser(subparsers):
     cancel_parser = subparsers.add_parser("cancel", help="Cancel a running model")
     cancel_parser.add_argument("--model", help="The model to cancel", required=True)
 
+def add_delete_parser(subparsers):
+    delete_parser = subparsers.add_parser("delete", help="Delete a model")
+    delete_parser.add_argument("--model", help="The model to delete", required=True)
 
 if __name__ == "__main__":
     main()
