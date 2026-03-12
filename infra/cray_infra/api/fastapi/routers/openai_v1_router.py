@@ -39,7 +39,6 @@ async def list_models():
             )
 
 
-
 @openai_v1_router.post("/completions")
 async def create_completions(request: CompletionRequest, raw_request: Request):
     """Create completions - proxy to vLLM server."""
@@ -54,6 +53,14 @@ async def create_completions(request: CompletionRequest, raw_request: Request):
         "prompt",
         "max_tokens",
         "stream",
+        "tools",
+        "tool_choice",
+        "response_format",
+        "top_p",
+        "stop",
+        "seed",
+        "presence_penalty",
+        "frequency_penalty",
     ]
 
     params = {
@@ -96,6 +103,14 @@ async def create_chat_completions(request: ChatCompletionRequest, raw_request: R
         "messages",
         "max_tokens",
         "stream",
+        "tools",
+        "tool_choice",
+        "response_format",
+        "top_p",
+        "stop",
+        "seed",
+        "presence_penalty",
+        "frequency_penalty",
     ]
 
     params = {

@@ -33,9 +33,12 @@ async def generate(request: GenerateRequest):
     prompts = request.prompts
     model = request.model
     max_tokens = request.max_tokens
+    temperature = request.temperature
+    tools = request.tools
+    tool_choice = request.tool_choice
 
     logger.info(
-        f"Received generate request: prompts={truncate_list(prompts)}, "
+        f"Received generate request: prompts={truncate_list(prompts)}, tools={len(tools) if tools else 0}, "
         f"model={model}, max_tokens={max_tokens}"
     )
 
@@ -62,14 +65,15 @@ async def generate(request: GenerateRequest):
         request_count = 0
 
         for prompt in prompts:
-            request = (
-                {
-                    "prompt": prompt,
-                    "model": model,
-                    "max_tokens": max_tokens,
-                    "request_type": "generate",
-                }
-            )
+            request = {
+                "prompt": prompt,
+                "model": model,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "tools": tools,
+                "tool_choice": tool_choice,
+                "request_type": "generate",
+            }
 
             requests.append(request)
 
