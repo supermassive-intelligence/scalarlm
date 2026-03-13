@@ -65,7 +65,7 @@ async def create_vllm(server_status, port):
         #f"--model_impl transformers",
         "--enable-lora",
         "--enable-auto-tool-choice",
-        "--tool-call-parser=qwen3_xml",
+        "--tool-call-parser=hermes",
         "--trust-remote-code",
     ]
 
