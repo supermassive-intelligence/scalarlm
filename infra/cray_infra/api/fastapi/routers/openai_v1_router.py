@@ -45,7 +45,7 @@ async def create_completions(request: CompletionRequest, raw_request: Request):
     session = get_global_session()
     config = get_config()
 
-    logger.info(f"Received completions request: {request.dict()}")
+    logger.info(f"Received completions request: {request.model_dump(exclude_none=True)}")
 
     allowed_keys = [
         "model",
@@ -65,7 +65,7 @@ async def create_completions(request: CompletionRequest, raw_request: Request):
 
     params = {
         key: value
-        for key, value in request.dict().items()
+        for key, value in request.model_dump(exclude_none=True).items()
         if value is not None and key in allowed_keys
     }
 
@@ -95,7 +95,7 @@ async def create_chat_completions(request: ChatCompletionRequest, raw_request: R
     session = get_global_session()
     config = get_config()
 
-    logger.info(f"Received chat completions request: {request.dict()}")
+    logger.info(f"Received chat completions request: {request.model_dump(exclude_none=True)}")
 
     allowed_keys = [
         "model",
@@ -115,7 +115,7 @@ async def create_chat_completions(request: ChatCompletionRequest, raw_request: R
 
     params = {
         key: value
-        for key, value in request.dict().items()
+        for key, value in request.model_dump(exclude_none=True).items()
         if value is not None and key in allowed_keys
     }
 
@@ -137,3 +137,4 @@ async def create_chat_completions(request: ChatCompletionRequest, raw_request: R
         return StreamingResponse(content=generator(), media_type="text/event-stream")
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
+# test
