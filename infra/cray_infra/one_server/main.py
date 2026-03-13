@@ -117,7 +117,7 @@ async def run_all_servers_async():
                 logger.error(f"Task {task.get_name()} failed with exception:")
                 logger.error(traceback.format_exc())
 
-        logger.info("Cray sever is shutting down")
+        logger.info("Cray server is shutting down")
         kill_vllm_container()
 
         for pending_task in pending:
