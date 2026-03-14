@@ -7,7 +7,9 @@ from cray_infra.huggingface.get_hf_token import get_hf_token
 
 from vllm.entrypoints.openai.api_server import build_app, decorate_logs, \
     init_app_state, setup_server, \
-    load_log_config, build_async_engine_client
+    build_async_engine_client
+
+from vllm.entrypoints.openai.server_utils import load_log_config
 
 from vllm.tool_parsers import ToolParserManager
 from vllm.entrypoints.launcher import serve_http
