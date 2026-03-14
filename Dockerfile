@@ -74,7 +74,7 @@ ENV HIP_FORCE_DEV_KERNARG=1
 ARG INSTALL_ROOT=/app/cray
 WORKDIR ${INSTALL_ROOT}
 
-ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/app/venv/lib/python3.12/site-packages/torch/lib:/usr/local/rdma-lib
+ENV LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}:/app/venv/lib/python3.12/site-packages/torch/lib:/usr/local/rdma-lib
 
 ###############################################################################
 # FRONTEND BUILD STAGE
@@ -278,11 +278,11 @@ RUN apt-get update -y  \
     && rm -rf /var/lib/apt/lists/*
 
 # Setup python path
-ENV PYTHONPATH="${PYTHONPATH}:${INSTALL_ROOT}/infra"
-ENV PYTHONPATH="${PYTHONPATH}:${INSTALL_ROOT}/sdk"
-ENV PYTHONPATH="${PYTHONPATH}:${INSTALL_ROOT}/ml"
-ENV PYTHONPATH="${PYTHONPATH}:${INSTALL_ROOT}/test"
-ENV PYTHONPATH="${PYTHONPATH}:${INSTALL_ROOT}/vllm"
+ENV PYTHONPATH="${PYTHONPATH:-}:${INSTALL_ROOT}/infra"
+ENV PYTHONPATH="${PYTHONPATH:-}:${INSTALL_ROOT}/sdk"
+ENV PYTHONPATH="${PYTHONPATH:-}:${INSTALL_ROOT}/ml"
+ENV PYTHONPATH="${PYTHONPATH:-}:${INSTALL_ROOT}/test"
+ENV PYTHONPATH="${PYTHONPATH:-}:${INSTALL_ROOT}/vllm"
 
 # Megatron dependencies (GPU only)
 # note this has to happen after vllm because it overrides some packages installed by vllm
@@ -312,7 +312,7 @@ WORKDIR ${INSTALL_ROOT}
 # Build SLURM plugin
 RUN /app/cray/infra/slurm_src/compile.sh
 
-ENV LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:${PYTHONPATH}:/usr/local/lib/slurm
+ENV LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}:${PYTHONPATH:-}:/usr/local/lib/slurm
 ENV SLURM_CONF=${INSTALL_ROOT}/nfs/slurm.conf
 ENV VLLM_CPU_MOE_PREPACK=0
 
