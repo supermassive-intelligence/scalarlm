@@ -351,7 +351,9 @@ async def async_chat_completion_task(request, app):
         model=request["model"],
         messages=convert_prompt_to_openai_format(request["prompt"]),
         max_tokens=request["max_tokens"],
-        temperature=0.0,
+        temperature=request.get("temperature", 0.0),
+        tools=request.get("tools"),
+        tool_choice=request.get("tool_choice"),
     )
 
     raw_request = Request(
@@ -473,7 +475,7 @@ async def async_completion_task(request, app):
         model=request["model"],
         prompt=request["prompt"],
         max_tokens=request["max_tokens"],
-        temperature=0.0,
+        temperature=request.get("temperature", 0.0), tools=request.get("tools"), tool_choice=request.get("tool_choice"),
     )
 
     raw_request = Request(

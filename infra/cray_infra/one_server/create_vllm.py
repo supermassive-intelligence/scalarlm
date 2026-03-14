@@ -66,6 +66,8 @@ async def create_vllm(server_status, port):
         f"--tensor-parallel-size={config['tensor_parallel_size']}",
         #f"--model_impl transformers",
         "--enable-lora",
+        "--enable-auto-tool-choice",
+        "--tool-call-parser=hermes",
         "--trust-remote-code",
     ]
 
