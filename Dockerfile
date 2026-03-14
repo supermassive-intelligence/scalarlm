@@ -2,25 +2,24 @@ ARG BASE_NAME=cpu
 
 ###############################################################################
 # NVIDIA BASE IMAGE
-FROM nvcr.io/nvidia/pytorch:25.10-py3 AS nvidia
+FROM nvcr.io/nvidia/pytorch:25.11-py3 AS nvidia
 
 RUN apt-get update -y && apt-get install -y python3-venv slurm-wlm libslurm-dev
 
-ENV VIRTUAL_ENV=/app/.venv
-ENV PATH="$VIRTUAL_ENV/bin:$PATH"
-RUN python -m venv $VIRTUAL_ENV --system-site-packages && \
-    . $VIRTUAL_ENV/bin/activate
+# FIX: The nvidia container's Python is PEP 668 "externally managed", which
+# blocks pip installs into the system interpreter. We remove the EXTERNALLY-MANAGED
+# marker file so pip/uv can install directly into the system Python — where torch
+# already lives. This is safe in a container context (we own the whole image).
+# This gives exactly one libtorch.so at /usr/local/lib/python3.12/dist-packages/torch/lib.
+RUN rm -f /usr/lib/python3.12/EXTERNALLY-MANAGED && \
+    pip install uv ninja && \
+    pip install --upgrade --no-deps "protobuf>=6.30.0"
 
 # Put HPC-X MPI in the PATH, i.e. mpirun
 ENV PATH=$PATH:/opt/hpcx/ompi/bin
 ENV LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}:/opt/hpcx/ompi/lib
 
-ARG TORCH_VERSION="2.9.1"
-ARG TORCH_CUDA_ARCH_LIST="7.5"
-
-RUN pip install uv && \
-    uv pip install ninja && \
-    pip install --upgrade "protobuf>=6.30.0"
+ARG TORCH_CUDA_ARCH_LIST="12.0 12.1 12.4"
 
 ENV PIP_CONSTRAINT=""
 
@@ -84,7 +83,6 @@ FROM ${BASE_NAME} AS ui_base
 RUN apt-get update -y && \
     apt-get install -y git curl libgomp1 libcurl4 dnsutils nano
 
-# Install node 24.0
 RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && \
     apt-get install -y nodejs && \
     node --version && \
@@ -201,24 +199,18 @@ COPY frontend/.env.local /app/ui/.env.local
 # VLLM BUILD STAGE
 FROM ui_final AS vllm
 
-# Copy all of the frontend libraries and code
 COPY --from=ui_final --chown=1000 /app /app/ui
-
-# Copy all of the mongo binaries
 COPY --from=ui_final /usr/bin/mongo* /usr/bin/
 
-# Set environment variables from ui
 ENV MONGODB_URL=mongodb://localhost:27017
 ENV INCLUDE_DB=true
 
 RUN --mount=type=cache,target=/var/cache/apt \
-    apt-get update -y \
-    && apt-get install -y curl git ccache vim numactl gcc-12 g++-12 libomp-dev libnuma-dev \
-    && apt-get install -y ffmpeg libsm6 libxext6 libgl1 libdnnl-dev \
-    && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12
+    apt-get update -y && \
+    apt-get install -y curl git ccache vim numactl gcc-12 g++-12 libomp-dev libnuma-dev ffmpeg libsm6 libxext6 libgl1 libdnnl-dev build-essential less net-tools iputils-ping strace gdb python3-dbg python3-dev && \
+    update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12
 
 ARG INSTALL_ROOT=/app/cray
-
 WORKDIR ${INSTALL_ROOT}
 
 # Install build dependencies FIRST
@@ -226,15 +218,13 @@ RUN pip install setuptools-scm
 
 # Configure vLLM source - can use either local directory or remote repo
 ARG VLLM_SOURCE=remote
-ARG VLLM_BRANCH=main
+ARG VLLM_BRANCH=v0.17-upgrade
 ARG VLLM_REPO=https://github.com/supermassive-intelligence/vllm-fork.git
 
-# Handle vLLM source - support both local and remote modes
+# Copy script
 COPY scripts/build-copy-vllm.sh ${INSTALL_ROOT}/build-copy-vllm.sh
 
-# Handle vLLM source - single RUN command with conditional mount
-# For remote: clone from repository
-# For local: mount and copy from ./vllm directory
+# Handle vLLM source - support both local and remote modes
 RUN --mount=type=bind,source=./vllm,target=/workspace/vllm,rw \
     bash ${INSTALL_ROOT}/build-copy-vllm.sh ${VLLM_SOURCE} ${INSTALL_ROOT}/vllm \
     /workspace/vllm ${VLLM_REPO} ${VLLM_BRANCH}
@@ -244,22 +234,34 @@ WORKDIR ${INSTALL_ROOT}/vllm
 # Set build environment variables for CPU compilation
 ARG TORCH_CUDA_ARCH_LIST="7.5"
 ARG VLLM_TARGET_DEVICE=cpu
-
 ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}
 ENV VLLM_TARGET_DEVICE=${VLLM_TARGET_DEVICE}
 ENV CMAKE_BUILD_TYPE=Release
 
-# vLLM dependencies
-COPY ./infra/requirements-vllm.txt ${INSTALL_ROOT}/requirements-vllm.txt
-RUN uv pip install --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements-vllm.txt && \
-    python ${INSTALL_ROOT}/vllm/use_existing_torch.py
 
-RUN \
-    --mount=type=cache,target=/root/.cache/pip \
+# vLLM dependencies
+# Run use_existing_torch.py BEFORE installing requirements so torch is excluded
+# from the install plan. Write the version constraint to a file so later stages
+# can reuse it (process substitution <(...) doesn't work in Docker's /bin/sh).
+# UV_ARGS: use --system on nvidia (no venv), empty on cpu/amd (venv is active).
+COPY ./infra/requirements-vllm.txt ${INSTALL_ROOT}/requirements-vllm.txt
+RUN python ${INSTALL_ROOT}/vllm/use_existing_torch.py && \
+    pip show torch | awk '/^Version:/{print "torch=="$2}' > /tmp/torch-constraint.txt && \
+    if [ ! -d "/app/.venv" ]; then UV_ARGS="--system --break-system-packages"; else UV_ARGS=""; fi && \
+    uv pip install ${UV_ARGS} --no-deps --no-compile --no-cache-dir \
+        --constraint /tmp/torch-constraint.txt \
+        -r ${INSTALL_ROOT}/requirements-vllm.txt
+
+# Build vLLM with --no-build-isolation so the build backend sees the already-
+# installed torch rather than fetching a new one.
+# UV_SYSTEM_PYTHON=1 is set inline only for this step to prevent uv (invoked
+# by the build backend) from auto-creating /app/.venv. It is NOT set as a
+# global ENV so it doesn't affect subsequent uv pip install calls.
+RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/app/cray/vllm/.deps \
     export MAX_JOBS=$(($(nproc) < $(free -g | awk '/^Mem:/ {print int($2/4)}') ? $(nproc) : $(free -g | awk '/^Mem:/ {print int($2/4)}'))) && \
-    pip install --no-build-isolation -e . --verbose
+    UV_SYSTEM_PYTHON=1 pip install --no-build-isolation -e . --verbose
 
 WORKDIR ${INSTALL_ROOT}
 
@@ -267,10 +269,16 @@ WORKDIR ${INSTALL_ROOT}
 # MAIN IMAGE
 FROM vllm AS infra
 
-# Build GPU-aware MPI
+# Set HPC-X MPI environment explicitly for build and runtime
+ENV PATH=/opt/hpcx/ompi/bin:$PATH
+ENV LD_LIBRARY_PATH=/opt/hpcx/ompi/lib:/usr/local/lib/slurm:$LD_LIBRARY_PATH
+
+# Build GPU-aware MPI within proper MPI environment
 COPY ./infra/cray_infra/training/gpu_aware_mpi ${INSTALL_ROOT}/infra/cray_infra/training/gpu_aware_mpi
-RUN python3 ${INSTALL_ROOT}/infra/cray_infra/training/gpu_aware_mpi/setup.py bdist_wheel --dist-dir=dist && \
-    pip install dist/*.whl
+RUN export PATH=/opt/hpcx/ompi/bin:$PATH && \
+    export LD_LIBRARY_PATH=/opt/hpcx/ompi/lib:$LD_LIBRARY_PATH && \
+    python3 ${INSTALL_ROOT}/infra/cray_infra/training/gpu_aware_mpi/setup.py bdist_wheel --dist-dir=dist && \
+    pip install dist/*.whl --force-reinstall
 
 RUN apt-get update -y  \
     && apt-get install -y build-essential \
@@ -286,17 +294,34 @@ ENV PYTHONPATH="${PYTHONPATH:-}:${INSTALL_ROOT}/vllm"
 
 # Megatron dependencies (GPU only)
 # note this has to happen after vllm because it overrides some packages installed by vllm
+COPY ./infra/requirements-megatron-cpu.txt ${INSTALL_ROOT}/requirements-megatron-cpu.txt
+RUN if [ ! -d "/app/.venv" ]; then UV_ARGS="--system --break-system-packages"; else UV_ARGS=""; fi && \
+    if [ "$VLLM_TARGET_DEVICE" != "cpu" ]; then \
+        uv pip install ${UV_ARGS} --no-deps --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements-megatron-cpu.txt; \
+    fi
+
+RUN if [ ! -d "/app/.venv" ]; then UV_ARGS="--system --break-system-packages"; else UV_ARGS=""; fi && \
+    uv pip install ${UV_ARGS} --no-deps --upgrade transformers sentence-transformers huggingface_hub
 COPY ./infra/requirements-megatron.txt ${INSTALL_ROOT}/requirements-megatron.txt
 COPY ./infra/requirements-megatron-cpu.txt ${INSTALL_ROOT}/requirements-megatron-cpu.txt
 COPY ./requirements.txt ${INSTALL_ROOT}/requirements.txt
 
-RUN if [ "$VLLM_TARGET_DEVICE" != "cpu" ]; then \
-        uv pip install --no-deps --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements-megatron.txt; \
+# Reuse the torch constraint file written in the vllm stage to prevent any
+# subsequent install from pulling in a different torch version.
+RUN if [ ! -d "/app/.venv" ]; then UV_ARGS="--system --break-system-packages"; else UV_ARGS=""; fi && \
+    if [ "$VLLM_TARGET_DEVICE" != "cpu" ]; then \
+        uv pip install ${UV_ARGS} --no-deps --no-compile --no-cache-dir \
+            --constraint /tmp/torch-constraint.txt \
+            -r ${INSTALL_ROOT}/requirements-megatron.txt; \
     fi && \
     if [ "$VLLM_TARGET_DEVICE" != "cuda" ]; then \
-        uv pip install --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements-megatron-cpu.txt; \
+        uv pip install ${UV_ARGS} --no-deps --no-compile --no-cache-dir \
+            --constraint /tmp/torch-constraint.txt \
+            -r ${INSTALL_ROOT}/requirements-megatron-cpu.txt; \
     fi && \
-    uv pip install --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements.txt
+    uv pip install ${UV_ARGS} --no-compile --no-cache-dir \
+        --constraint /tmp/torch-constraint.txt \
+        -r ${INSTALL_ROOT}/requirements.txt
 
 RUN mkdir -p ${INSTALL_ROOT}/jobs ${INSTALL_ROOT}/nfs
 
@@ -312,8 +337,7 @@ WORKDIR ${INSTALL_ROOT}
 # Build SLURM plugin
 RUN /app/cray/infra/slurm_src/compile.sh
 
-ENV LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}:${PYTHONPATH:-}:/usr/local/lib/slurm
+ENV LD_LIBRARY_PATH=/opt/hpcx/ompi/lib:/usr/local/lib/slurm:$LD_LIBRARY_PATH
+
 ENV SLURM_CONF=${INSTALL_ROOT}/nfs/slurm.conf
 ENV VLLM_CPU_MOE_PREPACK=0
-
-

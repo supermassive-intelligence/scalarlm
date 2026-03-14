@@ -14,4 +14,6 @@ atomicwrites
 cryptography
 sortedcontainers
 datasets
+fastapi_utils
+mypy_extensions
 
