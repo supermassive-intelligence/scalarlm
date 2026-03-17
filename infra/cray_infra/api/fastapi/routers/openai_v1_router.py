@@ -65,7 +65,7 @@ async def create_completions(request: CompletionRequest, raw_request: Request):
 
     params = {
         key: value
-        for key, value in request.model_dump(exclude_none=True).items()
+        for key, value in request.model_dump(mode='json', exclude_none=True).items()
         if value is not None and key in allowed_keys
     }
 
@@ -115,7 +115,7 @@ async def create_chat_completions(request: ChatCompletionRequest, raw_request: R
 
     params = {
         key: value
-        for key, value in request.model_dump(exclude_none=True).items()
+        for key, value in request.model_dump(mode='json', exclude_none=True).items()
         if value is not None and key in allowed_keys
     }
 
