@@ -141,13 +141,13 @@ ScalarLM deploys any Hugging Face-hosted model. The following have been validate
 
 | Target | Container | Latest Release |
 |---|---|---|
-| NVIDIA BLACKWELL | `gdiamos/scalarlm-nvidia-12.0:latest` | `gdiamos/scalarlm-nvidia-12.0:v0.99` |
-| NVIDIA HOPPER | `gdiamos/scalarlm-nvidia-8.0:latest` | `gdiamos/scalarlm-nvidia-8.0:v0.99` |
-| NVIDIA HOPPER | `gdiamos/scalarlm-nvidia-8.6:latest` | `gdiamos/scalarlm-nvidia-8.6:v0.99` |
-| NVIDIA ADA | `gdiamos/scalarlm-nvidia-7.5:latest` | `gdiamos/scalarlm-nvidia-7.5:v0.99` |
-| ARM | `gdiamos/scalarlm-arm:latest` | `gdiamos/scalarlm-arm:v0.99` |
-| AMD | `gdiamos/scalarlm-amd:latest` | `gdiamos/scalarlm-amd:v0.99` |
-| x86 CPU | `gdiamos/scalarlm-cpu:latest` | `gdiamos/scalarlm-cpu:v0.99` |
+| NVIDIA BLACKWELL | `gdiamos/scalarlm-nvidia-12.0:latest` | `gdiamos/scalarlm-nvidia-12.0:v1.0` |
+| NVIDIA HOPPER | `gdiamos/scalarlm-nvidia-8.0:latest` | `gdiamos/scalarlm-nvidia-8.0:v1.0` |
+| NVIDIA HOPPER | `gdiamos/scalarlm-nvidia-8.6:latest` | `gdiamos/scalarlm-nvidia-8.6:v1.0` |
+| NVIDIA ADA | `gdiamos/scalarlm-nvidia-7.5:latest` | `gdiamos/scalarlm-nvidia-7.5:1.0` |
+| ARM | `gdiamos/scalarlm-arm:latest` | `gdiamos/scalarlm-arm:v1.0` |
+| AMD MI300 | `gdiamos/scalarlm-amd-mi300:latest` | `gdiamos/scalarlm-amd-mi300:v1.0` |
+| x86 CPU | `gdiamos/scalarlm-cpu:latest` | `gdiamos/scalarlm-cpu:v1.0` |
 
 ### Quick Docker Start
 
