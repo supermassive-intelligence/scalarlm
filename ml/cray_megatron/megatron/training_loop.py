@@ -116,6 +116,9 @@ class TrainingLoop:
                 # Average the accumulated loss
                 avg_accumulated_loss = accumulated_loss / gradient_accumulation_steps
 
+                # Ensure gradients are synchronized across ranks during backward pass
+                self.training_state.model_info["model"].backward_sync()
+
                 # Perform optimizer step after accumulation
                 self.optimizer_step()
                 step_time = time.time() - step_start_time
@@ -187,9 +190,6 @@ class TrainingLoop:
         # backward pass (accumulates gradients)
         if not is_nan:
             scaled_loss.backward()
-
-        # Ensure gradients are synchronized across ranks during backward pass
-        self.training_state.model_info["model"].backward_sync()
 
         # Log info for each micro-batch
         self.print_microbatch_info(accum_step, avg_loss, start_time)
@@ -320,12 +320,10 @@ class TrainingLoop:
             f"- time {time.time() - start_time:.3f}s"
         )
 
-    @main_rank_only
+    #@main_rank_only
     def print_device_info(self):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         idx = self.training_state.model_info["distribution_strategy"]["device"]
-        if device == "cuda":
-            idx = torch.cuda.current_device()
         logger.info(f"Using device {device}:{idx}")
 
 

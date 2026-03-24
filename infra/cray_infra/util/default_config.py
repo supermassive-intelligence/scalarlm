@@ -5,7 +5,8 @@ from typing import Optional
 class Config(BaseModel):
     api_url: str = "http://localhost:8000"
 
-    model: str = "google/gemma-3-270m-it"
+    model: str = "tiny-random/qwen3"
+    #model: str = "google/gemma-3-270m-it"
     #model: str = "yujiepan/qwen3-moe-tiny-random"
     #model: str = "masint/tiny-random-llama"
     #model: str = "masint/tiny-random-qwen2-vl"

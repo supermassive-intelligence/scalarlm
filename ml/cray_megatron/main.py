@@ -2,12 +2,14 @@ from cray_infra.training.training_harness import TrainingHarness
 from cray_infra.training.training_job_status import TrainingJobStatus
 from cray_infra.huggingface.get_hf_token import get_hf_token
 
+from cray_megatron.collectives.main_rank_only import main_rank_only
+
 import traceback
 import sys
 import os
 from gpu_aware_mpi import finalize_mpi
 
-
+@main_rank_only
 def print_exception():
     exc_type, exc_value, exc_traceback = sys.exc_info()
     traceback.print_exception(exc_type, exc_value, exc_traceback)

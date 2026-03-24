@@ -1,10 +1,10 @@
-
 from cray_infra.util.get_config import get_config
 
 from cryptography.fernet import Fernet
 
 
 import os
+
 
 def get_hf_token():
     if "HF_TOKEN" in os.environ:
@@ -24,6 +24,3 @@ def get_hf_token():
     token = cipher.decrypt(encrypted_token).decode()
 
     return token
-
-
-
