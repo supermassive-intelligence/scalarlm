@@ -42,9 +42,9 @@ def load_model_config():
 
     model_name = job_config["llm_name"]
 
-    model_config = AutoConfig.from_pretrained(model_name, local_files_only=True)
+    model_config = AutoConfig.from_pretrained(model_name)
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name, local_files_only=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
 
     model_info = {
         "model_name": model_name,
@@ -62,7 +62,6 @@ def materialize_model(model_info):
     model_info["model"] = AutoModelForCausalLM.from_pretrained(
         model_info["model_name"],
         torch_dtype="auto",  # Use model's native dtype
-        local_files_only=True,
         # device_map="auto",            # Enable Big Model Inference
         # low_cpu_mem_usage=True,       # Reduce CPU memory usage
         # _fast_init=True               # Skip weight initialization (default True)

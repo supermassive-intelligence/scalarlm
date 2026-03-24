@@ -12,7 +12,7 @@ def get_args():
     # Sample data for training
     # Make sure your input data for training follows the same pattern
     # Otherwise you would need to modify "get_dataset" function
-    parser.add_argument('--test_data_path', default = 'data/test_data.json')
+    parser.add_argument('--test_data_path', default = 'apps/opentelco/data/test_data.json')
 
     # Once you submit a job for training, the code automatically create a local folder to keep logs of submitted jobs for you.
     # In order to save the results of inference in the same folder, you need to modify this variable to match with the training job folder.
@@ -21,7 +21,7 @@ def get_args():
     # Use your model_id to inference from your fine tuned model.
     # You receive the model_id immidiately after submitting a job.
     # You also can find your model_id in the "scalarlm_training" folder
-    parser.add_argument('--model_name', default = '0de676df41294478247acdb693e6a674425995e920a198b240e97b9bdeb17667')
+    parser.add_argument('--model_name', default = 'dfff7535905affe768729e8b82971743ffda1a0f73de405c45842fcd1d46b15e')
 
     # The max tokens allowed during inference for the current deployments is 4096.
     # Please keep in mind the input field for TeleLogs itself has ~2900 tokens which means the max_token field can only handle up to 1200 tokens.

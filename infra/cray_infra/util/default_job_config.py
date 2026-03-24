@@ -1,13 +1,13 @@
 from pydantic import BaseModel
 
-from typing import Optional
+from typing import Optional, Union
 
 
 class LoraConfig(BaseModel):
     r: int = 32
-    target_modules: str = "all-linear"
-    use_rslora: bool = True
-    modules_to_save: list = ["lm_head"]
+    lora_alpha: int = 32
+    lora_dropout: float = 0.1
+    target_modules: Union[str, list] = "all-linear"  # or list of module names
 
 class JobConfig(BaseModel):
 

@@ -15,7 +15,7 @@ def get_args():
     # Sample data for training
     # Make sure your input data for training follows the same pattern
     # Otherwise you would need to modify "format_chat_template" function
-    parser.add_argument('--data_path', default = 'data/test_data.json')
+    parser.add_argument('--data_path', default = 'apps/opentelco/data/test_data.json')
 
     # In case you want to include reasoning in the output during training.
     # Adding reasoning tokens will increase the memory usage during training
@@ -25,9 +25,9 @@ def get_args():
     # Training hyperparameters
     # Set max_token_block_size to be as big as the longest sequence of your training set.
     # consider using max_token_block_size of 4000 or less. For any values larger than 4000, you may run out of memory
-    parser.add_argument('--max_steps', default = 21)
+    parser.add_argument('--max_steps', default = 5)
     parser.add_argument('--learning_rate', default = 0.005)
-    parser.add_argument('--max_token_block_size', default = 1000)
+    parser.add_argument('--max_token_block_size', default = 30)
     parser.add_argument('--steps_per_checkpoint', default = 100)
 
     # LoRA Configuration
@@ -41,6 +41,7 @@ def get_args():
     parser.add_argument('--batch_size', default = 2)
     parser.add_argument('--new_data', default=False)
     parser.add_argument('--use_lora', default=True)
+    parser.add_argument('--use_tokenformer', default=False)
     parser.add_argument('--training_mode', default = 'language_model', choices=['language_model', 'embedding'])
 
     return parser.parse_args()
@@ -86,35 +87,10 @@ def get_dataset(data_path, reasoning_mode):
 
     return dataset
 
-# Write training config to local ml directory for direct access during training.
-def write_local_training_config(config):
-
-    local_config = {
-        'use_lora': config.use_lora,
-        'r': config.r,
-        'lora_alpha': config.lora_alpha,
-        'lora_dropout': config.lora_dropout,
-        'target_modules': config.target_modules
-    }
-
-    # Write to ml directory
-    ml_dir = os.path.join(os.path.dirname(__file__), 'ml')
-    os.makedirs(ml_dir, exist_ok=True)
-
-    config_path = os.path.join(ml_dir, 'local_training_config.yaml')
-
-    with open(config_path, 'w') as f:
-        yaml.dump(local_config, f)
-
-    print(f"Local training config written to: {config_path}")
-
-    return config_path
 
 if __name__ == '__main__':
     config = get_args()
     now = datetime.datetime.now().strftime("%Y_%m_%d__%H_%M_%S")
-
-    write_local_training_config(config)
 
     llm = scalarlm.SupermassiveIntelligence()
 
@@ -125,8 +101,15 @@ if __name__ == '__main__':
         "learning_rate": config.learning_rate,
         "batch_size": config.batch_size,
         "max_token_block_size": config.max_token_block_size,
-        "steps_per_checkpoint": config.steps_per_checkpoint
+        "steps_per_checkpoint": config.steps_per_checkpoint,
         "training_mode": config.training_mode,
+        "adapter_type": "lora" if config.use_lora else "tokenformer" if config.use_tokenformer else None,
+        "lora_config": {
+            "r": config.r,
+            "lora_alpha": config.lora_alpha,
+            "lora_dropout": config.lora_dropout,
+            "target_modules": config.target_modules
+        } if config.use_lora else None
     }
 
 

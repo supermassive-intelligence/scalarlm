@@ -2,7 +2,7 @@ from cray_infra.training.training_harness import TrainingHarness
 from cray_infra.training.training_job_status import TrainingJobStatus
 from cray_infra.huggingface.get_hf_token import get_hf_token
 
-from cray_megatron.collectives.main_rank_only
+from cray_megatron.collectives.main_rank_only import main_rank_only
 
 import traceback
 import sys
