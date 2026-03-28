@@ -6,8 +6,17 @@ import persistqueue
 import asyncio
 import time
 import logging
+import json
 
 logger = logging.getLogger(__name__)
+
+# Import observability metrics
+try:
+    from cray_infra.observability.prometheus_metrics import queue_depth, queue_wait_time_seconds
+    METRICS_AVAILABLE = True
+except ImportError:
+    logger.warning("Observability metrics not available for work queue")
+    METRICS_AVAILABLE = False
 
 
 class InferenceWorkQueue:
@@ -17,8 +26,28 @@ class InferenceWorkQueue:
 
     async def put(self, request):
         async with self.lock:
-            request["timestamp"] = time.time()
-            return self.queue.put(request)
+            request["enqueue_time"] = time.time()
+            request_id = self.queue.put(request)
+
+            # Update queue depth metric
+            if METRICS_AVAILABLE:
+                try:
+                    current_depth = len(self.queue)
+                    model = request.get("model", "unknown")
+                    queue_depth.labels(model=model).set(current_depth)
+
+                    # Structured log
+                    logger.info(json.dumps({
+                        "event": "work_queued",
+                        "request_id": request_id,
+                        "model": model,
+                        "queue_depth": current_depth,
+                        "trace_id": request.get("trace_context", {}).get("traceparent", "unknown")
+                    }))
+                except Exception as e:
+                    logger.debug(f"Failed to emit queue metrics: {e}")
+
+            return request_id
 
     async def get(self):
         config = get_config()
@@ -36,8 +65,34 @@ class InferenceWorkQueue:
                     raw_item = self.queue.get(block=False, raw=True)
 
                 item = raw_item["data"]
-                item["timestamp"] = time.time()
+                dequeue_time = time.time()
+                item["dequeue_time"] = dequeue_time
                 request_id = raw_item["pqid"]
+
+                # Emit queue wait time metric
+                if METRICS_AVAILABLE and item:
+                    try:
+                        enqueue_time = item.get("enqueue_time", dequeue_time)
+                        wait_time = dequeue_time - enqueue_time
+                        model = item.get("model", "unknown")
+
+                        queue_wait_time_seconds.labels(model=model).observe(wait_time)
+
+                        # Update queue depth
+                        current_depth = len(self.queue)
+                        queue_depth.labels(model=model).set(current_depth)
+
+                        # Structured log
+                        logger.info(json.dumps({
+                            "event": "work_dequeued",
+                            "request_id": request_id,
+                            "model": model,
+                            "queue_wait_time_seconds": round(wait_time, 3),
+                            "queue_depth": current_depth,
+                            "trace_id": item.get("trace_context", {}).get("traceparent", "unknown")
+                        }))
+                    except Exception as e:
+                        logger.debug(f"Failed to emit queue metrics: {e}")
 
                 break
 
