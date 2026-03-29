@@ -89,6 +89,7 @@ async def create_vllm(server_status, port):
 
     print(f"DEBUG: About to parse args: {args}")
     print(f"DEBUG: Environment variables:")
+    print(f"  SCALARLM_VLLM_ARGS: {os.environ.get('SCALARLM_VLLM_ARGS', 'NOT SET')}")
     print(f"  VLLM_TARGET_DEVICE: {os.environ.get('VLLM_TARGET_DEVICE', 'NOT SET')}")
     print(f"  CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'NOT SET')}")
     print(f"  torch.cuda.is_available(): {torch.cuda.is_available()}")
