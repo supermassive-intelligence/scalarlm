@@ -73,6 +73,20 @@ async def create_vllm(server_status, port):
     if config['limit_mm_per_prompt'] is not None:
         args.append(f"--limit-mm-per-prompt={config['limit_mm_per_prompt']}")
 
+    # Extra SCALARLM_VLLM_ARGS are passed via environment variable, and should override config values
+    extra_args = os.environ.get("SCALARLM_VLLM_ARGS", "")
+
+    if extra_args:
+        extra_args_list = extra_args.split()
+
+        # Remove them if they are already in the args list to avoid duplicates
+        for extra_arg in extra_args_list:
+            arg_name = extra_arg.split("=")[0]
+            args = [arg for arg in args if not arg.startswith(arg_name + "=")]
+
+        args.extend(extra_args_list)
+        print(f"DEBUG: Added extra args from SCALARLM_VLLM_ARGS: {extra_args_list}")
+
     print(f"DEBUG: About to parse args: {args}")
     print(f"DEBUG: Environment variables:")
     print(f"  VLLM_TARGET_DEVICE: {os.environ.get('VLLM_TARGET_DEVICE', 'NOT SET')}")

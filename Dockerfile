@@ -122,7 +122,7 @@ RUN mkdir -p /app/ui && \
     cp ${INSTALL_ROOT}/chat-ui/package-lock.json /app/ui/package-lock.json && \
     chmod +x /app/ui/entrypoint.sh
 
-FROM node:24 AS ui_builder
+FROM node:24.2.0 AS ui_builder
 
 WORKDIR /app
 ARG INSTALL_ROOT=/temp

@@ -112,6 +112,7 @@ class TrainingLoop:
                     f"Skipping optimizer step {step} due to NaN loss"
                 )
                 self.training_state.nan_steps += 1
+                avg_accumulated_loss = float('nan')
             else:
                 # Average the accumulated loss
                 avg_accumulated_loss = accumulated_loss / gradient_accumulation_steps
@@ -121,13 +122,13 @@ class TrainingLoop:
 
                 # Perform optimizer step after accumulation
                 self.optimizer_step()
-                step_time = time.time() - step_start_time
 
                 # Log the averaged loss
                 self.update_history(avg_accumulated_loss)
 
-                # Print training step info with averaged loss
-                self.print_training_step_info(avg_accumulated_loss, step_time)
+            # Print training step info with averaged loss
+            step_time = time.time() - step_start_time
+            self.print_training_step_info(avg_accumulated_loss, step_time)
 
             self.on_step_end(step)
 
@@ -159,6 +160,7 @@ class TrainingLoop:
 
     def training_step_accumulate(self, batch, accum_step, gradient_accumulation_steps):
         """Perform a single forward/backward pass with gradient accumulation."""
+        print(f"Accumulation step {accum_step + 1}/{gradient_accumulation_steps} for training step {self.training_state.current_step}")
         device = self.training_state.model_info["distribution_strategy"]["device"]
 
         start_time = time.time()
@@ -320,7 +322,6 @@ class TrainingLoop:
             f"- time {time.time() - start_time:.3f}s"
         )
 
-    #@main_rank_only
     def print_device_info(self):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         idx = self.training_state.model_info["distribution_strategy"]["device"]

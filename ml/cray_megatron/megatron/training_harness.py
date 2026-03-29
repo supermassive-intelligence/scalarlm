@@ -1,7 +1,7 @@
 from cray_infra.util.get_config import get_config
 from cray_infra.util.get_job_config import get_job_config
 
-from cray_infra.training.main_rank_only import main_rank_only
+from cray_megatron.collectives.main_rank_only import main_rank_only
 
 import torch
 

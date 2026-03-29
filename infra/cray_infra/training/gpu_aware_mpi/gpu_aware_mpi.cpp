@@ -1,5 +1,6 @@
 #include <mpi.h>
 #include <torch/extension.h>
+#include <cuda_runtime.h>
 #include <stdexcept>
 #include <iostream>
 #include <tuple>
@@ -14,38 +15,33 @@ void ensure_mpi_initialized() {
     }
 }
 
+inline void sync_cuda_if_needed(const torch::Tensor& tensor) {
+    if (tensor.is_cuda()) {
+        cudaError_t err = cudaDeviceSynchronize();
+        if (err != cudaSuccess) {
+            throw std::runtime_error(std::string("cudaDeviceSynchronize failed: ") +
+                                     cudaGetErrorString(err));
+        }
+    }
+}
+
 inline std::tuple<MPI_Datatype, size_t> get_typesize(torch::ScalarType dtype) {
     switch (dtype) {
-        case torch::kFloat32:
-            return std::make_tuple(MPI_FLOAT, sizeof(float));
-        case torch::kFloat64:
-            return std::make_tuple(MPI_DOUBLE, sizeof(double));
-        case torch::kInt32:
-            return std::make_tuple(MPI_INT, sizeof(int32_t));
-        case torch::kInt64:
-            return std::make_tuple(MPI_LONG_LONG, sizeof(int64_t));
-        case torch::kUInt8:
-            return std::make_tuple(MPI_UNSIGNED_CHAR, sizeof(uint8_t));
-        case torch::kInt8:
-            return std::make_tuple(MPI_CHAR, sizeof(int8_t));
-        // Add more types as needed
+        case torch::kFloat32:  return {MPI_FLOAT,         sizeof(float)};
+        case torch::kFloat64:  return {MPI_DOUBLE,        sizeof(double)};
+        case torch::kFloat16:  return {MPI_SHORT,         sizeof(int16_t)};  // treat as raw bytes
+        case torch::kBFloat16: return {MPI_SHORT,         sizeof(int16_t)};
+        case torch::kInt32:    return {MPI_INT,           sizeof(int32_t)};
+        case torch::kInt64:    return {MPI_LONG_LONG,     sizeof(int64_t)};
+        case torch::kUInt8:    return {MPI_UNSIGNED_CHAR, sizeof(uint8_t)};
+        case torch::kInt8:     return {MPI_CHAR,          sizeof(int8_t)};
         default:
             throw std::runtime_error("Unsupported torch::ScalarType for MPI communication");
     }
 }
 
-
-MPI_Datatype get_mpi_datatype(const torch::Tensor& tensor) {
-    switch (tensor.scalar_type()) {
-        case torch::kFloat32: return MPI_FLOAT;
-        case torch::kFloat64: return MPI_DOUBLE;
-        case torch::kInt32: return MPI_INT;
-        case torch::kInt64: return MPI_LONG_LONG;
-        case torch::kUInt8: return MPI_UNSIGNED_CHAR;
-        case torch::kInt8: return MPI_CHAR;
-	// Add more cases as needed
-	default: throw std::runtime_error("Unsupported tensor dtype: " + std::string(torch::toString(tensor.scalar_type())));
-    }
+inline MPI_Datatype get_mpi_datatype(const torch::Tensor& tensor) {
+    return std::get<0>(get_typesize(tensor.scalar_type()));
 }
 
 void barrier() {
@@ -74,60 +70,102 @@ void finalize_mpi() {
     }
 }
 
-void mpi_allreduce(torch::Tensor &tensor) {
+void mpi_send(torch::Tensor& tensor, int dest) {
     ensure_mpi_initialized();
 
     if (!tensor.is_contiguous()) {
         tensor = tensor.contiguous();
     }
 
-    // Get appropriate MPI datatype
+    // Flush any pending CUDA work on this tensor's buffer before MPI touches it
+    sync_cuda_if_needed(tensor);
+
     MPI_Datatype datatype = get_mpi_datatype(tensor);
+    int err = MPI_Send(tensor.data_ptr(), tensor.numel(), datatype, dest, 0, MPI_COMM_WORLD);
+    if (err != MPI_SUCCESS) {
+        throw std::runtime_error("MPI_Send failed with error code: " + std::to_string(err));
+    }
+}
 
-    int mpi_result = MPI_Allreduce(
-        MPI_IN_PLACE,
-        tensor.data_ptr(),
-        tensor.numel(),
-        datatype,
-        MPI_SUM,
-        MPI_COMM_WORLD
-    );
+void mpi_recv(torch::Tensor& tensor, int source) {
+    ensure_mpi_initialized();
 
-    // Check for errors
-    if (mpi_result != MPI_SUCCESS) {
-        throw std::runtime_error("MPI_Allreduce failed.");
+    if (!tensor.is_contiguous()) {
+        tensor = tensor.contiguous();
     }
 
+    MPI_Datatype datatype = get_mpi_datatype(tensor);
+    MPI_Status status;
+
+    int err = MPI_Recv(tensor.data_ptr(), tensor.numel(), datatype, source, 0, MPI_COMM_WORLD, &status);
+    if (err != MPI_SUCCESS) {
+        throw std::runtime_error("MPI_Recv failed with error code: " + std::to_string(err));
+    }
+
+    // Ensure the received data is visible to subsequent CUDA kernels
+    sync_cuda_if_needed(tensor);
+
+    int recv_count;
+    MPI_Get_count(&status, datatype, &recv_count);
+    if (recv_count != tensor.numel()) {
+        throw std::runtime_error("MPI_Recv: expected " + std::to_string(tensor.numel()) +
+                                 " elements but got " + std::to_string(recv_count));
+    }
+
+    if (status.MPI_SOURCE != source) {
+        throw std::runtime_error("MPI_Recv: expected source " + std::to_string(source) +
+                                 " but got " + std::to_string(status.MPI_SOURCE));
+    }
+}
+
+void mpi_allreduce(torch::Tensor& tensor) {
+    ensure_mpi_initialized();
+
+    if (!tensor.is_contiguous()) {
+        tensor = tensor.contiguous();
+    }
+
+    sync_cuda_if_needed(tensor);
+
+    MPI_Datatype datatype = get_mpi_datatype(tensor);
+    int err = MPI_Allreduce(MPI_IN_PLACE, tensor.data_ptr(), tensor.numel(),
+                            datatype, MPI_SUM, MPI_COMM_WORLD);
+    if (err != MPI_SUCCESS) {
+        throw std::runtime_error("MPI_Allreduce failed with error code: " + std::to_string(err));
+    }
+
+    sync_cuda_if_needed(tensor);
 }
 
 void mpi_allgather(torch::Tensor& sendbuf, torch::Tensor& recvbuf) {
     ensure_mpi_initialized();
-    int count = sendbuf.numel();
+
+    if (!sendbuf.is_contiguous()) sendbuf = sendbuf.contiguous();
+    if (!recvbuf.is_contiguous()) recvbuf = recvbuf.contiguous();
+
     int rank = get_rank();
     int world_size = get_size();
+    int count = sendbuf.numel();
 
-    // check if cuda is available
-    if (torch::cuda::is_available()) {
-        torch::cuda::synchronize(sendbuf.device().index());
-    }
+    sync_cuda_if_needed(sendbuf);
 
-    // Copy my data to my slice
+    // Copy my slice into recvbuf locally
     recvbuf.slice(0, rank * count, (rank + 1) * count).copy_(sendbuf);
 
     auto [datatype, typesize] = get_typesize(sendbuf.scalar_type());
 
-    // Post all sends first
+    // Post all non-blocking sends
     std::vector<MPI_Request> send_reqs(world_size - 1);
     int req_idx = 0;
     for (int i = 0; i < world_size; ++i) {
         if (i == rank) continue;
-        int err = MPI_Isend(sendbuf.data_ptr(), count, datatype, i, 0, MPI_COMM_WORLD, &send_reqs[req_idx++]);
-        if (err != MPI_SUCCESS) {
-            throw std::runtime_error("MPI_Isend failed with error code: " + std::to_string(err));
-        }
+        int err = MPI_Isend(sendbuf.data_ptr(), count, datatype, i, 0,
+                            MPI_COMM_WORLD, &send_reqs[req_idx++]);
+        if (err != MPI_SUCCESS)
+            throw std::runtime_error("MPI_Isend failed: " + std::to_string(err));
     }
 
-    // Then post all receives
+    // Post and wait on each receive in order
     for (int i = 0; i < world_size; ++i) {
         if (i == rank) continue;
         void* recv_ptr = static_cast<char*>(recvbuf.data_ptr()) + i * count * typesize;
@@ -135,132 +173,87 @@ void mpi_allgather(torch::Tensor& sendbuf, torch::Tensor& recvbuf) {
         MPI_Status recv_status;
 
         int err = MPI_Irecv(recv_ptr, count, datatype, i, 0, MPI_COMM_WORLD, &recv_req);
-        if (err != MPI_SUCCESS) {
-            throw std::runtime_error("MPI_Irecv failed with error code: " + std::to_string(err));
-        }
+        if (err != MPI_SUCCESS)
+            throw std::runtime_error("MPI_Irecv failed: " + std::to_string(err));
 
-        // Wait for this receive to complete
         err = MPI_Wait(&recv_req, &recv_status);
-        if (err != MPI_SUCCESS) {
-            throw std::runtime_error("MPI_Wait for receive failed with error code: " + std::to_string(err));
-        }
+        if (err != MPI_SUCCESS)
+            throw std::runtime_error("MPI_Wait (recv) failed: " + std::to_string(err));
 
-        // Check if the message was received successfully
         int recv_count;
         MPI_Get_count(&recv_status, datatype, &recv_count);
-        if (recv_count != count) {
-            throw std::runtime_error("Received incorrect number of elements from rank " +
-                                    std::to_string(i) + ": expected " + std::to_string(count) +
-                                    " but got " + std::to_string(recv_count));
-        }
+        if (recv_count != count)
+            throw std::runtime_error("mpi_allgather: rank " + std::to_string(i) +
+                                     " sent " + std::to_string(recv_count) +
+                                     " elements, expected " + std::to_string(count));
     }
 
-    // Wait for all sends to complete
+    // Wait for all sends
     std::vector<MPI_Status> send_statuses(world_size - 1);
     int err = MPI_Waitall(world_size - 1, send_reqs.data(), send_statuses.data());
-    if (err != MPI_SUCCESS) {
-        throw std::runtime_error("MPI_Waitall for sends failed with error code: " + std::to_string(err));
-    }
+    if (err != MPI_SUCCESS)
+        throw std::runtime_error("MPI_Waitall (sends) failed: " + std::to_string(err));
 
-    // Check all send statuses if needed
-    for (int i = 0; i < world_size - 1; i++) {
-        if (send_statuses[i].MPI_ERROR != MPI_SUCCESS) {
-            throw std::runtime_error("Send operation to rank " +
-                                    std::to_string(send_statuses[i].MPI_SOURCE) +
-                                    " failed with error code: " +
-                                    std::to_string(send_statuses[i].MPI_ERROR));
-        }
-    }
+    sync_cuda_if_needed(recvbuf);
 }
 
 void mpi_reduce_scatter(torch::Tensor& sendbuf, torch::Tensor& recvbuf) {
     ensure_mpi_initialized();
 
+    if (!sendbuf.is_contiguous()) sendbuf = sendbuf.contiguous();
+    if (!recvbuf.is_contiguous()) recvbuf = recvbuf.contiguous();
+
     int world_size;
     MPI_Comm_size(MPI_COMM_WORLD, &world_size);
 
+    sync_cuda_if_needed(sendbuf);
+
     int count = recvbuf.numel();
     std::vector<int> recvcounts(world_size, count);
-
     auto [mpi_dtype, typesize] = get_typesize(sendbuf.scalar_type());
 
-    MPI_Reduce_scatter(
-        sendbuf.data_ptr(),
-        recvbuf.data_ptr(),
-        recvcounts.data(),
-        mpi_dtype,
-        MPI_SUM,
-        MPI_COMM_WORLD
-    );
+    int err = MPI_Reduce_scatter(sendbuf.data_ptr(), recvbuf.data_ptr(),
+                                 recvcounts.data(), mpi_dtype, MPI_SUM, MPI_COMM_WORLD);
+    if (err != MPI_SUCCESS)
+        throw std::runtime_error("MPI_Reduce_scatter failed: " + std::to_string(err));
+
+    sync_cuda_if_needed(recvbuf);
 }
 
 void mpi_alltoall(torch::Tensor& sendbuf, torch::Tensor& recvbuf) {
     ensure_mpi_initialized();
 
+    if (!sendbuf.is_contiguous()) sendbuf = sendbuf.contiguous();
+    if (!recvbuf.is_contiguous()) recvbuf = recvbuf.contiguous();
+
+    if (recvbuf.numel() != sendbuf.numel())
+        throw std::runtime_error("mpi_alltoall: sendbuf and recvbuf must have the same numel");
+
     int world_size;
     MPI_Comm_size(MPI_COMM_WORLD, &world_size);
 
+    sync_cuda_if_needed(sendbuf);
+
     int count = sendbuf.numel() / world_size;
-
-    if (recvbuf.numel() != sendbuf.numel()) {
-        throw std::runtime_error("recvbuf must have the same number of elements as sendbuf");
-    }
-
     auto [mpi_dtype, typesize] = get_typesize(sendbuf.scalar_type());
 
-    MPI_Alltoall(
-        sendbuf.data_ptr(),
-        count,
-        mpi_dtype,
-        recvbuf.data_ptr(),
-        count,
-        mpi_dtype,
-        MPI_COMM_WORLD
-    );
-}
+    int err = MPI_Alltoall(sendbuf.data_ptr(), count, mpi_dtype,
+                           recvbuf.data_ptr(), count, mpi_dtype, MPI_COMM_WORLD);
+    if (err != MPI_SUCCESS)
+        throw std::runtime_error("MPI_Alltoall failed: " + std::to_string(err));
 
-void mpi_send(torch::Tensor& tensor, int dest) {
-    ensure_mpi_initialized();
-    void* ptr = tensor.data_ptr();
-    int count = tensor.numel();
-    MPI_Datatype datatype = MPI_FLOAT;
-
-    MPI_Send(ptr, count, datatype, dest, 0, MPI_COMM_WORLD);
-}
-
-void mpi_recv(torch::Tensor& tensor, int source) {
-    ensure_mpi_initialized();
-    void* ptr = tensor.data_ptr();
-    int count = tensor.numel();
-    MPI_Datatype datatype = MPI_FLOAT;
-
-    MPI_Status status;
-
-    MPI_Recv(ptr, count, datatype, source, 0, MPI_COMM_WORLD, &status);
-
-    int recv_count;
-    MPI_Get_count(&status, datatype, &recv_count);
-
-    if (recv_count != count) {
-        std::cout << "Received unexpected number of elements: " << recv_count << " != " << count << std::endl;
-        throw std::runtime_error("Received unexpected number of elements: " + std::to_string(recv_count) + " != " + std::to_string(count));
-    }
-
-    if (status.MPI_SOURCE != source) {
-        std::cout << "Received message from unexpected source: " << status.MPI_SOURCE << " != " << source << std::endl;
-        throw std::runtime_error("Received message from unexpected source: " + std::to_string(status.MPI_SOURCE) + " != " + std::to_string(source));
-    }
+    sync_cuda_if_needed(recvbuf);
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("allgather", &mpi_allgather, "MPI AllGather");
-    m.def("alltoall", &mpi_alltoall, "MPI All to All");
-    m.def("allreduce", &mpi_allreduce, "MPI AllReduce");
-    m.def("reduce_scatter", &mpi_reduce_scatter, "MPI ReduceScatter");
-    m.def("send", &mpi_send, "MPI Send");
-    m.def("recv", &mpi_recv, "MPI Recv");
-    m.def("barrier", &barrier, "MPI Barrier");
-    m.def("get_rank", &get_rank, "Get MPI rank");
-    m.def("get_size", &get_size, "Get MPI world size");
-    m.def("finalize_mpi", &finalize_mpi, "Finalize MPI");
+    m.def("send",          &mpi_send,          "MPI Send (GPU-aware)");
+    m.def("recv",          &mpi_recv,          "MPI Recv (GPU-aware)");
+    m.def("allreduce",     &mpi_allreduce,     "MPI Allreduce (GPU-aware)");
+    m.def("allgather",     &mpi_allgather,     "MPI Allgather (GPU-aware)");
+    m.def("reduce_scatter",&mpi_reduce_scatter,"MPI Reduce_scatter (GPU-aware)");
+    m.def("alltoall",      &mpi_alltoall,      "MPI Alltoall (GPU-aware)");
+    m.def("barrier",       &barrier,           "MPI Barrier");
+    m.def("get_rank",      &get_rank,          "Get MPI rank");
+    m.def("get_size",      &get_size,          "Get MPI world size");
+    m.def("finalize_mpi",  &finalize_mpi,      "Finalize MPI");
 }
