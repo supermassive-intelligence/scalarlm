@@ -1,8 +1,8 @@
-from cray_infra.training.training_harness import TrainingHarness
 from cray_infra.training.training_job_status import TrainingJobStatus
 from cray_infra.training.print_logo import print_logo
 
 from cray_megatron.megatron.training_loop import TrainingLoop, get_max_steps
+from cray_megatron.megatron.training_harness import TrainingHarness
 
 import sys
 
