@@ -2,8 +2,9 @@ from cray_megatron.huggingface.download_model import download_model
 from cray_megatron.megatron.distribution.apply_distribution_strategy import (
     apply_distribution_strategy,
 )
+from cray_megatron.collectives.main_rank_only import is_main_rank
+
 from gpu_aware_mpi import get_size, get_rank, allgather
-from cray_infra.training.main_rank_only import is_main_rank
 
 from ml.adapters.add_adapters_to_model import add_adapters_to_model
 

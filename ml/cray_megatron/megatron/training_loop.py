@@ -8,9 +8,9 @@ from cray_megatron.models.get_latest_checkpoint_path import (
 )
 
 from cray_megatron.collectives.main_rank_only import main_rank_only
+from cray_megatron.megatron.training_harness import TrainingHarness
 
 from cray_infra.training.training_job_status import TrainingJobStatus
-from cray_infra.training.training_harness import TrainingHarness
 from cray_infra.util.get_job_config import get_job_config
 
 
