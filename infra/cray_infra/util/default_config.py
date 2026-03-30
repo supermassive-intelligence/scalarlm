@@ -63,6 +63,6 @@ class Config(BaseModel):
 
     hf_token: str = ""
 
-    hf_encrypted_token: bytes = b"gAAAAABpyJccuRYhF2Lf7YNX_5442WW8NkpQKogTnbFYyoSzCvfGqhxyZ7KdXJ3jYtSoW1bJMYgWefbw-qSRY4sYpunpYrA5Rlv1HzHKmlHGfy2tqym7INSnKp3CuReRe-EqZcjee5qf"
+    hf_encrypted_token: bytes = b"gAAAAABpyvSQu2QUlUfp-YavLwueXqCU0j2Lhe9Lddij4B-qV3JngfcH4uCtjVGXlWAyM2o91nZXhsS3B3q3zKNiLxnxhFpJd0ddbwWPysez2OpZX4jTFOA9-xjQVk454A_qk6pdJxMv"
     encryption_key: bytes = b"JAJOZunNSRFeXWXWVVVJfiKSzdzFMw0yFn8_JK50h60="
 

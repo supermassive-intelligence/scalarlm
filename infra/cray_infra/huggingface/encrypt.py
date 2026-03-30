@@ -4,7 +4,7 @@ key = b"JAJOZunNSRFeXWXWVVVJfiKSzdzFMw0yFn8_JK50h60="
 
 cipher = Fernet(key)
 
-plaintext = "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"
+plaintext = ""
 encrypted = cipher.encrypt(plaintext.encode())
 
 print(f"Encrypted: {encrypted}")
