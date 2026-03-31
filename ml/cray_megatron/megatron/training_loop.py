@@ -160,7 +160,6 @@ class TrainingLoop:
 
     def training_step_accumulate(self, batch, accum_step, gradient_accumulation_steps):
         """Perform a single forward/backward pass with gradient accumulation."""
-        print(f"Accumulation step {accum_step + 1}/{gradient_accumulation_steps} for training step {self.training_state.current_step}")
         device = self.training_state.model_info["distribution_strategy"]["device"]
 
         start_time = time.time()
@@ -315,6 +314,10 @@ class TrainingLoop:
 
     @main_rank_only
     def print_microbatch_info(self, accum_step, loss, start_time):
+        # only log if there is more than one microbatch
+        if get_gradient_accumulation_steps() <= 1:
+            return
+
         logger.debug(
             f"  Microbatch {accum_step + 1} "
             f"- step {self.training_state.current_step} "
