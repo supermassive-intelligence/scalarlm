@@ -1,6 +1,5 @@
 #include <mpi.h>
 #include <torch/extension.h>
-#include <cuda_runtime.h>
 #include <stdexcept>
 #include <iostream>
 #include <tuple>
@@ -17,11 +16,7 @@ void ensure_mpi_initialized() {
 
 inline void sync_cuda_if_needed(const torch::Tensor& tensor) {
     if (tensor.is_cuda()) {
-        cudaError_t err = cudaDeviceSynchronize();
-        if (err != cudaSuccess) {
-            throw std::runtime_error(std::string("cudaDeviceSynchronize failed: ") +
-                                     cudaGetErrorString(err));
-        }
+        torch::cuda::synchronize(tensor.device().index());
     }
 }
 
