@@ -127,16 +127,19 @@ void mpi_allgather(torch::Tensor& sendbuf, torch::Tensor& recvbuf) {
     if (!sendbuf.is_contiguous()) sendbuf = sendbuf.contiguous();
     if (!recvbuf.is_contiguous()) recvbuf = recvbuf.contiguous();
 
-    int rank = get_rank();
+    int rank       = get_rank();
     int world_size = get_size();
-    int count = sendbuf.numel();
+    int count      = sendbuf.numel();
 
     sync_cuda_if_needed(sendbuf);
 
-    // Copy own data into the correct slot
+    // Copy own slice directly.
     recvbuf.slice(0, rank * count, (rank + 1) * count).copy_(sendbuf);
 
-    // Issue all isends — shm peers complete immediately, others are async MPI.
+    // Issue all isends first so interconnect transfers start immediately.
+    // Both shm_isend and mpi_isend_standard are now truly non-blocking:
+    //   - shm_isend:          memcpy already done; posts MPI_Isend for signal.
+    //   - mpi_isend_standard: posts MPI_Isend for the data itself.
     std::vector<MpiRequest> send_reqs;
     send_reqs.reserve(world_size - 1);
     for (int i = 0; i < world_size; ++i) {
@@ -144,12 +147,13 @@ void mpi_allgather(torch::Tensor& sendbuf, torch::Tensor& recvbuf) {
         send_reqs.push_back(mpi_isend(sendbuf, i));
     }
 
-    // Issue all irecvs into the appropriate recvbuf slots.
-    std::vector<MpiRequest> recv_reqs;
+    // Issue all irecvs.
+    // shm_irecv posts MPI_Irecv for the signal; the shm→tensor copy is
+    // deferred to the on_complete callback fired inside mpi_waitall.
+    std::vector<MpiRequest>    recv_reqs;
+    std::vector<torch::Tensor> recv_slices;  // keep slices alive for callbacks
     recv_reqs.reserve(world_size - 1);
-    std::vector<torch::Tensor> recv_slices;
     recv_slices.reserve(world_size - 1);
-
     for (int i = 0; i < world_size; ++i) {
         if (i == rank) continue;
         auto slice = recvbuf.slice(0, i * count, (i + 1) * count);
@@ -157,7 +161,7 @@ void mpi_allgather(torch::Tensor& sendbuf, torch::Tensor& recvbuf) {
         recv_reqs.push_back(mpi_irecv(recv_slices.back(), i));
     }
 
-    // Wait for all receives, then all sends.
+    // Wait for receives first: callbacks run here for the shm path.
     mpi_waitall(recv_reqs);
     mpi_waitall(send_reqs);
 
