@@ -170,23 +170,58 @@ void mpi_allgather(torch::Tensor& sendbuf, torch::Tensor& recvbuf) {
 
 void mpi_reduce_scatter(torch::Tensor& sendbuf, torch::Tensor& recvbuf) {
     ensure_mpi_initialized();
+    ensure_shm_discovered();
 
     if (!sendbuf.is_contiguous()) sendbuf = sendbuf.contiguous();
     if (!recvbuf.is_contiguous()) recvbuf = recvbuf.contiguous();
 
-    int world_size;
-    MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+    int rank       = get_rank();
+    int world_size = get_size();
+    int count      = recvbuf.numel();
 
     sync_cuda_if_needed(sendbuf);
 
-    int count = recvbuf.numel();
-    std::vector<int> recvcounts(world_size, count);
-    auto [mpi_dtype, typesize] = get_typesize(sendbuf.scalar_type());
+    // Seed recvbuf with our own contribution (slice [rank] of sendbuf).
+    // Reduction happens in-place via add_() once remote slices arrive.
+    recvbuf.copy_(sendbuf.slice(0, rank * count, (rank + 1) * count));
 
-    int err = MPI_Reduce_scatter(sendbuf.data_ptr(), recvbuf.data_ptr(),
-                                 recvcounts.data(), mpi_dtype, MPI_SUM, MPI_COMM_WORLD);
-    if (err != MPI_SUCCESS)
-        throw std::runtime_error("MPI_Reduce_scatter failed: " + std::to_string(err));
+    // Issue all isends first so interconnect transfers start immediately.
+    // Each rank sends sendbuf[i*count : (i+1)*count] to rank i.
+    // Store slices so their storage stays alive for the duration of async ops.
+    std::vector<torch::Tensor> send_slices;
+    std::vector<MpiRequest>    send_reqs;
+    send_slices.reserve(world_size - 1);
+    send_reqs.reserve(world_size - 1);
+    for (int i = 0; i < world_size; ++i) {
+        if (i == rank) continue;
+        // contiguous() is cheap when sendbuf is already contiguous (1-D slice is always so).
+        send_slices.push_back(sendbuf.slice(0, i * count, (i + 1) * count).contiguous());
+        send_reqs.push_back(mpi_isend(send_slices.back(), i));
+    }
+
+    // Post all irecvs into per-peer temporary buffers.
+    // For the shm path the copy-out is deferred to on_complete inside mpi_waitall;
+    // for the MPI path the data lands directly into tmp_bufs.
+    std::vector<torch::Tensor> tmp_bufs;
+    std::vector<MpiRequest>    recv_reqs;
+    tmp_bufs.reserve(world_size - 1);
+    recv_reqs.reserve(world_size - 1);
+    for (int i = 0; i < world_size; ++i) {
+        if (i == rank) continue;
+        tmp_bufs.push_back(torch::empty_like(recvbuf));
+        recv_reqs.push_back(mpi_irecv(tmp_bufs.back(), i));
+    }
+
+    // Wait for all receives (and shm on_complete callbacks) to finish,
+    // then reduce: recvbuf already holds our own slice, add each peer's.
+    mpi_waitall(recv_reqs);
+    for (auto& tmp : tmp_bufs) {
+        recvbuf.add_(tmp);
+    }
+
+    // Wait for sends after reduction so we don't exit while shm buffers
+    // are still referenced by a peer's on_complete callback.
+    mpi_waitall(send_reqs);
 
     sync_cuda_if_needed(recvbuf);
 }
