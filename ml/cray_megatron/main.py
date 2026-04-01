@@ -3,18 +3,19 @@ from cray_infra.huggingface.get_hf_token import get_hf_token
 
 from cray_megatron.megatron.training_harness import TrainingHarness
 
-from cray_megatron.collectives.main_rank_only import main_rank_only
+from cray_megatron.collectives.main_rank_only import is_main_rank
 
 import traceback
 import sys
 import os
-from gpu_aware_mpi import finalize_mpi
+from gpu_aware_mpi import finalize_mpi, get_rank
 
-@main_rank_only
 def print_exception():
-    exc_type, exc_value, exc_traceback = sys.exc_info()
-    traceback.print_exception(exc_type, exc_value, exc_traceback)
-
+    if is_main_rank():
+        exc_type, exc_value, exc_traceback = sys.exc_info()
+        traceback.print_exception(exc_type, exc_value, exc_traceback)
+    else:
+        print(f"Rank {get_rank()} hit exception")
 
 try:
     from cray_megatron.megatron.megatron_trainer import MegatronTrainer

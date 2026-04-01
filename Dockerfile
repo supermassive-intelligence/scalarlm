@@ -164,7 +164,7 @@ RUN git config --global --add safe.directory /app && \
     npm run build
 
 # mongo image
-FROM mongo:7 AS mongo
+FROM mongo:7.0.18 AS mongo
 
 # image to be used if INCLUDE_DB is true
 FROM ui_base AS local_db
