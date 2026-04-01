@@ -47,3 +47,37 @@ void mpi_recv_standard(torch::Tensor& tensor, int source) {
                                  " but got " + std::to_string(status.MPI_SOURCE));
     }
 }
+
+MpiRequest mpi_isend_standard(torch::Tensor& tensor, int dest) {
+    ensure_mpi_initialized();
+
+    if (!tensor.is_contiguous()) {
+        tensor = tensor.contiguous();
+    }
+
+    sync_cuda_if_needed(tensor);
+
+    MpiRequest req;
+    MPI_Datatype datatype = get_mpi_datatype(tensor);
+    int err = MPI_Isend(tensor.data_ptr(), tensor.numel(), datatype, dest, 0,
+                        MPI_COMM_WORLD, &req.mpi_req);
+    if (err != MPI_SUCCESS)
+        throw std::runtime_error("MPI_Isend failed: " + std::to_string(err));
+    return req;
+}
+
+MpiRequest mpi_irecv_standard(torch::Tensor& tensor, int source) {
+    ensure_mpi_initialized();
+
+    if (!tensor.is_contiguous()) {
+        tensor = tensor.contiguous();
+    }
+
+    MpiRequest req;
+    MPI_Datatype datatype = get_mpi_datatype(tensor);
+    int err = MPI_Irecv(tensor.data_ptr(), tensor.numel(), datatype, source, 0,
+                        MPI_COMM_WORLD, &req.mpi_req);
+    if (err != MPI_SUCCESS)
+        throw std::runtime_error("MPI_Irecv failed: " + std::to_string(err));
+    return req;
+}

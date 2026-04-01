@@ -74,7 +74,31 @@ void mpi_recv(torch::Tensor& tensor, int source) {
 }
 
 // ===================================================================
-// Collectives — unchanged, operate via MPI
+// Async send / recv — dispatch to shm or standard MPI
+// ===================================================================
+
+MpiRequest mpi_isend(torch::Tensor& tensor, int dest) {
+    ensure_mpi_initialized();
+    ensure_shm_discovered();
+
+    if (shm_is_peer(dest))
+        return shm_isend(tensor, dest);
+    else
+        return mpi_isend_standard(tensor, dest);
+}
+
+MpiRequest mpi_irecv(torch::Tensor& tensor, int source) {
+    ensure_mpi_initialized();
+    ensure_shm_discovered();
+
+    if (shm_is_peer(source))
+        return shm_irecv(tensor, source);
+    else
+        return mpi_irecv_standard(tensor, source);
+}
+
+// ===================================================================
+// Collectives
 // ===================================================================
 
 void mpi_allreduce(torch::Tensor& tensor) {
@@ -98,6 +122,7 @@ void mpi_allreduce(torch::Tensor& tensor) {
 
 void mpi_allgather(torch::Tensor& sendbuf, torch::Tensor& recvbuf) {
     ensure_mpi_initialized();
+    ensure_shm_discovered();
 
     if (!sendbuf.is_contiguous()) sendbuf = sendbuf.contiguous();
     if (!recvbuf.is_contiguous()) recvbuf = recvbuf.contiguous();
@@ -108,46 +133,37 @@ void mpi_allgather(torch::Tensor& sendbuf, torch::Tensor& recvbuf) {
 
     sync_cuda_if_needed(sendbuf);
 
+    // Copy own data into the correct slot
     recvbuf.slice(0, rank * count, (rank + 1) * count).copy_(sendbuf);
 
     auto [datatype, typesize] = get_typesize(sendbuf.scalar_type());
 
-    std::vector<MPI_Request> send_reqs(world_size - 1);
-    int req_idx = 0;
+    // Issue all sends (shm peers complete immediately, others are async MPI)
+    std::vector<MpiRequest> send_reqs;
+    send_reqs.reserve(world_size - 1);
     for (int i = 0; i < world_size; ++i) {
         if (i == rank) continue;
-        int err = MPI_Isend(sendbuf.data_ptr(), count, datatype, i, 0,
-                            MPI_COMM_WORLD, &send_reqs[req_idx++]);
-        if (err != MPI_SUCCESS)
-            throw std::runtime_error("MPI_Isend failed: " + std::to_string(err));
+        send_reqs.push_back(mpi_isend(sendbuf, i));
     }
+
+    // Issue all receives into the appropriate recvbuf slots
+    std::vector<MpiRequest> recv_reqs;
+    recv_reqs.reserve(world_size - 1);
+
+    // We need tensor views for each recv slot; keep them alive until waits complete
+    std::vector<torch::Tensor> recv_slices;
+    recv_slices.reserve(world_size - 1);
 
     for (int i = 0; i < world_size; ++i) {
         if (i == rank) continue;
-        void* recv_ptr = static_cast<char*>(recvbuf.data_ptr()) + i * count * typesize;
-        MPI_Request recv_req;
-        MPI_Status recv_status;
-
-        int err = MPI_Irecv(recv_ptr, count, datatype, i, 0, MPI_COMM_WORLD, &recv_req);
-        if (err != MPI_SUCCESS)
-            throw std::runtime_error("MPI_Irecv failed: " + std::to_string(err));
-
-        err = MPI_Wait(&recv_req, &recv_status);
-        if (err != MPI_SUCCESS)
-            throw std::runtime_error("MPI_Wait (recv) failed: " + std::to_string(err));
-
-        int recv_count;
-        MPI_Get_count(&recv_status, datatype, &recv_count);
-        if (recv_count != count)
-            throw std::runtime_error("mpi_allgather: rank " + std::to_string(i) +
-                                     " sent " + std::to_string(recv_count) +
-                                     " elements, expected " + std::to_string(count));
+        auto slice = recvbuf.slice(0, i * count, (i + 1) * count);
+        recv_slices.push_back(slice);
+        recv_reqs.push_back(mpi_irecv(recv_slices.back(), i));
     }
 
-    std::vector<MPI_Status> send_statuses(world_size - 1);
-    int err = MPI_Waitall(world_size - 1, send_reqs.data(), send_statuses.data());
-    if (err != MPI_SUCCESS)
-        throw std::runtime_error("MPI_Waitall (sends) failed: " + std::to_string(err));
+    // Wait for all receives, then all sends
+    mpi_waitall(recv_reqs);
+    mpi_waitall(send_reqs);
 
     sync_cuda_if_needed(recvbuf);
 }

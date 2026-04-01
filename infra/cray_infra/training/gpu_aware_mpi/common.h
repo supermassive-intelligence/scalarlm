@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <tuple>
 #include <string>
+#include <vector>
 
 // ---------------------------------------------------------------------------
 // MPI lifecycle
@@ -51,4 +52,39 @@ inline std::tuple<MPI_Datatype, size_t> get_typesize(torch::ScalarType dtype) {
 
 inline MPI_Datatype get_mpi_datatype(const torch::Tensor& tensor) {
     return std::get<0>(get_typesize(tensor.scalar_type()));
+}
+
+// ---------------------------------------------------------------------------
+// Async request handle (wraps MPI_Request or a completed shm op)
+// ---------------------------------------------------------------------------
+struct MpiRequest {
+    MPI_Request mpi_req = MPI_REQUEST_NULL;
+    bool        completed = false;  // true if the op already finished (e.g. shm path)
+};
+
+inline void mpi_wait(MpiRequest& req) {
+    if (req.completed) return;
+    MPI_Status st;
+    int err = MPI_Wait(&req.mpi_req, &st);
+    if (err != MPI_SUCCESS)
+        throw std::runtime_error("MPI_Wait failed: " + std::to_string(err));
+    req.completed = true;
+}
+
+inline void mpi_waitall(std::vector<MpiRequest>& reqs) {
+    // Collect the non-completed requests and wait on them in one call
+    std::vector<MPI_Request> pending;
+    std::vector<size_t>      indices;
+    for (size_t i = 0; i < reqs.size(); ++i) {
+        if (!reqs[i].completed) {
+            pending.push_back(reqs[i].mpi_req);
+            indices.push_back(i);
+        }
+    }
+    if (pending.empty()) return;
+    std::vector<MPI_Status> statuses(pending.size());
+    int err = MPI_Waitall(static_cast<int>(pending.size()), pending.data(), statuses.data());
+    if (err != MPI_SUCCESS)
+        throw std::runtime_error("MPI_Waitall failed: " + std::to_string(err));
+    for (size_t idx : indices) reqs[idx].completed = true;
 }

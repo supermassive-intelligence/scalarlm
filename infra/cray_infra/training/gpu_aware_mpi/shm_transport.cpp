@@ -43,6 +43,16 @@ void shm_send(torch::Tensor& tensor, int dest) {
     }
 }
 
+MpiRequest shm_isend(torch::Tensor& tensor, int dest) {
+    shm_send(tensor, dest);
+    return MpiRequest{MPI_REQUEST_NULL, true};
+}
+
+MpiRequest shm_irecv(torch::Tensor& tensor, int source) {
+    shm_recv(tensor, source);
+    return MpiRequest{MPI_REQUEST_NULL, true};
+}
+
 void shm_recv(torch::Tensor& tensor, int source) {
     if (!tensor.is_contiguous()) {
         tensor = tensor.contiguous();
