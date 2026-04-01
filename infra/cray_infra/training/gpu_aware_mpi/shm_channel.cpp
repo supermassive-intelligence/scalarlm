@@ -128,16 +128,29 @@ bool shm_is_peer(int peer_rank) {
 // Channel creation / lookup
 // ---------------------------------------------------------------------------
 
+// Synchronize only the two ranks that share a channel.
+// MPI_Barrier(MPI_COMM_WORLD) inside create_channel is wrong because channel
+// creation is triggered lazily (on first use / on grow), so different rank
+// pairs hit the barrier at different times — causing mismatched barriers and
+// corrupted channel state.  A pairwise MPI_Sendrecv affects only the two
+// peers involved and is safe to call from any point in the program.
+static constexpr int PEER_SYNC_TAG = 43;  // distinct from SHM_CTRL_TAG = 42
+
+static void peer_sync(int peer_rank) {
+    char s = 0, r = 0;
+    MPI_Sendrecv(&s, 1, MPI_CHAR, peer_rank, PEER_SYNC_TAG,
+                 &r, 1, MPI_CHAR, peer_rank, PEER_SYNC_TAG,
+                 MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+}
+
 static ShmChannel create_channel(int peer_rank, size_t capacity) {
     int rank;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
     std::string name = channel_name(rank, peer_rank);
-    // Two independent halves: lo→hi and hi→lo.
     size_t half_size = sizeof(ShmHeader) + capacity;
     size_t total     = 2 * half_size;
 
-    // The lower-ranked peer creates; both open.
     int lo = std::min(rank, peer_rank);
     int fd;
     if (rank == lo) {
@@ -151,8 +164,8 @@ static ShmChannel create_channel(int peer_rank, size_t capacity) {
         }
     }
 
-    // Sync so the file exists before the higher rank opens it.
-    MPI_Barrier(MPI_COMM_WORLD);
+    // Sync so the shm file exists before the higher rank opens it.
+    peer_sync(peer_rank);
 
     if (rank != lo) {
         fd = shm_open(name.c_str(), O_RDWR, 0666);
@@ -165,7 +178,7 @@ static ShmChannel create_channel(int peer_rank, size_t capacity) {
     if (ptr == MAP_FAILED)
         throw std::runtime_error("mmap failed: " + std::string(strerror(errno)));
 
-    // Zero both headers on creation (lower rank owns this)
+    // Lower rank initialises both headers.
     if (rank == lo) {
         for (int h = 0; h < 2; ++h) {
             auto* hdr = reinterpret_cast<ShmHeader*>(
@@ -175,14 +188,13 @@ static ShmChannel create_channel(int peer_rank, size_t capacity) {
         }
     }
 
-    MPI_Barrier(MPI_COMM_WORLD);
+    // Sync so the higher rank doesn't read uninitialised headers.
+    peer_sync(peer_rank);
 
-    // Pin for CUDA DMA
     bool registered = false;
 #if defined(USE_CUDA) || defined(USE_ROCM)
-    if (cudaHostRegister(ptr, total, cudaHostRegisterDefault) == cudaSuccess) {
+    if (cudaHostRegister(ptr, total, cudaHostRegisterDefault) == cudaSuccess)
         registered = true;
-    }
 #endif
 
     if (rank == 0) {
