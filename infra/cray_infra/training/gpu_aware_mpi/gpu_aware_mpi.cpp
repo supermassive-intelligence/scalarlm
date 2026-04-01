@@ -136,9 +136,7 @@ void mpi_allgather(torch::Tensor& sendbuf, torch::Tensor& recvbuf) {
     // Copy own data into the correct slot
     recvbuf.slice(0, rank * count, (rank + 1) * count).copy_(sendbuf);
 
-    auto [datatype, typesize] = get_typesize(sendbuf.scalar_type());
-
-    // Issue all sends (shm peers complete immediately, others are async MPI)
+    // Issue all isends — shm peers complete immediately, others are async MPI.
     std::vector<MpiRequest> send_reqs;
     send_reqs.reserve(world_size - 1);
     for (int i = 0; i < world_size; ++i) {
@@ -146,11 +144,9 @@ void mpi_allgather(torch::Tensor& sendbuf, torch::Tensor& recvbuf) {
         send_reqs.push_back(mpi_isend(sendbuf, i));
     }
 
-    // Issue all receives into the appropriate recvbuf slots
+    // Issue all irecvs into the appropriate recvbuf slots.
     std::vector<MpiRequest> recv_reqs;
     recv_reqs.reserve(world_size - 1);
-
-    // We need tensor views for each recv slot; keep them alive until waits complete
     std::vector<torch::Tensor> recv_slices;
     recv_slices.reserve(world_size - 1);
 
@@ -161,7 +157,7 @@ void mpi_allgather(torch::Tensor& sendbuf, torch::Tensor& recvbuf) {
         recv_reqs.push_back(mpi_irecv(recv_slices.back(), i));
     }
 
-    // Wait for all receives, then all sends
+    // Wait for all receives, then all sends.
     mpi_waitall(recv_reqs);
     mpi_waitall(send_reqs);
 

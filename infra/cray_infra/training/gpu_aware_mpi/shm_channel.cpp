@@ -133,7 +133,9 @@ static ShmChannel create_channel(int peer_rank, size_t capacity) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
     std::string name = channel_name(rank, peer_rank);
-    size_t total = sizeof(ShmHeader) + capacity;
+    // Two independent halves: lo→hi and hi→lo.
+    size_t half_size = sizeof(ShmHeader) + capacity;
+    size_t total     = 2 * half_size;
 
     // The lower-ranked peer creates; both open.
     int lo = std::min(rank, peer_rank);
@@ -163,11 +165,14 @@ static ShmChannel create_channel(int peer_rank, size_t capacity) {
     if (ptr == MAP_FAILED)
         throw std::runtime_error("mmap failed: " + std::string(strerror(errno)));
 
-    // Zero the header on creation (lower rank owns this)
+    // Zero both headers on creation (lower rank owns this)
     if (rank == lo) {
-        memset(ptr, 0, sizeof(ShmHeader));
-        auto* hdr = reinterpret_cast<ShmHeader*>(ptr);
-        hdr->capacity = capacity;
+        for (int h = 0; h < 2; ++h) {
+            auto* hdr = reinterpret_cast<ShmHeader*>(
+                static_cast<char*>(ptr) + h * half_size);
+            memset(hdr, 0, sizeof(ShmHeader));
+            hdr->capacity = capacity;
+        }
     }
 
     MPI_Barrier(MPI_COMM_WORLD);
@@ -182,12 +187,12 @@ static ShmChannel create_channel(int peer_rank, size_t capacity) {
 
     if (rank == 0) {
         std::cout << "[gpu_aware_mpi] shm channel: " << name
-                  << " created (" << (capacity / (1024 * 1024)) << " MB"
+                  << " created (" << (capacity / (1024 * 1024)) << " MB x2"
                   << ", cudaHostRegister=" << (registered ? "yes" : "no")
                   << ")" << std::endl;
     }
 
-    return ShmChannel{peer_rank, ptr, total, registered};
+    return ShmChannel{peer_rank, ptr, total, registered, capacity, rank < peer_rank};
 }
 
 ShmChannel& shm_get_channel(int peer_rank, size_t min_capacity) {

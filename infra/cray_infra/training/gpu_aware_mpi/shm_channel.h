@@ -25,21 +25,43 @@ struct ShmHeader {
     uint64_t capacity;     // total data buffer capacity (after this header)
 };
 
+// A duplex channel: two independent header+data regions inside one shm file.
+// Half 0 (offset 0)                        : lo-rank → hi-rank
+// Half 1 (offset sizeof(ShmHeader)+half_cap): hi-rank → lo-rank
 struct ShmChannel {
-    int       peer_rank;   // the remote rank this channel connects to
-    void*     mapped;      // mmap base (includes header)
-    size_t    mapped_size; // total mapped size (header + data capacity)
-    bool      registered;  // whether cudaHostRegister succeeded
+    int       peer_rank;     // the remote rank this channel connects to
+    void*     mapped;        // mmap base
+    size_t    mapped_size;   // total mapped size (2 * (header + half_capacity))
+    bool      registered;    // whether cudaHostRegister succeeded
+    size_t    half_capacity; // data capacity of each direction
+    bool      is_lower;      // true when local rank < peer_rank
 
-    ShmHeader* header() const {
-        return reinterpret_cast<ShmHeader*>(mapped);
+    // Byte offset to the start of a given half (header included).
+    size_t half_offset(int half) const {
+        return half * (sizeof(ShmHeader) + half_capacity);
     }
-    void* data() const {
-        return static_cast<char*>(mapped) + sizeof(ShmHeader);
+
+    // --- send direction (local → peer) ---
+    ShmHeader* send_header() const {
+        int half = is_lower ? 0 : 1;
+        return reinterpret_cast<ShmHeader*>(
+            static_cast<char*>(mapped) + half_offset(half));
     }
-    size_t capacity() const {
-        return mapped_size - sizeof(ShmHeader);
+    void* send_data() const {
+        return reinterpret_cast<char*>(send_header()) + sizeof(ShmHeader);
     }
+
+    // --- recv direction (peer → local) ---
+    ShmHeader* recv_header() const {
+        int half = is_lower ? 1 : 0;
+        return reinterpret_cast<ShmHeader*>(
+            static_cast<char*>(mapped) + half_offset(half));
+    }
+    void* recv_data() const {
+        return reinterpret_cast<char*>(recv_header()) + sizeof(ShmHeader);
+    }
+
+    size_t capacity() const { return half_capacity; }
 };
 
 // ---------------------------------------------------------------------------

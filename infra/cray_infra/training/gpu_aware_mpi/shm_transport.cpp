@@ -20,19 +20,19 @@ void shm_send(torch::Tensor& tensor, int dest) {
     // 1. GPU → shm DMA  (or CPU memcpy if tensor is on CPU)
     sync_cuda_if_needed(tensor);
 
-    // Build a CPU tensor that views the shm data region, then copy into it.
+    // Build a CPU tensor that views the send-direction data region.
     auto cpu_opts = torch::TensorOptions()
         .dtype(tensor.dtype())
         .device(torch::kCPU);
-    torch::Tensor shm_tensor = torch::from_blob(ch.data(), {tensor.numel()}, cpu_opts);
-    shm_tensor.copy_(tensor.is_cuda() ? tensor : tensor);
+    torch::Tensor shm_tensor = torch::from_blob(ch.send_data(), {tensor.numel()}, cpu_opts);
+    shm_tensor.copy_(tensor);
 
     if (tensor.is_cuda()) {
         sync_cuda_if_needed(tensor);  // wait for DMA to land in shm
     }
 
-    // 2. Write byte count into header
-    ch.header()->nbytes = nbytes;
+    // 2. Write byte count into send header
+    ch.send_header()->nbytes = nbytes;
 
     // 3. Signal the receiver via a 1-byte MPI message
     char sig = 1;
@@ -72,8 +72,8 @@ void shm_recv(torch::Tensor& tensor, int source) {
                                  std::to_string(err));
     }
 
-    // 2. Validate byte count
-    uint64_t sent_bytes = ch.header()->nbytes;
+    // 2. Validate byte count from recv header (written by the sender's send path)
+    uint64_t sent_bytes = ch.recv_header()->nbytes;
     if (sent_bytes != nbytes) {
         throw std::runtime_error("shm_recv: expected " + std::to_string(nbytes) +
                                  " bytes but sender wrote " + std::to_string(sent_bytes));
@@ -83,7 +83,7 @@ void shm_recv(torch::Tensor& tensor, int source) {
     auto cpu_opts = torch::TensorOptions()
         .dtype(tensor.dtype())
         .device(torch::kCPU);
-    torch::Tensor shm_tensor = torch::from_blob(ch.data(), {tensor.numel()}, cpu_opts);
+    torch::Tensor shm_tensor = torch::from_blob(ch.recv_data(), {tensor.numel()}, cpu_opts);
     tensor.copy_(shm_tensor);
 
     sync_cuda_if_needed(tensor);  // ensure DMA completes before returning
