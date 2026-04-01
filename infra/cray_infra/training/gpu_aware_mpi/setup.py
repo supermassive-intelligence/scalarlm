@@ -12,7 +12,9 @@ def detect_gpu_platform():
 
 platform = detect_gpu_platform()
 
-include_dirs = []
+include_dirs = [
+    'infra/cray_infra/training/gpu_aware_mpi',
+]
 library_dirs = []
 compile_defines = []
 libraries = []
@@ -30,6 +32,7 @@ if platform == 'rocm':
         '/opt/ompi-rocm/lib'
     ])
     extra_link_args.append('-lmpi')
+    libraries.append('rt')
 elif platform == 'cuda':
     compile_defines.append(('USE_CUDA', '1'))
     include_dirs.extend([
@@ -40,7 +43,7 @@ elif platform == 'cuda':
         '/usr/local/cuda/lib64',
         '/opt/hpcx/ompi/lib'
     ])
-    libraries.append('cudart')
+    libraries.extend(['cudart', 'rt'])
 elif platform == 'cpu':
     os.environ['CXX'] = '/usr/bin/mpicxx'
     include_dirs.extend([
@@ -49,13 +52,18 @@ elif platform == 'cpu':
     library_dirs.extend([
         '/usr/lib/aarch64-linux-gnu/openmpi/lib',
     ])
-    libraries.append('mpi')
+    libraries.extend(['mpi', 'rt'])
 
 setup(
     name="gpu_aware_mpi",
     ext_modules=[cpp_extension.CppExtension(
         'gpu_aware_mpi',
-        sources=['infra/cray_infra/training/gpu_aware_mpi/gpu_aware_mpi.cpp'],
+        sources=[
+            'infra/cray_infra/training/gpu_aware_mpi/gpu_aware_mpi.cpp',
+            'infra/cray_infra/training/gpu_aware_mpi/shm_channel.cpp',
+            'infra/cray_infra/training/gpu_aware_mpi/shm_transport.cpp',
+            'infra/cray_infra/training/gpu_aware_mpi/mpi_transport.cpp',
+        ],
         include_dirs=include_dirs,
         library_dirs=library_dirs,
         libraries=libraries,
