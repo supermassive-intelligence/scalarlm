@@ -13,7 +13,7 @@ def detect_gpu_platform():
 platform = detect_gpu_platform()
 
 include_dirs = [
-    'gpu_aware_mpi',
+    'infra/cray_infra/training/gpu_aware_mpi/gpu_aware_mpi',
 ]
 library_dirs = []
 compile_defines = []
@@ -64,10 +64,10 @@ setup(
     ext_modules=[ExtensionClass(
         'gpu_aware_mpi',
         sources=[
-            'gpu_aware_mpi/gpu_aware_mpi.cpp',
-            'gpu_aware_mpi/shm_channel.cu',
-            'gpu_aware_mpi/shm_transport.cpp',
-            'gpu_aware_mpi/mpi_transport.cpp',
+            'infra/cray_infra/training/gpu_aware_mpi/gpu_aware_mpi/gpu_aware_mpi.cpp',
+            'infra/cray_infra/training/gpu_aware_mpi/gpu_aware_mpi/shm_channel.cu',
+            'infra/cray_infra/training/gpu_aware_mpi/gpu_aware_mpi/shm_transport.cpp',
+            'infra/cray_infra/training/gpu_aware_mpi/gpu_aware_mpi/mpi_transport.cpp',
         ],
         include_dirs=include_dirs,
         library_dirs=library_dirs,
