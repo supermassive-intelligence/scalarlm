@@ -13,7 +13,7 @@ def detect_gpu_platform():
 platform = detect_gpu_platform()
 
 include_dirs = [
-    'infra/cray_infra/training/gpu_aware_mpi',
+    'gpu_aware_mpi',
 ]
 library_dirs = []
 compile_defines = []
@@ -33,6 +33,8 @@ if platform == 'rocm':
     ])
     extra_link_args.append('-lmpi')
     libraries.append('rt')
+    ExtensionClass = cpp_extension.CppExtension
+
 elif platform == 'cuda':
     compile_defines.append(('USE_CUDA', '1'))
     include_dirs.extend([
@@ -44,7 +46,9 @@ elif platform == 'cuda':
         '/opt/hpcx/ompi/lib'
     ])
     libraries.extend(['cudart', 'rt'])
-elif platform == 'cpu':
+    ExtensionClass = cpp_extension.CUDAExtension
+
+else:
     os.environ['CXX'] = '/usr/bin/mpicxx'
     include_dirs.extend([
         '/usr/lib/aarch64-linux-gnu/openmpi/include',
@@ -53,22 +57,24 @@ elif platform == 'cpu':
         '/usr/lib/aarch64-linux-gnu/openmpi/lib',
     ])
     libraries.extend(['mpi', 'rt'])
+    ExtensionClass = cpp_extension.CppExtension
 
 setup(
     name="gpu_aware_mpi",
-    ext_modules=[cpp_extension.CppExtension(
+    ext_modules=[ExtensionClass(
         'gpu_aware_mpi',
         sources=[
-            'infra/cray_infra/training/gpu_aware_mpi/gpu_aware_mpi.cpp',
-            'infra/cray_infra/training/gpu_aware_mpi/shm_channel.cpp',
-            'infra/cray_infra/training/gpu_aware_mpi/shm_transport.cpp',
-            'infra/cray_infra/training/gpu_aware_mpi/mpi_transport.cpp',
+            'gpu_aware_mpi/gpu_aware_mpi.cpp',
+            'gpu_aware_mpi/shm_channel.cu',
+            'gpu_aware_mpi/shm_transport.cpp',
+            'gpu_aware_mpi/mpi_transport.cpp',
         ],
         include_dirs=include_dirs,
         library_dirs=library_dirs,
         libraries=libraries,
         extra_compile_args={
-            'cxx': [f'-D{name}={value}' for name, value in compile_defines]
+            'cxx': [f'-D{name}={value}' for name, value in compile_defines],
+            'nvcc': [f'-D{name}={value}' for name, value in compile_defines],
         },
         extra_link_args=extra_link_args,
     )],

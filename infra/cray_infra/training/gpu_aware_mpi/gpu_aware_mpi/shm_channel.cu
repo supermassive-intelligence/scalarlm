@@ -8,6 +8,7 @@
 #include <cstring>
 #include <algorithm>
 #include <iostream>
+#include <new>       
 
 #ifdef USE_CUDA
 #include <cuda_runtime.h>
@@ -27,10 +28,10 @@ static std::unordered_set<int>              g_shm_peers;
 static std::unordered_map<int, ShmChannel>  g_channels;
 static bool                                 g_discovery_done = false;
 
-static const char* SHM_PREFIX     = "scalarlm_";
-static const char* PROBE_PREFIX   = "scalarlm_probe_";
+static const char* SHM_PREFIX   = "scalarlm_";
+static const char* PROBE_PREFIX = "scalarlm_probe_";
 
-// Default initial capacity for the data buffer (256 MB).
+// Default initial data capacity per slot (256 MB).
 static constexpr size_t DEFAULT_CAPACITY = 256ULL * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
@@ -48,11 +49,11 @@ static std::string channel_name(int rank_a, int rank_b) {
 }
 
 static void shm_unlink_safe(const std::string& name) {
-    shm_unlink(name.c_str());  // ignore errors (may not exist)
+    shm_unlink(name.c_str());
 }
 
 // ---------------------------------------------------------------------------
-// Discovery
+// Discovery  
 // ---------------------------------------------------------------------------
 
 void shm_discover_peers() {
@@ -63,7 +64,6 @@ void shm_discover_peers() {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
 
-    // Step 1: each rank creates a probe file in /dev/shm
     std::string my_probe = probe_name(rank);
     shm_unlink_safe(my_probe);
 
@@ -74,7 +74,6 @@ void shm_discover_peers() {
 
     int fd = shm_open(my_probe.c_str(), O_CREAT | O_RDWR, 0666);
     if (fd < 0) {
-        // /dev/shm not available — no peers
         if (rank == 0) {
             std::cout << "[gpu_aware_mpi] shm discovery: /dev/shm not available, "
                       << "all transfers will use MPI" << std::endl;
@@ -85,10 +84,8 @@ void shm_discover_peers() {
     ftruncate(fd, 1);
     close(fd);
 
-    // Step 2: barrier so all probes are visible
     MPI_Barrier(MPI_COMM_WORLD);
 
-    // Step 3: check which other ranks' probes we can see
     for (int r = 0; r < size; ++r) {
         if (r == rank) continue;
         std::string peer_probe = probe_name(r);
@@ -99,7 +96,6 @@ void shm_discover_peers() {
         }
     }
 
-    // Step 4: barrier then cleanup
     MPI_Barrier(MPI_COMM_WORLD);
     shm_unlink_safe(my_probe);
 
@@ -110,9 +106,7 @@ void shm_discover_peers() {
         } else {
             std::cout << "[gpu_aware_mpi] shm discovery: rank 0 can reach "
                       << g_shm_peers.size() << " peer(s) via /dev/shm:";
-            for (int p : g_shm_peers) {
-                std::cout << " " << p;
-            }
+            for (int p : g_shm_peers) std::cout << " " << p;
             std::cout << std::endl;
         }
     }
@@ -125,16 +119,10 @@ bool shm_is_peer(int peer_rank) {
 }
 
 // ---------------------------------------------------------------------------
-// Channel creation / lookup
+// Peer-pair barrier
 // ---------------------------------------------------------------------------
 
-// Synchronize only the two ranks that share a channel.
-// MPI_Barrier(MPI_COMM_WORLD) inside create_channel is wrong because channel
-// creation is triggered lazily (on first use / on grow), so different rank
-// pairs hit the barrier at different times — causing mismatched barriers and
-// corrupted channel state.  A pairwise MPI_Sendrecv affects only the two
-// peers involved and is safe to call from any point in the program.
-static constexpr int PEER_SYNC_TAG = 43;  // distinct from SHM_CTRL_TAG = 42
+static constexpr int PEER_SYNC_TAG = 43;
 
 static void peer_sync(int peer_rank) {
     char s = 0, r = 0;
@@ -143,13 +131,26 @@ static void peer_sync(int peer_rank) {
                  MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 }
 
+// ---------------------------------------------------------------------------
+// Channel creation
+//
+//   2 halves × [SHM_NUM_SLOTS × (ShmSlotHeader(64B) + data(capacity))
+//                       + atomic<uint64_t>(8B) reader_done]
+//
+// The lower-rank process creates and initializes the shm file; the higher-rank
+// process maps it read-write after a pairwise sync.
+// ---------------------------------------------------------------------------
+
 static ShmChannel create_channel(int peer_rank, size_t capacity) {
     int rank;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
     std::string name = channel_name(rank, peer_rank);
-    size_t half_size = sizeof(ShmHeader) + capacity;
-    size_t total     = 2 * half_size;
+
+    // Compute sizes using the same formulas as ShmChannel member functions.
+    size_t slot_stride = sizeof(ShmSlotHeader) + capacity;
+    size_t half_size   = SHM_NUM_SLOTS * slot_stride + sizeof(std::atomic<uint64_t>);
+    size_t total       = 2 * half_size;
 
     int lo = std::min(rank, peer_rank);
     int fd;
@@ -158,13 +159,12 @@ static ShmChannel create_channel(int peer_rank, size_t capacity) {
         fd = shm_open(name.c_str(), O_CREAT | O_RDWR, 0666);
         if (fd < 0)
             throw std::runtime_error("shm_open create failed: " + std::string(strerror(errno)));
-        if (ftruncate(fd, total) != 0) {
+        if (ftruncate(fd, static_cast<off_t>(total)) != 0) {
             close(fd);
             throw std::runtime_error("ftruncate failed: " + std::string(strerror(errno)));
         }
     }
 
-    // Sync so the shm file exists before the higher rank opens it.
     peer_sync(peer_rank);
 
     if (rank != lo) {
@@ -178,34 +178,65 @@ static ShmChannel create_channel(int peer_rank, size_t capacity) {
     if (ptr == MAP_FAILED)
         throw std::runtime_error("mmap failed: " + std::string(strerror(errno)));
 
-    // Lower rank initialises both headers.
+    // Lower rank zero-initializes all slot headers and reader_done atomics
+    // via placement new so atomics are in a valid state.
     if (rank == lo) {
+        char* base = static_cast<char*>(ptr);
         for (int h = 0; h < 2; ++h) {
-            auto* hdr = reinterpret_cast<ShmHeader*>(
-                static_cast<char*>(ptr) + h * half_size);
-            memset(hdr, 0, sizeof(ShmHeader));
-            hdr->capacity = capacity;
+            char* half_base = base + h * half_size;
+            for (int s = 0; s < SHM_NUM_SLOTS; ++s) {
+                auto* hdr = reinterpret_cast<ShmSlotHeader*>(
+                    half_base + static_cast<size_t>(s) * slot_stride);
+                new (hdr) ShmSlotHeader();   // placement new: seq=0, nbytes=0
+                hdr->capacity = capacity;
+            }
+            // Placement-new the reader_done atomic after the last slot.
+            auto* rd = reinterpret_cast<std::atomic<uint64_t>*>(
+                half_base + SHM_NUM_SLOTS * slot_stride);
+            new (rd) std::atomic<uint64_t>(0);
         }
     }
 
-    // Sync so the higher rank doesn't read uninitialised headers.
-    peer_sync(peer_rank);
+    peer_sync(peer_rank);   // higher rank waits for initialization
 
     bool registered = false;
 #if defined(USE_CUDA) || defined(USE_ROCM)
-    if (cudaHostRegister(ptr, total, cudaHostRegisterDefault) == cudaSuccess)
+    int reg_flags = cudaHostRegisterPortable | cudaHostRegisterMapped;
+    auto reg_result = cudaHostRegister(ptr, total, reg_flags);
+    if (reg_result == cudaSuccess) {
         registered = true;
+    } else {
+        std::cerr << "[gpu_aware_mpi] cudaHostRegister failed with code "
+                  << reg_result << ", falling back to unregistered shm" << std::endl;
+    }
 #endif
 
     if (rank == 0) {
         std::cout << "[gpu_aware_mpi] shm channel: " << name
-                  << " created (" << (capacity / (1024 * 1024)) << " MB x2"
+                  << " created (" << (capacity / (1024 * 1024))
+                  << " MB x" << SHM_NUM_SLOTS << " slots x2 dirs"
                   << ", cudaHostRegister=" << (registered ? "yes" : "no")
                   << ")" << std::endl;
     }
 
-    return ShmChannel{peer_rank, ptr, total, registered, capacity, rank < peer_rank};
+    ShmChannel ch;
+    ch.peer_rank    = peer_rank;
+    ch.mapped       = ptr;
+    ch.mapped_size  = total;
+    ch.registered   = registered;
+    ch.half_capacity = capacity;
+    ch.is_lower     = (rank < peer_rank);
+
+    // Wire up the sender's reader_done pointer to the shm atomic so the
+    // receiver's increment is visible to the sender's slot-acquire spin.
+    ch.send_state.reader_done_shm = ch.reader_done_ptr(ch.send_half());
+
+    return ch;
 }
+
+// ---------------------------------------------------------------------------
+// shm_get_channel  
+// ---------------------------------------------------------------------------
 
 ShmChannel& shm_get_channel(int peer_rank, size_t min_capacity) {
     auto it = g_channels.find(peer_rank);
@@ -213,9 +244,9 @@ ShmChannel& shm_get_channel(int peer_rank, size_t min_capacity) {
         return it->second;
     }
 
-    // Need to create or grow. If growing, tear down old first.
     int rank;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
     if (it != g_channels.end()) {
         if (rank == 0) {
             std::cout << "[gpu_aware_mpi] shm channel: growing channel to peer "
@@ -227,9 +258,8 @@ ShmChannel& shm_get_channel(int peer_rank, size_t min_capacity) {
         if (old.registered) cudaHostUnregister(old.mapped);
 #endif
         munmap(old.mapped, old.mapped_size);
-        if (rank < peer_rank) {
+        if (rank < peer_rank)
             shm_unlink_safe(channel_name(rank, peer_rank));
-        }
         g_channels.erase(it);
     }
 
@@ -239,7 +269,7 @@ ShmChannel& shm_get_channel(int peer_rank, size_t min_capacity) {
 }
 
 // ---------------------------------------------------------------------------
-// Cleanup
+// Cleanup  
 // ---------------------------------------------------------------------------
 
 void shm_cleanup() {
@@ -256,9 +286,8 @@ void shm_cleanup() {
         if (ch.registered) cudaHostUnregister(ch.mapped);
 #endif
         munmap(ch.mapped, ch.mapped_size);
-        if (rank < peer) {
+        if (rank < peer)
             shm_unlink_safe(channel_name(rank, peer));
-        }
     }
     g_channels.clear();
     g_shm_peers.clear();

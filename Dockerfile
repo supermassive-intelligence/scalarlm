@@ -268,7 +268,7 @@ WORKDIR ${INSTALL_ROOT}
 FROM vllm AS infra
 
 # Build GPU-aware MPI
-COPY ./infra/cray_infra/training/gpu_aware_mpi ${INSTALL_ROOT}/infra/cray_infra/training/gpu_aware_mpi
+COPY ./infra/cray_infra/training/gpu_aware_mpi/ ${INSTALL_ROOT}/infra/cray_infra/training/gpu_aware_mpi/
 RUN python3 ${INSTALL_ROOT}/infra/cray_infra/training/gpu_aware_mpi/setup.py bdist_wheel --dist-dir=dist && \
     pip install dist/*.whl
 

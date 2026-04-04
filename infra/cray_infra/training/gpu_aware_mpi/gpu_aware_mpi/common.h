@@ -8,6 +8,7 @@
 #include <tuple>
 #include <string>
 #include <vector>
+#include <cstdint>
 
 // ---------------------------------------------------------------------------
 // MPI lifecycle
@@ -56,6 +57,21 @@ inline MPI_Datatype get_mpi_datatype(const torch::Tensor& tensor) {
 }
 
 // ---------------------------------------------------------------------------
+// ShmSignal
+//
+// Payload sent via MPI_Isend/MPI_Irecv from sender to receiver on the shm
+// fast path.  Carries the generation counter and slot index so the receiver
+// can spin-wait for the exact write it expects.
+//
+// ---------------------------------------------------------------------------
+struct ShmSignal {
+    uint64_t gen;       // generation the receiver must spin-wait for (slot.seq == gen)
+    uint32_t slot_idx;  // which of the SHM_NUM_SLOTS to read from
+    uint32_t _pad{0};   // pad to 16 bytes
+};
+static_assert(sizeof(ShmSignal) == 16, "ShmSignal must be 16 bytes");
+
+// ---------------------------------------------------------------------------
 // Async request handle
 //
 // Both the standard MPI path and the shm path return an MpiRequest.
@@ -64,21 +80,28 @@ inline MPI_Datatype get_mpi_datatype(const torch::Tensor& tensor) {
 //   mpi_req holds a real MPI_Request; on_complete is empty.
 //
 // SHM path:
-//   shm_isend: copies data into shm, then posts MPI_Isend for the 1-byte
-//              control signal.  mpi_req holds that Isend handle.
+//   shm_isend: copies data into shm, then posts MPI_Isend for the ShmSignal.
+//              mpi_req holds that Isend handle.
 //              on_complete is empty (sender has nothing to do at wait time).
-//   shm_irecv: posts MPI_Irecv for the 1-byte control signal.
-//              on_complete holds a closure that copies data out of shm into
-//              the destination tensor once the signal arrives.
+//   shm_irecv: posts MPI_Irecv for the ShmSignal.
+//              on_complete holds a closure that spin-waits on the generation
+//              counter, copies data out of shm, and releases the slot.
 //
-// The shm_sig char provides stable storage for the 1-byte signal buffer
-// required by MPI_Isend/MPI_Irecv (must outlive the MPI operation).
+// shm_sig provides stable storage for the ShmSignal buffer required by
+// MPI_Isend/MPI_Irecv (the buffer must outlive the MPI operation).
+//
 // ---------------------------------------------------------------------------
 struct MpiRequest {
     MPI_Request           mpi_req    = MPI_REQUEST_NULL;
     bool                  completed  = false;
-    char                  shm_sig    = 0;    // stable buffer for shm control byte
-    std::function<void()> on_complete;       // called once by mpi_wait after MPI_Wait
+    ShmSignal             shm_sig{};         // stable MPI buffer for shm signal
+    std::function<void()> on_complete;        // called once by mpi_wait after MPI_Wait
+
+    MpiRequest() = default;
+    MpiRequest(MpiRequest&&) = default;
+    MpiRequest& operator=(MpiRequest&&) = default;
+    MpiRequest(const MpiRequest&) = delete;
+    MpiRequest& operator=(const MpiRequest&) = delete;
 };
 
 inline void mpi_wait(MpiRequest& req) {
