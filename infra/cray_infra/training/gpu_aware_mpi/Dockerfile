@@ -16,8 +16,7 @@
 # Build:
 #   docker build -t gpu_aware_mpi_test .
 #
-# docker run --gpus all --shm-size=8g --ipc=host --rm  \
-# --ulimit memlock=-1:-1   -e NUM_GPUS=2   gpu_aware_mpi_test
+# docker run --gpus all --shm-size=8g --ipc=host --rm  --ulimit memlock=-1:-1   -e NUM_GPUS=2   gpu_aware_mpi_test
 #
 #
 # Extra options (passed as env vars):
@@ -41,14 +40,15 @@ RUN MPICC=/opt/hpcx/ompi/bin/mpicc \
 # pointing at the top-level gpu_aware_mpi/ directory.
 WORKDIR /build
 
-COPY ./gpu_aware_mpi/ gpu_aware_mpi/
+COPY gpu_aware_mpi/ infra/cray_infra/training/gpu_aware_mpi/gpu_aware_mpi/
 
 ENV TORCH_CUDA_ARCH_LIST="8.0;8.6;9.0;12.0"
 ENV FORCE_CUDA=1
 
-# ---- build and install the wheel ----
-RUN python3 gpu_aware_mpi/setup.py \
-        bdist_wheel --dist-dir=dist \
+
+# Copy setup.py to /build and run from there
+RUN cp infra/cray_infra/training/gpu_aware_mpi/gpu_aware_mpi/setup.py . \
+    && python3 setup.py bdist_wheel --dist-dir=dist \
     && pip install dist/*.whl \
     && rm -rf dist build *.egg-info
 

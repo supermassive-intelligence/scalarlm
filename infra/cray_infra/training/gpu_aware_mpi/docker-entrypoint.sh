@@ -48,6 +48,6 @@ MPIRUN=/opt/hpcx/ompi/bin/mpirun
     --mca pml ucx \
     --mca btl ^vader \
     -x CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_IDS}" \
-    python3 /build/gpu_aware_mpi/test_gpu_aware_mpi.py \
+    python3 /build/infra/cray_infra/training/gpu_aware_mpi/gpu_aware_mpi/test_gpu_aware_mpi.py \
         --cuda-device-ids "${CUDA_DEVICE_IDS}" \
         --iterations "${ITERATIONS}"
