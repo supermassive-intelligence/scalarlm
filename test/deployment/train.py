@@ -1,6 +1,6 @@
 import scalarlm
 
-scalarlm.api_url = "http://localhost:8000"
+scalarlm.api_url = "https://qwen32b.i-blaze.com"
 
 def get_dataset():
     dataset = []
@@ -19,7 +19,8 @@ dataset = get_dataset()
 
 status = llm.train(
     dataset,
-    train_args={"max_steps": 10, "learning_rate": 3e-3, "gpus": 1, "nodes" : 1,
+    train_args={"max_steps": 3, "learning_rate": 3e-3, "gpus": 1, "nodes" : 2,
+	    "gradient_accumulation_steps": 1,
             "max_token_block_size": 4096,
             "steps_per_checkpoint": 10000},
 )
