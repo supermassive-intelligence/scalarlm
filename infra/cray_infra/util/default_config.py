@@ -16,6 +16,8 @@ class Config(BaseModel):
     #model: str = "Qwen/Qwen2-7B-Instruct"
     #model: str = "Qwen/Qwen2-VL-7B-Instruct"
 
+    inference_only: bool = False  # Skip training background tasks
+
 
     # 10GB using 1024 for KB, 1024 for MB, 1024 for GB
     max_upload_file_size: int = 1024 * 1024 * 1024 * 10
