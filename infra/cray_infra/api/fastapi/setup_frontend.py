@@ -49,6 +49,12 @@ async def setup_frontend():
     """Start the frontend process if it's not already running."""
     global frontend_task
 
+    # Skip frontend setup if not in Docker (native execution)
+    frontend_entrypoint_path = "/app/ui/entrypoint.sh"
+    if not os.path.exists(frontend_entrypoint_path):
+        logger.info("Frontend entrypoint not found - skipping (native execution mode)")
+        return
+
     if frontend_task is not None and not frontend_task.done():
         logger.info("Frontend is already running. Skipping setup.")
         return

@@ -1,15 +1,10 @@
 """
 OpenAI v1 API Router - Standard OpenAI-compatible endpoints.
 These endpoints are exposed directly under /v1/ to match OpenAI API spec.
+
+Note: This router supports both vLLM and vllm-mlx backends through conditional imports.
+The backend is selected via SCALARLM_VLLM_BACKEND environment variable.
 """
-
-from vllm.entrypoints.openai.completion.protocol import (
-    CompletionRequest,
-)
-
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
 
 from cray_infra.api.fastapi.aiohttp.get_global_session import get_global_session
 from cray_infra.util.get_config import get_config
@@ -18,8 +13,19 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 import logging
+import os
 
 logger = logging.getLogger(__name__)
+
+# Conditional imports based on backend
+backend = os.environ.get("SCALARLM_VLLM_BACKEND", "vllm")
+
+if backend == "mlx":
+    from vllm_mlx.entrypoints.openai.completion.protocol import CompletionRequest
+    from vllm_mlx.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+else:
+    from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 
 openai_v1_router = APIRouter()
 
@@ -137,4 +143,3 @@ async def create_chat_completions(request: ChatCompletionRequest, raw_request: R
         return StreamingResponse(content=generator(), media_type="text/event-stream")
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
-# test
