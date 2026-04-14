@@ -86,12 +86,14 @@ def get_node_info():
 
 
 def get_machine_id():
-    machine_id = None
     try:
         return get_board_serial()
+    except FileNotFoundError:
+        # dmidecode not installed — common in minimal containers.
+        return None
     except Exception as e:
-        logger.error(f"Error reading machine ID: {e}")
-    return machine_id
+        logger.debug(f"Error reading machine ID: {e}")
+        return None
 
 
 def get_board_serial() -> str | None:

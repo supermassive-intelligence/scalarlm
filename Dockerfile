@@ -34,6 +34,14 @@ ENV TORCHINDUCTOR_COORDINATE_DESCENT_TUNING=0
 ENV TORCH_COMPILE_DISABLE=1
 
 ###############################################################################
+# NVIDIA DGX SPARK BASE IMAGE
+# aarch64 Grace CPU + Blackwell GPU (SM 12.0). The NGC PyTorch image is
+# multi-arch, so pulling this tag on linux/arm64 yields the aarch64 variant.
+FROM nvidia AS spark
+
+ENV BASE_NAME=spark
+
+###############################################################################
 # CPU BASE IMAGE
 FROM ubuntu:24.04 AS cpu
 
@@ -275,14 +283,15 @@ RUN python3 ${INSTALL_ROOT}/infra/cray_infra/training/gpu_aware_mpi/setup.py bdi
 RUN apt-get update -y  \
     && apt-get install -y build-essential \
     less curl wget net-tools vim iputils-ping strace gdb python3-dbg python3-dev \
+    dmidecode \
     && rm -rf /var/lib/apt/lists/*
 
 # Setup python path
-ENV PYTHONPATH="${PYTHONPATH:-}:${INSTALL_ROOT}/infra"
-ENV PYTHONPATH="${PYTHONPATH:-}:${INSTALL_ROOT}/sdk"
-ENV PYTHONPATH="${PYTHONPATH:-}:${INSTALL_ROOT}/ml"
-ENV PYTHONPATH="${PYTHONPATH:-}:${INSTALL_ROOT}/test"
-ENV PYTHONPATH="${PYTHONPATH:-}:${INSTALL_ROOT}/vllm"
+ENV PYTHONPATH="${INSTALL_ROOT}/infra"
+ENV PYTHONPATH="${PYTHONPATH}:${INSTALL_ROOT}/sdk"
+ENV PYTHONPATH="${PYTHONPATH}:${INSTALL_ROOT}/ml"
+ENV PYTHONPATH="${PYTHONPATH}:${INSTALL_ROOT}/test"
+ENV PYTHONPATH="${PYTHONPATH}:${INSTALL_ROOT}/vllm"
 
 # Megatron dependencies (GPU only)
 # note this has to happen after vllm because it overrides some packages installed by vllm

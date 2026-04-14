@@ -18,6 +18,13 @@ elif [ "$target" == "amd" ]; then
     vllm_target_device=("rocm")
     docker_platform=("linux/amd64")
     sm_arch="gfx942"
+elif [ "$target" == "spark" ]; then
+    # NVIDIA DGX Spark: aarch64 Grace CPU + Blackwell GPU (SM 12.0).
+    vllm_target_device=("cuda")
+    docker_platform=("linux/arm64")
+    if [ "$sm_arch" == "auto" ]; then
+        sm_arch="12.0"
+    fi
 else
     vllm_target_device=("cuda")
     docker_platform=("linux/amd64")

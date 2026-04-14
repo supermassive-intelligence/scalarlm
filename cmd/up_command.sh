@@ -20,6 +20,14 @@ elif [ "$target" == "amd" ]; then
     docker_compose_service="cray-amd"
     docker_platform="linux/amd64"
     sm_arch="gfx942"
+elif [ "$target" == "spark" ]; then
+    # NVIDIA DGX Spark: aarch64 Grace CPU + Blackwell GPU (SM 12.0).
+    vllm_target_device=("cuda")
+    docker_compose_service="cray-spark"
+    docker_platform="linux/arm64"
+    if [ "$sm_arch" == "auto" ]; then
+        sm_arch="12.0"
+    fi
 else
     vllm_target_device=("cuda")
     docker_compose_service="cray-nvidia"
