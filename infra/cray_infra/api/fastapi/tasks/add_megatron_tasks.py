@@ -14,8 +14,14 @@ from contextlib import asynccontextmanager
 import traceback
 import sys
 import logging
+import shutil
 
 logger = logging.getLogger(__name__)
+
+
+def is_slurm_available() -> bool:
+    """Check if SLURM is available on the system."""
+    return shutil.which("squeue") is not None
 
 
 @asynccontextmanager
@@ -24,12 +30,22 @@ async def add_megatron_tasks(app):
 
     megatron_refresh_period = config["megatron_refresh_period"]
 
+    # Check if SLURM is available - skip training tasks if not
+    slurm_available = is_slurm_available()
+    if not slurm_available:
+        logger.info("SLURM not available - skipping training-related background tasks")
+        logger.info("Running in inference-only mode (MLX or non-SLURM environment)")
+
     @repeat_every(seconds=megatron_refresh_period)
     async def run_megatron_tasks():
         try:
-            await register_megatron_models()
-            await restart_megatron_jobs()
-            await register_megatron_workers()
+            # Only run SLURM-dependent tasks if SLURM is available
+            if slurm_available:
+                await register_megatron_models()
+                await restart_megatron_jobs()
+                await register_megatron_workers()
+
+            # Always run queue cleanup and frontend setup
             await clear_acked_requests_from_queue()
             await setup_frontend()
         except Exception as e:

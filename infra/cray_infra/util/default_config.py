@@ -4,15 +4,7 @@ from typing import Optional
 
 class Config(BaseModel):
     api_url: str = "http://localhost:8000"
-
     model: str = "tiny-random/qwen3"
-    #model: str = "google/gemma-3-270m-it"
-    #model: str = "yujiepan/qwen3-moe-tiny-random"
-    #model: str = "masint/tiny-random-llama"
-    #model: str = "masint/tiny-random-qwen2-vl"
-    #model: str = "Snowflake/Arctic-Text2SQL-R1-7B"
-    #model: str = "Qwen/Qwen2-7B-Instruct"
-    #model: str = "Qwen/Qwen2-VL-7B-Instruct"
 
 
     # 10GB using 1024 for KB, 1024 for MB, 1024 for GB
@@ -65,4 +57,11 @@ class Config(BaseModel):
 
     hf_encrypted_token: bytes = b"gAAAAABpyvSQu2QUlUfp-YavLwueXqCU0j2Lhe9Lddij4B-qV3JngfcH4uCtjVGXlWAyM2o91nZXhsS3B3q3zKNiLxnxhFpJd0ddbwWPysez2OpZX4jTFOA9-xjQVk454A_qk6pdJxMv"
     encryption_key: bytes = b"JAJOZunNSRFeXWXWVVVJfiKSzdzFMw0yFn8_JK50h60="
+
+    # MLX-specific configuration (Apple Silicon)
+    mlx_backend: bool = False  # Auto-detected based on platform, can be explicitly set
+    mlx_dtype: str = "float32"  # Options: float32, float16, bfloat16
+    mlx_quantization: str = "4bit"  # Options: 4bit, 8bit, or None
+    unified_memory_fraction: float = 0.8  # Fraction of unified memory to use
+    jobs_dir: str = "/app/cray/jobs"  # Directory containing training job checkpoints
 
