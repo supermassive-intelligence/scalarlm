@@ -6,20 +6,33 @@ version: 0.5.0
 commands:
 
 - name: build-image
-  help: Build image from dockerfile
+  help: |-
+    Build image from dockerfile.
+    Targets:
+      cpu    - CPU-only image; auto-detects host arch (x86_64 or arm64).
+      nvidia - NVIDIA CUDA image for x86_64 hosts. Pass sm_arch to pick GPU.
+      arm    - (stub) reserved for cross-built arm64 CPU image.
+      amd    - AMD ROCm image for MI300-class GPUs (x86_64).
+      spark  - NVIDIA DGX Spark: aarch64 Grace CPU + Blackwell GPU (sm_arch=12.0).
   args:
     - name: target
-      allowed: ["cpu", "nvidia", "arm", "amd"]
+      allowed: ["cpu", "nvidia", "arm", "amd", "spark"]
       default: "cpu"
     - name: sm_arch
       help: GPU streaming multiprocessor architecture, e.g. 7.5, 8.0, 8.6, 12.0, auto
       default: "auto"
 
 - name: up
-  help: Start the container
+  help: |-
+    Start the container.
+    Targets:
+      cpu    - CPU-only (x86_64 or arm64 host).
+      nvidia - NVIDIA CUDA on x86_64.
+      amd    - AMD ROCm on x86_64.
+      spark  - NVIDIA DGX Spark (aarch64 Grace + Blackwell, sm_arch=12.0).
   args:
     - name: target
-      allowed: ["cpu", "nvidia", "amd"]
+      allowed: ["cpu", "nvidia", "amd", "spark"]
       default: "cpu"
     - name: sm_arch
       allowed: ["7.5", "8.6", "12.0", "auto"]

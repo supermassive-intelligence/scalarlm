@@ -20,17 +20,24 @@ class TokenformerAdapter(nn.Module):
         self.head_dim = hidden_size // self.num_heads
         self.tokenformer_r = get_config()["tokenformer_r"]
 
+        # Force floating-point storage so the parameters can carry gradients.
+        # Under quantized loading contexts (e.g. NVFP4) the default dtype may
+        # be a non-float type derived from the base layer's packed weights,
+        # which would make `nn.Parameter(..., requires_grad=True)` fail.
+        default_dtype = torch.get_default_dtype()
+        param_dtype = default_dtype if default_dtype.is_floating_point else torch.float32
+
         self.tokenformer_k = nn.Parameter(
-            torch.zeros(self.num_heads, self.hidden_size, device=device)
+            torch.zeros(self.num_heads, self.hidden_size, device=device, dtype=param_dtype)
         )
         self.tokenformer_v = nn.Parameter(
             torch.zeros(
-                self.num_heads, self.hidden_size * self.tokenformer_r, device=device
+                self.num_heads, self.hidden_size * self.tokenformer_r, device=device, dtype=param_dtype
             )
         )
 
         self.tokenformer_p = nn.Parameter(
-            torch.zeros(self.tokenformer_r, self.hidden_size, device=device)
+            torch.zeros(self.tokenformer_r, self.hidden_size, device=device, dtype=param_dtype)
         )
 
         self.reset_parameters()

@@ -51,6 +51,19 @@ services:
                         - driver: nvidia
                           capabilities: [gpu]
 
+    cray-spark:
+        <<: *cray
+        runtime: nvidia
+        restart: unless-stopped
+        cap_add:
+          - SYS_PTRACE
+        deploy:
+            resources:
+                reservations:
+                    devices:
+                        - driver: nvidia
+                          capabilities: [gpu]
+
     cray-amd:
         <<: *cray
         devices:
