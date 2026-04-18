@@ -3,6 +3,7 @@
 #include <mpi.h>
 #include <torch/extension.h>
 #include <torch/cuda.h>
+#include <cstdint>
 #include <functional>
 #include <stdexcept>
 #include <tuple>
@@ -56,6 +57,27 @@ inline MPI_Datatype get_mpi_datatype(const torch::Tensor& tensor) {
 }
 
 // ---------------------------------------------------------------------------
+// ShmSignal
+//
+// 16-byte payload sent via MPI_Isend/MPI_Irecv as the "data ready" ping on
+// the shm fast path.  Carries the generation counter and the slot index so
+// the receiver can spin-wait on the exact slot/generation it expects.  The
+// generation counter lets the sender pipeline (double-buffered slots in
+// shm_channel.h) without ambiguity about which write the signal refers to,
+// and closes the memory-visibility window where an MPI signal could be
+// observed before the memcpy it guards becomes visible on the peer's core.
+//
+// Fixed 16 bytes so the on-wire representation matches a primitive type
+// group the MPI implementation will always treat as eager.
+// ---------------------------------------------------------------------------
+struct ShmSignal {
+    uint64_t gen;        // generation the receiver must spin-wait for (slot.seq == gen)
+    uint32_t slot_idx;   // which of the channel's slots the sender wrote
+    uint32_t _pad{0};    // pad to 16 bytes; explicit so layout is stable
+};
+static_assert(sizeof(ShmSignal) == 16, "ShmSignal must be 16 bytes on the wire");
+
+// ---------------------------------------------------------------------------
 // Async request handle
 //
 // Both the standard MPI path and the shm path return an MpiRequest.
@@ -64,21 +86,32 @@ inline MPI_Datatype get_mpi_datatype(const torch::Tensor& tensor) {
 //   mpi_req holds a real MPI_Request; on_complete is empty.
 //
 // SHM path:
-//   shm_isend: copies data into shm, then posts MPI_Isend for the 1-byte
-//              control signal.  mpi_req holds that Isend handle.
-//              on_complete is empty (sender has nothing to do at wait time).
-//   shm_irecv: posts MPI_Irecv for the 1-byte control signal.
-//              on_complete holds a closure that copies data out of shm into
-//              the destination tensor once the signal arrives.
+//   shm_isend: copies data into shm, then posts MPI_Isend for the ShmSignal.
+//              mpi_req holds that Isend handle.  on_complete is empty — the
+//              sender has nothing to do at wait time.
+//   shm_irecv: posts MPI_Irecv for the ShmSignal.  on_complete holds a
+//              closure that (a) spin-waits for slot.seq == signal.gen, then
+//              (b) memcpys the payload out of shm, then (c) bumps the
+//              receiver-side reader_done counter to unblock the sender's
+//              backpressure on the next reuse of this slot.
 //
-// The shm_sig char provides stable storage for the 1-byte signal buffer
-// required by MPI_Isend/MPI_Irecv (must outlive the MPI operation).
+// shm_sig provides stable storage for the ShmSignal buffer required by
+// MPI_Isend/MPI_Irecv (the buffer must outlive the MPI operation).  Because
+// an in-flight MPI_Request must not be copied behind MPI's back, MpiRequest
+// is move-only — the deleted copy operators make accidental copies a
+// compile-time error rather than a runtime double-wait.
 // ---------------------------------------------------------------------------
 struct MpiRequest {
     MPI_Request           mpi_req    = MPI_REQUEST_NULL;
     bool                  completed  = false;
-    char                  shm_sig    = 0;    // stable buffer for shm control byte
-    std::function<void()> on_complete;       // called once by mpi_wait after MPI_Wait
+    ShmSignal             shm_sig{};       // stable MPI buffer for the shm signal
+    std::function<void()> on_complete;      // called once by mpi_wait after MPI_Wait
+
+    MpiRequest() = default;
+    MpiRequest(MpiRequest&&) noexcept = default;
+    MpiRequest& operator=(MpiRequest&&) noexcept = default;
+    MpiRequest(const MpiRequest&) = delete;
+    MpiRequest& operator=(const MpiRequest&) = delete;
 };
 
 inline void mpi_wait(MpiRequest& req) {

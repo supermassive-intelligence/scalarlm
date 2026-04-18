@@ -8,6 +8,7 @@
 #include <cstring>
 #include <algorithm>
 #include <iostream>
+#include <new>
 
 #ifdef USE_CUDA
 #include <cuda_runtime.h>
@@ -30,7 +31,10 @@ static bool                                 g_discovery_done = false;
 static const char* SHM_PREFIX     = "scalarlm_";
 static const char* PROBE_PREFIX   = "scalarlm_probe_";
 
-// Default initial capacity for the data buffer (256 MB).
+// Default initial per-slot capacity (256 MB).  With SHM_NUM_SLOTS=2 the full
+// mmap region for a directed half-channel is
+//   2 * (sizeof(ShmSlotHeader) + 256 MB) + sizeof(atomic<uint64_t>)
+// so about 512 MB of shm per direction, 1 GB per peer pair.
 static constexpr size_t DEFAULT_CAPACITY = 256ULL * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
@@ -49,6 +53,14 @@ static std::string channel_name(int rank_a, int rank_b) {
 
 static void shm_unlink_safe(const std::string& name) {
     shm_unlink(name.c_str());  // ignore errors (may not exist)
+}
+
+// Total mmap bytes required for a channel with `per_slot_capacity` bytes per
+// slot.  Two halves, each with SHM_NUM_SLOTS slots + one atomic reader_done.
+static size_t channel_bytes_for_capacity(size_t per_slot_capacity) {
+    size_t slot_stride = sizeof(ShmSlotHeader) + per_slot_capacity;
+    size_t half_size   = SHM_NUM_SLOTS * slot_stride + sizeof(std::atomic<uint64_t>);
+    return 2 * half_size;
 }
 
 // ---------------------------------------------------------------------------
@@ -143,13 +155,34 @@ static void peer_sync(int peer_rank) {
                  MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 }
 
+// Initialise the per-slot headers and reader_done counter for one half.
+// Uses placement new because std::atomic is not trivially copyable — we
+// mmap raw bytes, so the atomic has to be constructed in place.
+static void init_half_in_place(void* half_base, size_t per_slot_capacity) {
+    size_t slot_stride = sizeof(ShmSlotHeader) + per_slot_capacity;
+    for (int s = 0; s < SHM_NUM_SLOTS; ++s) {
+        auto* hdr = reinterpret_cast<ShmSlotHeader*>(
+            static_cast<char*>(half_base) + s * slot_stride);
+        // Zero first to wipe any leftover state from a recycled shm file,
+        // then placement-new the header so its atomic<seq> is well-defined.
+        std::memset(hdr, 0, sizeof(ShmSlotHeader));
+        new (hdr) ShmSlotHeader();
+        hdr->capacity = per_slot_capacity;
+    }
+    auto* rd = reinterpret_cast<std::atomic<uint64_t>*>(
+        static_cast<char*>(half_base) + SHM_NUM_SLOTS * slot_stride);
+    std::memset(rd, 0, sizeof(std::atomic<uint64_t>));
+    new (rd) std::atomic<uint64_t>(0);
+}
+
 static ShmChannel create_channel(int peer_rank, size_t capacity) {
     int rank;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
-    std::string name = channel_name(rank, peer_rank);
-    size_t half_size = sizeof(ShmHeader) + capacity;
-    size_t total     = 2 * half_size;
+    std::string name  = channel_name(rank, peer_rank);
+    size_t slot_stride = sizeof(ShmSlotHeader) + capacity;
+    size_t half_size   = SHM_NUM_SLOTS * slot_stride + sizeof(std::atomic<uint64_t>);
+    size_t total       = channel_bytes_for_capacity(capacity);
 
     int lo = std::min(rank, peer_rank);
     int fd;
@@ -178,14 +211,10 @@ static ShmChannel create_channel(int peer_rank, size_t capacity) {
     if (ptr == MAP_FAILED)
         throw std::runtime_error("mmap failed: " + std::string(strerror(errno)));
 
-    // Lower rank initialises both headers.
+    // Lower rank initialises both halves' headers + reader_done counters.
     if (rank == lo) {
-        for (int h = 0; h < 2; ++h) {
-            auto* hdr = reinterpret_cast<ShmHeader*>(
-                static_cast<char*>(ptr) + h * half_size);
-            memset(hdr, 0, sizeof(ShmHeader));
-            hdr->capacity = capacity;
-        }
+        init_half_in_place(ptr, capacity);
+        init_half_in_place(static_cast<char*>(ptr) + half_size, capacity);
     }
 
     // Sync so the higher rank doesn't read uninitialised headers.
@@ -199,12 +228,27 @@ static ShmChannel create_channel(int peer_rank, size_t capacity) {
 
     if (rank == 0) {
         std::cout << "[gpu_aware_mpi] shm channel: " << name
-                  << " created (" << (capacity / (1024 * 1024)) << " MB x2"
+                  << " created (" << SHM_NUM_SLOTS << " × "
+                  << (capacity / (1024 * 1024)) << " MB per direction"
                   << ", cudaHostRegister=" << (registered ? "yes" : "no")
                   << ")" << std::endl;
     }
 
-    return ShmChannel{peer_rank, ptr, total, registered, capacity, rank < peer_rank};
+    ShmChannel ch;
+    ch.peer_rank     = peer_rank;
+    ch.mapped        = ptr;
+    ch.mapped_size   = total;
+    ch.registered    = registered;
+    ch.half_capacity = capacity;
+    ch.is_lower      = rank < peer_rank;
+    ch.send_state    = {};
+    // The local sender's backpressure counter lives in the send half — that
+    // is, the RECEIVER (peer) writes to the reader_done counter of the half
+    // the local rank writes into.  This is the pointer the sender spins on
+    // to know when it can reuse a slot.
+    ch.send_state.reader_done_shm = ch.reader_done(ch.send_half());
+
+    return ch;
 }
 
 ShmChannel& shm_get_channel(int peer_rank, size_t min_capacity) {
