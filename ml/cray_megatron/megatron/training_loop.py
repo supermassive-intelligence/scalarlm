@@ -164,12 +164,24 @@ class TrainingLoop:
 
         start_time = time.time()
 
+        forward_kwargs = {
+            "input_ids": batch["input_ids"].to(device),
+            "attention_mask": batch["attention_mask"].to(device),
+            "labels": batch["labels"].to(device),
+        }
+
+        # Multimodal wrappers (Gemma4ForConditionalGeneration, …) require an
+        # mm_token_type_ids tensor on every training forward, even when the
+        # batch is pure text. The data loader produces text-only batches; pass
+        # zeros so non-image tokens are tagged correctly. Detected by the
+        # presence of a vision_config on the underlying model config.
+        if _is_multimodal(self.training_state.model_info.get("model_config")):
+            forward_kwargs["mm_token_type_ids"] = torch.zeros_like(
+                forward_kwargs["input_ids"]
+            )
+
         # forward pass
-        loss = self.training_state.model_info["model"](
-            input_ids=batch["input_ids"].to(device),
-            attention_mask=batch["attention_mask"].to(device),
-            labels=batch["labels"].to(device),
-        ).loss
+        loss = self.training_state.model_info["model"](**forward_kwargs).loss
 
         is_nan = torch.isnan(torch.tensor(loss))
 
@@ -408,6 +420,16 @@ def get_optimizer(model):
 def get_gradient_clip_value():
     job_config = get_job_config()
     return job_config.get("gradient_clip_value", 1.0)
+
+
+def _is_multimodal(model_config) -> bool:
+    """True for HF multimodal wrapper configs (Gemma4, etc.) — they nest a
+    `vision_config` and require mm_token_type_ids on every training forward."""
+    if model_config is None:
+        return False
+    return hasattr(model_config, "vision_config") and getattr(
+        model_config, "vision_config"
+    ) is not None
 
 def get_scheduler(optimizer, max_steps):
     return torch.optim.lr_scheduler.LinearLR(
