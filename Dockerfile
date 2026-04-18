@@ -2,7 +2,7 @@ ARG BASE_NAME=cpu
 
 ###############################################################################
 # NVIDIA BASE IMAGE
-FROM nvcr.io/nvidia/pytorch:25.10-py3 AS nvidia
+FROM nvcr.io/nvidia/pytorch:26.01-py3 AS nvidia
 
 RUN apt-get update -y && apt-get install -y python3-venv slurm-wlm libslurm-dev
 
