@@ -11,8 +11,8 @@ services:
                 - TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}
                 - BASE_NAME=${BASE_NAME}
                 - VLLM_TARGET_DEVICE=${VLLM_TARGET_DEVICE}
-                - VLLM_SOURCE=${VLLM_SOURCE:-remote}
-                - VLLM_BRANCH=${VLLM_BRANCH:-main}
+                - VLLM_SOURCE=${VLLM_SOURCE:-local}
+                - VLLM_BRANCH=${VLLM_BRANCH:-scalarlm-on-v0.19.0}
                 - VLLM_REPO=${VLLM_REPO:-https://github.com/supermassive-intelligence/vllm-fork.git}
         ports:
             - "3000:3000"

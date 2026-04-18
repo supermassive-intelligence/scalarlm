@@ -11,11 +11,10 @@ import os
 from gpu_aware_mpi import finalize_mpi, get_rank
 
 def print_exception():
-    if is_main_rank():
-        exc_type, exc_value, exc_traceback = sys.exc_info()
-        traceback.print_exception(exc_type, exc_value, exc_traceback)
-    else:
-        print(f"Rank {get_rank()} hit exception")
+    print(f"Rank {get_rank()} hit exception")
+    exc_type, exc_value, exc_traceback = sys.exc_info()
+    traceback.print_exception(exc_type, exc_value, exc_traceback)
+
 
 try:
     from cray_megatron.megatron.megatron_trainer import MegatronTrainer

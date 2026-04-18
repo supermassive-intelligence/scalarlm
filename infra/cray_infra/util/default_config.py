@@ -4,7 +4,17 @@ from typing import Optional
 
 class Config(BaseModel):
     api_url: str = "http://localhost:8000"
-    model: str = "tiny-random/qwen3"
+
+    # for MLX: model: str = "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
+    model: str = "tiny-random/gemma-4-dense"  # Fast for testing
+    #model: str = "tiny-random/qwen3"
+    #model: str = "google/gemma-3-270m-it"
+    #model: str = "yujiepan/qwen3-moe-tiny-random"
+    #model: str = "masint/tiny-random-llama"
+    #model: str = "masint/tiny-random-qwen2-vl"
+    #model: str = "Snowflake/Arctic-Text2SQL-R1-7B"
+    #model: str = "Qwen/Qwen2-7B-Instruct"
+    #model: str = "Qwen/Qwen2-VL-7B-Instruct"
 
 
     # 10GB using 1024 for KB, 1024 for MB, 1024 for GB
