@@ -56,7 +56,7 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 RUN python3 -m venv $VIRTUAL_ENV && \
     . $VIRTUAL_ENV/bin/activate
 
-ARG TORCH_VERSION="2.7.1"
+ARG TORCH_VERSION="2.10.0"
 
 RUN pip install uv && \
     uv pip install torch==${TORCH_VERSION}+cpu --index-url https://download.pytorch.org/whl/cpu && \
@@ -170,6 +170,26 @@ RUN cp -R ${INSTALL_ROOT}/chat-ui/. /app/ && \
 
 RUN git config --global --add safe.directory /app && \
     npm run build
+
+###############################################################################
+# ScalarLM React UI build stage
+#
+# Builds the first-party React SPA from ./ui into /build/dist and hands it off
+# to the final stage as /app/ui-bundle. No Node.js runtime is carried forward;
+# the final image only contains the static bundle.
+###############################################################################
+FROM node:24.2.0 AS scalarlm_ui_builder
+
+WORKDIR /build
+
+# Copy package metadata first so Docker can cache `npm ci` across source edits.
+COPY ui/package.json ui/package-lock.json* ./
+
+# Lockfile may not exist on a fresh checkout; fall back to npm install.
+RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
+
+COPY ui/ .
+RUN npm run build
 
 # mongo image
 FROM mongo:7.0.18 AS mongo
@@ -315,6 +335,10 @@ COPY ./sdk ${INSTALL_ROOT}/sdk
 COPY ./test ${INSTALL_ROOT}/test
 COPY ./ml ${INSTALL_ROOT}/ml
 COPY ./scripts ${INSTALL_ROOT}/scripts
+
+# ScalarLM React UI static bundle — served by FastAPI at /app/*.
+# Path must match SCALARLM_UI_BUNDLE_DIR in infra/cray_infra/api/fastapi/setup_ui.py.
+COPY --from=scalarlm_ui_builder /build/dist /app/ui-bundle
 
 WORKDIR ${INSTALL_ROOT}
 

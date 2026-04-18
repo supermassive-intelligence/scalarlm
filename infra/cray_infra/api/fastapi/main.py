@@ -20,6 +20,7 @@ from cray_infra.api.fastapi.tasks.add_megatron_tasks import (
 from cray_infra.api.fastapi.routers.add_chat_proxy import (
     add_chat_proxy,
 )
+from cray_infra.api.fastapi.setup_ui import add_ui
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -38,9 +39,11 @@ app.include_router(generate_router, prefix="/v1")
 app.include_router(slurm_router)
 
 add_chat_proxy(app)
+add_ui(app)
 
 origins = [
     "http://localhost:3000",
+    "http://localhost:5173",
 ]
 
 app.add_middleware(
