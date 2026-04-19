@@ -375,11 +375,21 @@ def write_cluster_info_file(cluster_info):
 
 
 def reload_slurm_configs():
+    # Check if slurmctld is reachable before attempting reconfigure
+    try:
+        result = subprocess.run(["scontrol", "ping"], capture_output=True, timeout=5)
+        if result.returncode != 0:
+            logger.debug("Slurm controller not available, skipping reconfigure")
+            return
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        logger.debug("Slurm not installed or not responding, skipping reconfigure")
+        return
+
     try:
         subprocess.run(["scontrol", "reconfigure"], check=True)
         logger.info("Slurm configurations reloaded successfully.")
     except subprocess.CalledProcessError as e:
-        logger.error(f"Failed to reload Slurm configurations: {e}")
+        logger.warning(f"Failed to reload Slurm configurations: {e}")
 
 
 if __name__ == "__main__":
