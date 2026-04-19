@@ -21,6 +21,11 @@ commands:
     - name: sm_arch
       help: GPU streaming multiprocessor architecture, e.g. 7.5, 8.0, 8.6, 12.0, auto
       default: "auto"
+  flags:
+    - long: --vllm-branch
+      arg: vllm_branch
+      help: vLLM git branch to use
+      default: "main"
 
 - name: up
   help: |-
