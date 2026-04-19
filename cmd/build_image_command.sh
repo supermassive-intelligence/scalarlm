@@ -2,7 +2,6 @@ inspect_args
 
 target=${args[target]}
 sm_arch=${args[sm_arch]}
-vllm_branch=${args[--vllm-branch]}
 
 declare -a vllm_target_device
 declare -a docker_platform
@@ -35,7 +34,7 @@ else
     fi
 fi
 
-docker_build_command="docker build --platform ${docker_platform} --build-arg BASE_NAME=${target} --build-arg TORCH_CUDA_ARCH_LIST=${sm_arch} --build-arg VLLM_TARGET_DEVICE=${vllm_target_device} --build-arg VLLM_BRANCH=${vllm_branch} -t cray:latest ."
+docker_build_command="docker build --platform ${docker_platform} --build-arg BASE_NAME=${target} --build-arg TORCH_CUDA_ARCH_LIST=${sm_arch} --build-arg VLLM_TARGET_DEVICE=${vllm_target_device} -t cray:latest ."
 
 mkdir -p vllm
 mkdir -p chat-ui
