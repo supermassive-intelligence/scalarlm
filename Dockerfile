@@ -13,6 +13,7 @@ RUN python -m venv $VIRTUAL_ENV --system-site-packages && \
 
 # Put HPC-X MPI in the PATH, i.e. mpirun
 ENV PATH=$PATH:/opt/hpcx/ompi/bin
+ARG LD_LIBRARY_PATH=""
 ENV LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}:/opt/hpcx/ompi/lib
 
 ARG TORCH_VERSION="2.9.1"
