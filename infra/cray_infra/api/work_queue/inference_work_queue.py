@@ -26,7 +26,14 @@ class InferenceWorkQueue:
 
     async def put(self, request):
         async with self.lock:
-            request["enqueue_time"] = time.time()
+            # `timestamp` is read by clear_acked_requests_from_queue to decide
+            # when to recycle a stuck unack'd row; kept for backwards
+            # compatibility with that consumer. `enqueue_time` is the same
+            # value under the new observability-friendly name used by
+            # Prometheus queue_wait_time metrics below.
+            now = time.time()
+            request["timestamp"] = now
+            request["enqueue_time"] = now
             request_id = self.queue.put(request)
 
             # Update queue depth metric
@@ -66,6 +73,10 @@ class InferenceWorkQueue:
 
                 item = raw_item["data"]
                 dequeue_time = time.time()
+                # Both names set for the same reason as in put(): timestamp
+                # is consumed by the ack-timeout recycle path, dequeue_time
+                # by the metrics emitter below.
+                item["timestamp"] = dequeue_time
                 item["dequeue_time"] = dequeue_time
                 request_id = raw_item["pqid"]
 
