@@ -1,6 +1,9 @@
 from cray_infra.api.fastapi.middleware.request_id import (
     request_id_and_log_middleware,
 )
+from cray_infra.api.fastapi.routers.openai_batches.router import (
+    openai_batches_router,
+)
 from cray_infra.api.fastapi.routers.openai_v1_router import (
     openai_v1_router,
 )
@@ -45,6 +48,7 @@ except Exception as e:
     tracer = None
 
 app.include_router(openai_v1_router, prefix="/v1")
+app.include_router(openai_batches_router, prefix="/v1")
 app.include_router(megatron_router, prefix="/v1")
 app.include_router(health_router, prefix="/v1")
 app.include_router(generate_router, prefix="/v1")
