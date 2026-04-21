@@ -17,11 +17,13 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 
 from cray_infra.api.fastapi.aiohttp.get_global_session import get_global_session
+from cray_infra.api.fastapi.routers.openai_lora import ensure_adapter_loaded
 from cray_infra.generate.flop_count import compute_flops_per_token
 from cray_infra.generate.metrics import get_metrics
+from cray_infra.training.vllm_model_manager import get_vllm_model_manager
 from cray_infra.util.get_config import get_config
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 import json
@@ -97,6 +99,7 @@ async def create_completions(request: CompletionRequest, raw_request: Request):
     config = get_config()
     params = _filter_params(request.model_dump(mode="json", exclude_none=True), _COMPLETION_ALLOWED_KEYS)
     _ensure_usage_reported(params)
+    await _ensure_model_available(params.get("model"), config)
     logger.info("Received completions request: %s", params)
     return _proxy_streaming(
         upstream_url=config["vllm_api_url"] + "/v1/completions",
@@ -112,6 +115,7 @@ async def create_chat_completions(request: ChatCompletionRequest, raw_request: R
     config = get_config()
     params = _filter_params(request.model_dump(mode="json", exclude_none=True), _CHAT_ALLOWED_KEYS)
     _ensure_usage_reported(params)
+    await _ensure_model_available(params.get("model"), config)
     logger.info("Received chat completions request: %s", params)
     return _proxy_streaming(
         upstream_url=config["vllm_api_url"] + "/v1/chat/completions",
@@ -128,6 +132,26 @@ async def create_chat_completions(request: ChatCompletionRequest, raw_request: R
 
 def _filter_params(raw: dict, allowed: tuple) -> dict:
     return {k: v for k, v in raw.items() if v is not None and k in allowed}
+
+
+async def _ensure_model_available(model_name: Optional[str], config: dict) -> None:
+    """Load a requested LoRA/tokenformer adapter into vLLM on first use.
+
+    Wraps ``ensure_adapter_loaded`` with the dependencies the handler needs
+    to supply. Any failure is surfaced as a 503 so the caller sees a clean
+    HTTP error instead of a hung stream.
+    """
+    try:
+        await ensure_adapter_loaded(
+            session=get_global_session(),
+            vllm_api_url=config["vllm_api_url"],
+            model_name=model_name,
+            model_manager=get_vllm_model_manager(),
+            training_job_directory=config["training_job_directory"],
+            base_model=config["model"],
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
 
 
 def _ensure_usage_reported(params: dict) -> None:
