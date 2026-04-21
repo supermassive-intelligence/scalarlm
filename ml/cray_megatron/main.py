@@ -50,7 +50,16 @@ def main():
 def setup_logging():
     logging.basicConfig(level=logging.DEBUG)
 
-    logging.getLogger("filelock").setLevel(logging.WARNING)
+    # Central noisy-library list lives in infra/cray_infra/util/quiet_loggers.py.
+    # Keep the inline "filelock" line too, because training jobs may run with
+    # PYTHONPATH that resolves cray_infra differently; the import guard below
+    # falls back gracefully if the helper isn't visible (e.g. unit tests).
+    try:
+        from cray_infra.util.quiet_loggers import quiet_noisy_loggers
+        quiet_noisy_loggers()
+    except Exception:
+        logging.getLogger("filelock").setLevel(logging.WARNING)
+
     logging.getLogger("cray_megatron.megatron.distribution.fsdp").setLevel(
         logging.INFO
     )
