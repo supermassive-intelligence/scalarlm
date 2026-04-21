@@ -18,6 +18,10 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 
 from cray_infra.api.fastapi.aiohttp.get_global_session import get_global_session
 from cray_infra.api.fastapi.routers.openai_lora import ensure_adapter_loaded
+from cray_infra.api.fastapi.routers.openai_queue import (
+    QueueFull,
+    get_openai_limiter,
+)
 from cray_infra.generate.flop_count import compute_flops_per_token
 from cray_infra.generate.metrics import get_metrics
 from cray_infra.training.vllm_model_manager import get_vllm_model_manager
@@ -100,12 +104,14 @@ async def create_completions(request: CompletionRequest, raw_request: Request):
     params = _filter_params(request.model_dump(mode="json", exclude_none=True), _COMPLETION_ALLOWED_KEYS)
     _ensure_usage_reported(params)
     await _ensure_model_available(params.get("model"), config)
+    slot = await _acquire_queue_slot(config["model"])
     logger.info("Received completions request: %s", params)
     return _proxy_streaming(
         upstream_url=config["vllm_api_url"] + "/v1/completions",
         params=params,
         endpoint_label="completions",
         base_model_name=config["model"],
+        queue_slot=slot,
     )
 
 
@@ -116,12 +122,14 @@ async def create_chat_completions(request: ChatCompletionRequest, raw_request: R
     params = _filter_params(request.model_dump(mode="json", exclude_none=True), _CHAT_ALLOWED_KEYS)
     _ensure_usage_reported(params)
     await _ensure_model_available(params.get("model"), config)
+    slot = await _acquire_queue_slot(config["model"])
     logger.info("Received chat completions request: %s", params)
     return _proxy_streaming(
         upstream_url=config["vllm_api_url"] + "/v1/chat/completions",
         params=params,
         endpoint_label="chat completions",
         base_model_name=config["model"],
+        queue_slot=slot,
     )
 
 
@@ -154,6 +162,22 @@ async def _ensure_model_available(model_name: Optional[str], config: dict) -> No
         raise HTTPException(status_code=503, detail=str(exc))
 
 
+async def _acquire_queue_slot(model: str):
+    """Reserve a concurrency slot for this request. Translates ``QueueFull``
+    into a 503 + ``Retry-After`` so OpenAI clients follow their standard
+    retry path instead of hanging on a saturated vLLM instance.
+    """
+    limiter = await get_openai_limiter()
+    try:
+        return await limiter.acquire(model=model)
+    except QueueFull as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=str(exc),
+            headers={"Retry-After": str(exc.retry_after)},
+        )
+
+
 def _ensure_usage_reported(params: dict) -> None:
     """For streaming requests, force vLLM to emit a final `usage` event so we
     can count tokens. OpenAI-compatible clients tolerate the extra field; the
@@ -174,6 +198,7 @@ def _proxy_streaming(
     params: dict,
     endpoint_label: str,
     base_model_name: Optional[str] = None,
+    queue_slot=None,
 ) -> StreamingResponse:
     session = get_global_session()
 
@@ -192,12 +217,18 @@ def _proxy_streaming(
                 yield chunk
 
     return StreamingResponse(
-        content=_wrap_with_metrics(upstream(), base_model_name=base_model_name),
+        content=_wrap_with_metrics(
+            upstream(), base_model_name=base_model_name, queue_slot=queue_slot
+        ),
         media_type="text/event-stream",
     )
 
 
-async def _wrap_with_metrics(source, base_model_name: Optional[str] = None):
+async def _wrap_with_metrics(
+    source,
+    base_model_name: Optional[str] = None,
+    queue_slot=None,
+):
     """Pass chunks through verbatim while keeping a sliding-window buffer so
     we can extract the terminal `usage.total_tokens` for the metrics counter.
 
@@ -210,6 +241,10 @@ async def _wrap_with_metrics(source, base_model_name: Optional[str] = None):
     multiply token_count by per-token FLOPs (cached by
     ``compute_flops_per_token``) so the observability counter matches Path
     A's worker-side reporting.
+
+    ``queue_slot`` (when provided) is released in the finally so the
+    concurrency limiter frees the slot whether the stream completed
+    normally, errored, or the client disconnected.
 
     The metrics counter is balanced even on errors / client disconnect: the
     finally block always fires record_completed_request to keep queue_depth
@@ -240,6 +275,11 @@ async def _wrap_with_metrics(source, base_model_name: Optional[str] = None):
             token_count=token_count,
             flop_count=flop_count,
         )
+        if queue_slot is not None:
+            try:
+                await queue_slot.release()
+            except Exception:  # noqa: BLE001 — releasing must never mask the real error
+                logger.exception("Failed to release OpenAI proxy queue slot")
 
 
 def _extract_token_count(payload: bytes) -> Optional[int]:

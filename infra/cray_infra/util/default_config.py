@@ -43,6 +43,14 @@ class Config(BaseModel):
     inference_work_queue_idle_time: int = 5 # seconds
     inference_work_queue_ack_timeout: int = 300 # seconds
 
+    # Bound on concurrent calls the OpenAI-compatible proxy forwards to vLLM.
+    # A semaphore keeps at most `openai_queue_concurrency` requests in flight
+    # at once; extras wait. Overflow beyond `openai_queue_max_depth` gets
+    # 503 + Retry-After rather than queued indefinitely.
+    openai_queue_concurrency: int = 16
+    openai_queue_max_depth: int = 256
+    openai_queue_retry_after_seconds: int = 1
+
     inference_work_queue_path: str = "/app/cray/inference_work_queue.sqlite"
     upload_base_path: str = "/app/cray/inference_requests"
 
