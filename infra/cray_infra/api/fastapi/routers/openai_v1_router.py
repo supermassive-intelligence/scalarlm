@@ -18,6 +18,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 
 from cray_infra.api.fastapi.aiohttp.get_global_session import get_global_session
 from cray_infra.api.fastapi.routers.openai_lora import ensure_adapter_loaded
+from cray_infra.api.fastapi.routers.openai_prompts import count_prompts
 from cray_infra.api.fastapi.routers.openai_queue import (
     QueueFull,
     get_openai_limiter,
@@ -99,13 +100,23 @@ async def list_models():
 
 @openai_v1_router.post("/completions")
 async def create_completions(request: CompletionRequest, raw_request: Request):
-    """Create completions - proxy to vLLM server."""
+    """Create completions - proxy to vLLM server.
+
+    Accepts the OpenAI-spec ``prompt`` shape: ``str``, ``list[str]``,
+    ``list[int]``, or ``list[list[int]]``. Array prompts pass through to
+    vLLM unchanged and come back as a ``choices`` array of matching length.
+    """
     config = get_config()
     params = _filter_params(request.model_dump(mode="json", exclude_none=True), _COMPLETION_ALLOWED_KEYS)
     _ensure_usage_reported(params)
     await _ensure_model_available(params.get("model"), config)
     slot = await _acquire_queue_slot(config["model"])
-    logger.info("Received completions request: %s", params)
+    logger.info(
+        "completions request: model=%s prompts=%d stream=%s",
+        params.get("model"),
+        count_prompts(params.get("prompt")),
+        bool(params.get("stream")),
+    )
     return _proxy_streaming(
         upstream_url=config["vllm_api_url"] + "/v1/completions",
         params=params,
