@@ -6,6 +6,7 @@ os.environ["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "true"
 from cray_infra.one_server.start_cray_server import start_cray_server
 from cray_infra.one_server.create_generate_worker import kill_vllm_container
 from cray_infra.util.get_config import get_config
+from cray_infra.util.quiet_loggers import quiet_noisy_loggers
 
 from uvicorn.supervisors import ChangeReload
 import uvicorn
@@ -59,6 +60,7 @@ logging.basicConfig(level=logging.DEBUG,
         logging.StreamHandler()
     ]
 )
+quiet_noisy_loggers()
 
 def main():
     try:
