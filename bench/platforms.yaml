@@ -1,0 +1,73 @@
+# Per-platform sweep caps for the benchmark scenarios defined in
+# enhance-openai-api.md. Each platform declares the concurrency levels
+# to run for each scenario. Keep the lists explicit rather than
+# expressing them as a grid — some levels are skipped on purpose (e.g.
+# 1M on M5 hits client fd limits before it tests anything meaningful).
+
+mac-m5:
+  model: Qwen/Qwen3-4B-Instruct-2507
+  workers: 1
+  nop_concurrency:
+    - 10
+    - 100
+    - 1000
+    - 10000
+  pathb_chat_single_concurrency:
+    - 1
+    - 10
+    - 100
+    - 1000
+  bulk_prompt_count:
+    - 1
+    - 10
+    - 100
+
+dgx-spark:
+  model: nvidia/Qwen3-32B-NVFP4
+  workers: 1
+  nop_concurrency:
+    - 10
+    - 100
+    - 1000
+    - 10000
+    - 100000
+    - 1000000
+  pathb_chat_single_concurrency:
+    - 1
+    - 10
+    - 100
+    - 1000
+    - 10000
+  bulk_prompt_count:
+    - 1
+    - 10
+    - 100
+    - 1000
+    - 10000
+
+blackwell-4gpu:
+  model: nvidia/Qwen3-Next-80B-A3B-Instruct-NVFP4
+  workers: 4
+  nop_concurrency:
+    - 10
+    - 100
+    - 1000
+    - 10000
+    - 100000
+    - 1000000
+  pathb_chat_single_concurrency:
+    - 1
+    - 10
+    - 100
+    - 1000
+    - 10000
+    - 100000
+    - 1000000
+  bulk_prompt_count:
+    - 1
+    - 10
+    - 100
+    - 1000
+    - 10000
+    - 100000
+    - 1000000

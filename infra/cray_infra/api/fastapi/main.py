@@ -1,6 +1,9 @@
 from cray_infra.api.fastapi.middleware.request_id import (
     request_id_and_log_middleware,
 )
+from cray_infra.api.fastapi.routers.bench_router import (
+    bench_router,
+)
 from cray_infra.api.fastapi.routers.openai_batches.router import (
     openai_batches_router,
 )
@@ -50,6 +53,15 @@ except Exception as e:
 app.include_router(openai_v1_router, prefix="/v1")
 app.include_router(openai_batches_router, prefix="/v1")
 app.include_router(megatron_router, prefix="/v1")
+
+try:
+    from cray_infra.util.get_config import get_config
+    if get_config().get("bench_endpoints_enabled"):
+        app.include_router(bench_router, prefix="/v1")
+        logger.info("Benchmark endpoints enabled at /v1/bench/*")
+except Exception as exc:  # noqa: BLE001
+    logger.warning("Could not evaluate bench_endpoints_enabled: %s", exc)
+
 app.include_router(health_router, prefix="/v1")
 app.include_router(generate_router, prefix="/v1")
 app.include_router(slurm_router)

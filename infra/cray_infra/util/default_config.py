@@ -51,6 +51,11 @@ class Config(BaseModel):
     openai_queue_max_depth: int = 256
     openai_queue_retry_after_seconds: int = 1
 
+    # When true, exposes /v1/bench/nop — a no-op endpoint used by the
+    # benchmark harness to isolate FastAPI/uvicorn ceiling from the
+    # inference layer. Left off in production; flip via config or env.
+    bench_endpoints_enabled: bool = False
+
     inference_work_queue_path: str = "/app/cray/inference_work_queue.sqlite"
     upload_base_path: str = "/app/cray/inference_requests"
 
