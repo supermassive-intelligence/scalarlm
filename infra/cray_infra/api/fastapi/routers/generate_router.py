@@ -1,3 +1,4 @@
+from cray_infra.api.fastapi.generate.deprecation import log_path_a_deprecation
 from cray_infra.api.fastapi.generate.get_work import get_work
 from cray_infra.api.fastapi.generate.get_adaptors import get_adaptors
 from cray_infra.api.fastapi.generate.generate import generate
@@ -23,7 +24,7 @@ from cray_infra.api.fastapi.routers.request_types.get_adaptors_request import (
 )
 from cray_infra.api.fastapi.routers.request_types.download_request import DownloadRequest
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 import logging
 
@@ -32,11 +33,18 @@ logger = logging.getLogger(__name__)
 generate_router = APIRouter(prefix="/generate")
 
 
-@generate_router.post("")
+# ``log_path_a_deprecation`` is attached to client-facing endpoints only
+# (generate, get_results, upload, download). Worker-facing endpoints
+# (get_work, finish_work, get_adaptors, clear_queue, metrics) stay as-is
+# because they're ScalarLM-internal and outlive the Path A surface.
+_DEPRECATION = [Depends(log_path_a_deprecation)]
+
+
+@generate_router.post("", dependencies=_DEPRECATION)
 async def generate_endpoint(request: GenerateRequest):
     return await generate(request)
 
-@generate_router.post("/get_results")
+@generate_router.post("/get_results", dependencies=_DEPRECATION)
 async def get_results_endpoint(request: GetResultsRequest):
     return await get_results(request)
 
@@ -48,11 +56,11 @@ async def get_work_endpoint(request: GetWorkRequest):
 async def finish_work_endpoint(requests: FinishWorkRequests):
     return await finish_work(requests)
 
-@generate_router.post("/upload")
+@generate_router.post("/upload", dependencies=_DEPRECATION)
 async def upload_endpoint(request: Request):
     return await upload(request)
 
-@generate_router.post("/download")
+@generate_router.post("/download", dependencies=_DEPRECATION)
 async def download_endpoint(request: DownloadRequest):
     return await download(request)
 
