@@ -11,11 +11,17 @@ logger = logging.getLogger(__name__)
 def get_config():
     loaded_config = {}
 
-    config_path = "/app/cray/cray-config.yaml"
+    # SCALARLM_CONFIG_PATH is the documented escape hatch for pointing the
+    # loader at a different YAML — used by the unit test suite so each test
+    # can run against its own tmp_path without contending on the default
+    # `/app/cray/cray-config.yaml` that the running server is already using.
+    config_path = os.environ.get(
+        "SCALARLM_CONFIG_PATH", "/app/cray/cray-config.yaml"
+    )
 
     if os.path.exists(config_path):
         with open(config_path, "r") as stream:
-            loaded_config = yaml.safe_load(stream)
+            loaded_config = yaml.safe_load(stream) or {}
 
     config = Config(**loaded_config).dict()
 

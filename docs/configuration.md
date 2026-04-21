@@ -191,6 +191,7 @@ A few environment variables are read directly without going through `Config`:
 | `VLLM_ATTENTION_BACKEND` | vLLM | Forced to `FLASHMLA` on SM < 8 GPUs (`create_vllm.py:41`). |
 | `VLLM_USE_STANDALONE_COMPILE` | vLLM | Set to `0` on SM < 8. |
 | `CRAY_TRAINING_JOB_CONFIG_PATH` | `get_job_config.py:21` | Per-job config path, set by the sbatch entrypoint (see §2). |
+| `SCALARLM_CONFIG_PATH` | `get_config.py` | Overrides the default `/app/cray/cray-config.yaml` server-config YAML path. Primary use is the unit test suite; operators can also point at a baked-in config. |
 
 `SCALARLM_VLLM_ARGS` is the escape hatch for anything vLLM-specific that isn't surfaced as a `Config` field:
 

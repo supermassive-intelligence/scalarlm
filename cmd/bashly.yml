@@ -40,26 +40,70 @@ commands:
       default: "auto"
 
 - name: test
-  help: Run tests in the container
+  help: |-
+    Run the ScalarLM test suite.
+
+    Levels (see docs/test-plan.md):
+      unit         Layer 3 - in-process, <1s each. Runs on the host, no Docker.
+      component    Layer 2 - per-component. Runs inside the CPU container.
+      e2e          Layer 1 - full ASGI / container. Runs inside the CPU container.
+      ui           React / Vite unit + component tests via npm (host).
+      collectives  Standalone SHM-channel Python tests (host, no MPI).
+      fast         unit + ui + collectives. Matches the CI "fast" profile.
+      cpu          fast + component + e2e. Matches the CI "cpu" profile.
+      all          Every level.
+
+    If a test-path is provided it overrides --level and is passed straight to
+    pytest inside the container. Combine --keyword / --mark with --level to
+    filter within a level.
   args:
     - name: test-path
-      default: "test/infra/*"
-      help: Relative path to the directory or file with test cases
+      required: false
+      help: Optional pytest path. Overrides --level when set (e.g. test/unit/test_config_override.py).
   flags:
+    - long: --level
+      arg: level
+      help: Which test level to run. See command help for values.
+      default: "cpu"
+      allowed: ["unit", "component", "e2e", "ui", "collectives", "fast", "cpu", "all"]
+    - long: --keyword
+      short: -k
+      arg: keyword
+      help: Pytest -k expression to filter tests by name substring.
+    - long: --mark
+      short: -m
+      arg: mark
+      help: Pytest -m expression to filter by marker (e.g. "not slow").
+    - long: --tag
+      arg: tag
+      help: Docker image tag used for container-based levels.
+      default: "cray:latest"
     - long: --coverage-path
       arg: coverage-path
-      help: Absolute path to a directory to write coverage results into
+      help: Absolute path to a directory to write coverage results into.
       default: /tmp/cray/coverage
     - long: --verbose
-      help: Prints out DEBUG logs as the test is running.
+      help: Prints DEBUG logs while running.
       arg: verbose
       allowed: ["yes", "no"]
       default: "no"
-
     - long: --workers
       arg: workers
-      help: Number of workers, default is auto
+      help: Pytest-xdist worker count ("auto" or an integer). Pass "1" to serialize (recommended for e2e).
       default: "auto"
+    - long: --no-build
+      arg: no-build
+      help: Skip the image build step before running container-based levels.
+      allowed: ["yes", "no"]
+      default: "no"
+  examples:
+    - ./scalarlm test                                      # default: --level cpu
+    - ./scalarlm test --level unit                          # only Layer 3
+    - ./scalarlm test --level fast                          # unit + ui + collectives
+    - ./scalarlm test --level component -k work_queue       # Layer 2 tests matching "work_queue"
+    - ./scalarlm test --level ui                            # npm-side tests only
+    - ./scalarlm test --level e2e --workers 1               # serialized E2E
+    - ./scalarlm test test/unit/test_config_override.py     # explicit path (runs in container)
 
 - name: llm
   help: Invoke the LLM tool
