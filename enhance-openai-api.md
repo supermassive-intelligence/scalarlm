@@ -238,6 +238,140 @@ Yes, with standard scaling levers on both sides:
 
 One place: the interactive-streaming-chat-one-at-a-time shape. The OpenAI protocol doesn't have an idiom for batching multiple live SSE streams, so each concurrent live chat eats one HTTP connection's worth of overhead. Estimated at ~1–5 ms of proxy overhead per request — negligible next to inference time for normal completions, visible for very short outputs. This cost is inherent to OpenAI-style streaming and affects every OpenAI-compatible endpoint, not just ours.
 
+## Benchmark plan
+
+The FAQ above reasons about throughput; this section proposes how to measure it. Reviewers have raised three concrete questions that any migration decision needs empirical answers to:
+
+> Can you make 1000 simultaneous async requests? Can you make 1 million? Even if the FastAPI endpoint is a nop, does that work or does it fall over and die?
+
+And an observation: Path A's persistent queue is known to sustain 1000 batches of 1000 prompts each, i.e. 1M per-prompt throughput. The benchmark has to show where Path B lands relative to that — not argue about it.
+
+### What the benchmark has to answer
+
+1. **Raw FastAPI ceiling.** Absent vLLM, how many concurrent requests does one uvicorn process handle before latency cliffs or errors appear? This isolates the transport layer from the inference layer.
+2. **Path B per-request capacity.** Chat completions one at a time. At what concurrency do we start seeing `503` from the Phase 3d queue, and at what concurrency does uvicorn itself lose?
+3. **Path B bulk capacity.** `/v1/completions` with array `prompt` and `/v1/batches` — do they match Path A's wire-batched throughput?
+4. **Failure mode under overload.** When any of the above exceeds its sustainable load, does it degrade gracefully (503 + Retry-After, bounded latency) or cliff (dropped connections, OOM, wedged event loop)?
+
+### Workloads
+
+Six scenarios, each run across a sweep of concurrency levels. Target the same vLLM instance for the non-nop ones so hardware conditions are held constant.
+
+| Name | Endpoint | Wire shape | Per-request work | Measures |
+|---|---|---|---|---|
+| `nop` | `GET /v1/health` (or a dedicated `GET /v1/bench/nop`) | single | zero | Raw FastAPI/uvicorn ceiling. Baseline for every other scenario. |
+| `pathb_chat_single` | `POST /v1/chat/completions` | one prompt per HTTP call | 1 prompt, ~100 tokens | Interactive-streaming shape. The case Path A doesn't have. |
+| `pathb_completions_array` | `POST /v1/completions` | `prompt=[p1..pN]` per call, N varied | N prompts, ~100 tokens each | Wire-batched completions. Expected to match Path A. |
+| `pathb_batches` | `POST /v1/batches` then poll | N-line JSONL | N prompts, ~100 tokens | Async bulk chat, OpenAI-canonical. |
+| `patha_generate_bulk` | `POST /v1/generate` | `prompts=[p1..pN]` per call | N prompts, ~100 tokens | Path A's current bulk path; the throughput baseline we're measuring against. |
+| `patha_upload_download` | `POST /v1/generate/upload` + poll `/download` | JSONL upload file | N prompts, ~100 tokens | Path A's large-batch mode; the 1000×1000 = 1M case the colleague cites. |
+
+### Sweep parameters
+
+Concurrency / batch size: `10, 100, 1_000, 10_000, 100_000, 1_000_000`. For the wire-batched scenarios (`completions_array`, `batches`, `patha_*`) this is prompt count per HTTP call; for the per-request scenarios (`nop`, `pathb_chat_single`) this is concurrent in-flight HTTP calls.
+
+Per-request payload size: tiny (1 token), small (~100 tokens), large (~1k tokens). Picks out whether the bottleneck is per-request overhead or inference time.
+
+Transport: HTTP/1.1 with keep-alive vs HTTP/2. The FAQ argues HTTP/2 is how you reach high-RPS to one origin; the benchmark has to demonstrate that.
+
+### Metrics
+
+Per run:
+
+- **Throughput**: completed prompts / sec, completed requests / sec.
+- **Latency**: P50, P95, P99, max. For the bulk scenarios this is end-to-end (submit → last result available).
+- **Error shape**: HTTP status distribution, 5xx breakdown, connection errors, timeouts. `503 Retry-After` from the Phase 3d limiter counts as graceful — it's a feature.
+- **Server resource**: CPU, RSS, open file descriptors, `openai_queue_depth`, `openai_queue_wait_time_seconds`, `scalarlm_queue_depth`.
+- **Client resource**: event-loop lag, open connections, memory.
+
+### Client tooling
+
+For 1 k concurrency: an async Python client using `AsyncOpenAI` + `httpx.AsyncClient(http2=True, limits=…)` is enough. Runs on one laptop.
+
+For 10 k–100 k: dedicated load generator — `k6` with the HTTP/2 provider, or `vegeta` for the non-OpenAI-SDK shape. Multiple client processes possibly on different machines to avoid client-side CPU as the bottleneck.
+
+For 1 M concurrency: **this is explicitly expected to break something**. The point is to find what breaks first — kernel fd limits, uvicorn worker count, Python GC pauses under pressure, the Phase 3d queue's overflow path, the event-loop scheduler, vLLM's KV cache. That finding is the deliverable, not a pass/fail.
+
+### Hardware platforms
+
+Each scenario runs on three platforms so we can separate per-platform overheads (proxy, event-loop, network) from inference-layer scaling. Absolute numbers vary wildly across these; the platform triangle is what tells us whether Phase 3's proxy is pulling its own weight or adding fixed overhead that only shows up on big iron.
+
+| Platform | Shape | Model | Purpose in the grid |
+|---|---|---|---|
+| **MacBook Pro M5** | Single-node, CPU/MPS only (no CUDA), unified memory | **`Qwen/Qwen3-4B-Instruct-2507`** (bf16 weights) — proposed default; see rationale below | Isolates the FastAPI / uvicorn / proxy layer. `nop` ceiling and proxy-overhead numbers from here are a clean story about the Python surface — no GPU variance. CPU-only vLLM inference is slow but fine for correctness sweeps and for measuring per-request overhead on small completions. Dev-machine representativeness. |
+| **NVIDIA DGX Spark** | 1× GB10 Grace-Blackwell superchip, ~128 GB unified memory | **`nvidia/Qwen3-32B-NVFP4`** | Single-GPU dev / prosumer tier. 32 B at NVFP4 fits GB10's unified memory comfortably. Shows how the proxy's 16-concurrency default interacts with a single-GPU decode rate — this is where the Phase 3d queue config defaults want to be validated. |
+| **4-GPU Blackwell system** | 4× B200 (or equivalent), TP=4 or replicated 4× TP=1, 4× HBM3e | **`nvidia/Qwen3-Next-80B-A3B-Instruct-NVFP4`** | Production tier. The 80B-A3B MoE at NVFP4 is the model sql-gen's Blackwell deploy already runs (`deploy/blackwell/helm-charts/qwen3next/values.yaml`), so benchmark results map directly onto production cost/throughput. Only platform where scenarios at 100 k – 1 M concurrency are likely to clear vLLM's own ceiling cleanly, so it's the one that decides the 5 %-parity question against Path A's `upload_download` path. Both `--tp 4` (one vLLM instance) and `--replicas 4` (sql-gen's current deployment shape — per its `deploy/blackwell/restart.sh`) should be measured since their per-request latency profiles differ. |
+
+**Why Qwen3-4B-Instruct-2507 on M5.** Three requirements: (1) same family as the two GPU platforms so architectural comparisons across the triangle are interpretable — same tokenizer, same attention shape, same MLP topology; (2) runs on Apple Silicon, which rules out NVFP4 (Blackwell-only); (3) fits comfortably in a mid-range M5 Pro's unified memory (4 B × bf16 = ~8 GB). Qwen3-4B-Instruct-2507 is the closest in-family match and is what's available on the Hugging Face Hub.
+
+Drop-downs if M5 memory is tight or full 4 B inference is too slow to keep the sweep's wall clock reasonable:
+- **`Qwen/Qwen3-1.7B`** (~3.5 GB) — still instruct-tuned, still same family, 4× faster decode.
+- **`Qwen/Qwen3-0.6B`** (~1.2 GB) — effectively a correctness smoke test; proxy overhead dominates, which is exactly what we're measuring on M5 anyway.
+- **`tiny-random/gemma-4-dense`** (the repo default) — last resort. Different family, not apples-to-apples with Spark/Blackwell; only use for `nop`-adjacent scenarios where the model barely matters.
+
+The goal on M5 is never absolute throughput — it's a stable denominator for the per-request proxy-overhead number. Pick the smallest Qwen3 that still exercises real KV cache / real tokenization so the overhead measurement isn't an artifact.
+
+Not every concurrency level runs on every platform. Mapping:
+
+| Scenario × concurrency | M5 | DGX Spark | 4× Blackwell |
+|---|---|---|---|
+| `nop` 10 – 10 k | ✓ | ✓ | ✓ |
+| `nop` 100 k – 1 M | best-effort (client fd limits) | ✓ | ✓ |
+| `pathb_chat_single` 10 – 1 k | ✓ | ✓ | ✓ |
+| `pathb_chat_single` 10 k – 1 M | skip (CPU inference too slow to be meaningful) | up to 10 k | full sweep |
+| `pathb_completions_array` / `pathb_batches` / `patha_generate_bulk` | small N (≤ 100) as correctness smoke test | up to 10 k | full sweep |
+| `patha_upload_download` at 1 M | skip | skip (one GPU won't chew through it in reasonable time) | primary target |
+
+Cross-platform interpretation: Spark and Blackwell both run NVFP4 Qwen3-family models, so their numbers are directly comparable — the only differences are model size and GPU count. M5 runs a smaller non-NVFP4 Qwen3, so only its proxy-overhead numbers (and error shape under overload) transfer across platforms; absolute throughput does not.
+
+### Harness layout
+
+```
+bench/
+  client/
+    nop.py                    # hammers GET /v1/bench/nop
+    pathb_chat_single.py      # N concurrent chat/completions
+    pathb_completions_array.py
+    pathb_batches.py
+    patha_generate_bulk.py
+    patha_upload_download.py
+  server/
+    nop_route.py              # the dedicated /v1/bench/nop, gated by env
+  scenarios/
+    sweep_concurrency.sh      # runs each workload across the grid
+    platforms.yaml            # per-platform model, concurrency caps, worker count
+  README.md                   # repro recipe + how to interpret output
+  results/
+    <platform>/<timestamp>/summary.json  # one tree per platform so results don't collide
+```
+
+A `/v1/bench/nop` endpoint only makes sense to add if scenario #1 needs a known-nop to decouple FastAPI from the inference stack — worth it. It goes in under `settings.bench_endpoints_enabled` so production builds don't expose it.
+
+### Expected results (for pre-registration)
+
+Stating expectations up front so surprises are surprises:
+
+- **`nop` scenario** (all platforms): uvicorn single-worker handles 5–15 k RPS comfortably; cliffs around 50–100 k concurrent due to socket/event-loop overhead. `--workers 4` roughly 4× the ceiling. 1 M falls over well before the server — kernel fd limits on the client. Platform delta: M5 hits its CPU ceiling sooner (smaller core count); Spark and Blackwell should produce near-identical numbers since `nop` is all CPU + NIC.
+- **`pathb_chat_single`**: throughput bounded by vLLM's decode rate × proxy queue concurrency (default 16). P99 under saturation is queue-wait-bounded once `openai_queue_max_depth` is reached; overflow = 503 with `Retry-After`, *not* a cliff. Platform delta: M5 saturates the CPU vLLM backend long before the proxy; on Spark the queue defaults are the bottleneck; on Blackwell the defaults are probably too conservative — expect `openai_queue_concurrency` to need raising to exploit the hardware.
+- **`pathb_completions_array` vs `patha_generate_bulk`**: should match within measurement noise at equal batch sizes on each platform. Any persistent gap indicates a proxy-layer inefficiency worth chasing. Same-platform comparisons only — don't compare M5 numbers to Blackwell.
+- **`pathb_batches`**: same steady-state throughput as `pathb_completions_array`, but with worse end-to-end latency for small N (async submit + poll overhead). Win condition is breaking clearly ahead on large N where wire-batching savings accumulate — most visible on Blackwell.
+- **`patha_upload_download` at 1 M** (Blackwell only): known to sustain per the colleague's claim; replicate as the throughput ceiling for the unified path to justify itself against.
+
+### Decision thresholds
+
+Before the benchmark runs:
+
+- If `pathb_completions_array` throughput is within **5 %** of `patha_generate_bulk` on equal workloads *on Blackwell* (the production-tier platform), declare wire-efficiency parity and proceed with deprecation. The same 5 % test on Spark is a useful corroboration; on M5 it's mostly a proxy-overhead sanity check since inference dominates.
+- If the M5 `nop` and `pathb_chat_single` numbers show the proxy layer adding more than ~5 ms of fixed overhead per request, chase that before claiming readiness — on M5 inference is CPU-bound enough that any proxy regression stands out clearly.
+- If 1 M concurrent traffic on `pathb_chat_single` (Blackwell) breaks the server in a way that isn't `503 Retry-After` (e.g. OOM, wedged event loop), that's a correctness bug in the limiter / resource accounting — fix before any deprecation conversation.
+- Per-platform queue defaults: if Blackwell needs `openai_queue_concurrency` raised to hit its inference ceiling, make that a platform-tunable rather than a global default change — Spark / M5 defaults shouldn't inherit a number tuned for 4× B200.
+
+### Out of scope for the benchmark
+
+- Training-side throughput. Separate concern.
+- Latency under cold start (adapter not yet loaded). The LoRA-load path runs once per adapter per worker; bench runs should be warm.
+- Mixed-shape workloads (streaming + bulk interleaved). Worth doing eventually but harder to attribute results; a separate follow-up.
+
 ## Not in scope for this change
 
 - Rewriting the vLLM fork's OpenAI server. No evidence yet that we need to.
