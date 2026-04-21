@@ -1,3 +1,6 @@
+from cray_infra.api.fastapi.middleware.request_id import (
+    request_id_and_log_middleware,
+)
 from cray_infra.api.fastapi.routers.openai_v1_router import (
     openai_v1_router,
 )
@@ -22,13 +25,11 @@ from cray_infra.api.fastapi.routers.add_chat_proxy import (
 )
 from cray_infra.api.fastapi.setup_ui import add_ui
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 import logging
 import os
-import time
-import json
 
 logger = logging.getLogger(__name__)
 
@@ -77,43 +78,4 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Add structured logging middleware
-@app.middleware("http")
-async def log_requests_middleware(request: Request, call_next):
-    """Log all HTTP requests with structured JSON logging."""
-    start_time = time.time()
-
-    # Extract trace_id if available from traceparent header
-    trace_id = None
-    traceparent = request.headers.get("traceparent", "")
-    if traceparent:
-        parts = traceparent.split("-")
-        if len(parts) >= 2:
-            trace_id = parts[1]
-
-    # Log request start
-    logger.info(json.dumps({
-        "event": "request_start",
-        "trace_id": trace_id,
-        "method": request.method,
-        "path": str(request.url.path),
-        "client": request.client.host if request.client else None,
-        "timestamp": start_time
-    }))
-
-    # Process request
-    response = await call_next(request)
-
-    # Log request end
-    duration = time.time() - start_time
-    logger.info(json.dumps({
-        "event": "request_end",
-        "trace_id": trace_id,
-        "method": request.method,
-        "path": str(request.url.path),
-        "status_code": response.status_code,
-        "duration_seconds": round(duration, 3),
-        "timestamp": time.time()
-    }))
-
-    return response
+app.middleware("http")(request_id_and_log_middleware)
