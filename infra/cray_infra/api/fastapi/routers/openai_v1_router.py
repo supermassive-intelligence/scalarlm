@@ -17,6 +17,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 
 from cray_infra.api.fastapi.aiohttp.get_global_session import get_global_session
+from cray_infra.generate.flop_count import compute_flops_per_token
 from cray_infra.generate.metrics import get_metrics
 from cray_infra.util.get_config import get_config
 
@@ -101,6 +102,7 @@ async def create_completions(request: CompletionRequest, raw_request: Request):
         upstream_url=config["vllm_api_url"] + "/v1/completions",
         params=params,
         endpoint_label="completions",
+        base_model_name=config["model"],
     )
 
 
@@ -115,6 +117,7 @@ async def create_chat_completions(request: ChatCompletionRequest, raw_request: R
         upstream_url=config["vllm_api_url"] + "/v1/chat/completions",
         params=params,
         endpoint_label="chat completions",
+        base_model_name=config["model"],
     )
 
 
@@ -146,6 +149,7 @@ def _proxy_streaming(
     upstream_url: str,
     params: dict,
     endpoint_label: str,
+    base_model_name: Optional[str] = None,
 ) -> StreamingResponse:
     session = get_global_session()
 
@@ -164,12 +168,12 @@ def _proxy_streaming(
                 yield chunk
 
     return StreamingResponse(
-        content=_wrap_with_metrics(upstream()),
+        content=_wrap_with_metrics(upstream(), base_model_name=base_model_name),
         media_type="text/event-stream",
     )
 
 
-async def _wrap_with_metrics(source):
+async def _wrap_with_metrics(source, base_model_name: Optional[str] = None):
     """Pass chunks through verbatim while keeping a sliding-window buffer so
     we can extract the terminal `usage.total_tokens` for the metrics counter.
 
@@ -177,6 +181,11 @@ async def _wrap_with_metrics(source):
       - Streaming SSE: walk `data: {...}\\n\\n` events; last `usage` wins.
       - Non-streaming single-JSON body: parse the (possibly partial) buffer
         once at the end.
+
+    ``base_model_name`` drives the FLOP estimate. When the model is known we
+    multiply token_count by per-token FLOPs (cached by
+    ``compute_flops_per_token``) so the observability counter matches Path
+    A's worker-side reporting.
 
     The metrics counter is balanced even on errors / client disconnect: the
     finally block always fires record_completed_request to keep queue_depth
@@ -197,10 +206,15 @@ async def _wrap_with_metrics(source):
                 buffer = bytearray(buffer[-_USAGE_SCAN_TAIL_BYTES:])
             yield chunk
     finally:
-        token_count = _extract_token_count(bytes(buffer))
+        token_count = _extract_token_count(bytes(buffer)) or 0
+        flop_count: Optional[int] = None
+        if token_count and base_model_name:
+            per_token = compute_flops_per_token(base_model_name)
+            if per_token:
+                flop_count = per_token * token_count
         metrics.record_completed_request(
-            token_count=token_count if token_count is not None else 0,
-            flop_count=None,
+            token_count=token_count,
+            flop_count=flop_count,
         )
 
 
