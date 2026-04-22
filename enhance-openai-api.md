@@ -7,8 +7,10 @@ Phases 0–7 implemented; measurement summary:
 - **Phase 6**: shipped. In-process Python-API call replaces the localhost HTTP hop. Mixed throughput results — see Phase 6 measurement subsection.
 - **Phase 6.5**: shipped (`scripts/vllm_patches/apply_patches.py` + Dockerfile wiring). **Failed its acceptance gate at N=100 distinct prompts on Blackwell** — paired 30-run A/B is null (8.32 patched vs 8.56 unpatched). Two follow-up measurements (Spark N=1 000, Blackwell N=1 000) determine whether the patch stays or is reverted.
 - **Phase 7**: shipped (`asyncio.gather` + `Semaphore(batch_runner_concurrency)` in BatchRunner; 14/14 unit tests). **Cleared its acceptance gate** — Batch API at N=1 000 jumped from 3.2 → 13.14 p/s, matching array `/v1/completions` and reaching 79 % of scalarlm.
-- **Phase 8**: not yet started (scatter-gather A/B). Same N=1 000 ceiling now applies to both array-completions and Batch API; if Phase 8a clears its 10 % win threshold, both lift together.
+- **Phase 8a**: shipped behind `SCALARLM_SCATTER_THRESHOLD` env var. **Failed its 10 % gate** — paired A/B at N=1 000 distinct prompts shows scatter ON (8.43) ≈ scatter OFF (8.35), Δ +0.9 % well within both CIs. **Phase 8b not shipped.**
 - **Phase 9**: deferred per analysis above.
+
+**Updated parity picture (N=1 000 distinct prompts on Blackwell, properly paired):** openai is **49 %** behind scalarlm (8.35 vs 16.57 p/s), not the 22 % the doc previously claimed (which was identical-prompts where openai got prefix-cache help that scalarlm doesn't need). The lever for closing this lives inside vLLM's `OpenAIServingCompletion` or its engine entry point — neither of Phases 6 / 6.5 / 7 / 8a touched it. Next investigation: diff `create_generate_worker.py` against `vllm/entrypoints/openai/completion/serving.py` to find what scalarlm bypasses.
 
 ## Why this work exists
 
@@ -809,16 +811,48 @@ Run *after* Phase 6.5 has landed so the 20 % metrics tax isn't muddying the comp
 
 **Expected result.** Given vLLM already scatters internally, the question is whether `asyncio.gather` + N sub-requests has less overhead than `merge_async_iterators` + N generators. Plausibly material at N=1 000 (that's where `merge_async_iterators` showed up at 13.4 %); probably a wash or slightly negative at N=1/10 because of fanout overhead. That shape is what Phase 8a will confirm or deny.
 
-### Phase 8b — Implement scatter-gather in the proxy (conditional)
+### Phase 8a result: NULL — don't ship Phase 8b
 
-Only landed if Phase 8a meets its decision threshold. Differences from the A/B:
+Paired A/B at N=1 000 distinct prompts on Blackwell, 5 runs each (same pod, only `SCALARLM_SCATTER_THRESHOLD` env var differed):
 
-1. **Queue-slot sharing (hard requirement).** All N sub-requests of one logical call must share the single `queue_slot` acquired by the parent — never acquire N slots. Otherwise the `OpenAIConcurrencyLimiter` (semaphore default 16) is exhausted by a single 1 000-prompt call and all other traffic stalls. This is the case-1 correctness bug Gemini flagged; the A/B already wires it this way so Phase 8b just preserves the behaviour.
+| Condition  | Mean p/s | Stdev | 95 % CI on mean | Range          |
+|------------|----------|-------|-----------------|----------------|
+| Scatter OFF (vLLM internal merge_async_iterators) | 8.35 | 1.22 | ±1.07 (12.8 %) | 7.50 – 10.48 |
+| Scatter ON (proxy-level asyncio.gather + N create_completion) | **8.43** | 0.82 | ±0.71 (8.5 %) | 7.53 – 9.38 |
+| **Δ**      | **+0.9 %** | | | within both CIs |
+
+Decision threshold was ≥ 10 % win to ship Phase 8b. Got 0.9 %. **Phase 8b is not shipped.** Scatter ON does have tighter CI (0.82 vs 1.22) — moving the merge from `merge_async_iterators` to `asyncio.gather` slightly stabilises run-to-run timing, but doesn't move the mean.
+
+Both Gemini-attributed "remaining residual" theses now refuted by paired A/B: the metrics offload (Phase 6.5) didn't move N=100 throughput, and the proxy-side scatter-gather (Phase 8a) didn't move N=1 000 throughput. The N=1 000 ceiling lives somewhere we haven't profiled yet — see below.
+
+### Phase 8b — Implement scatter-gather in the proxy (NOT SHIPPED)
+
+Originally planned to land iff Phase 8a met its decision threshold. The A/B above came back null, so this work is not done. The Phase 8a code path (under `SCALARLM_SCATTER_THRESHOLD` env var) stays in the tree as a dormant flag in case future workloads or hardware change the calculus. If ever shipped, the requirements would be:
+
+1. **Queue-slot sharing (hard requirement).** All N sub-requests of one logical call must share the single `queue_slot` acquired by the parent — never acquire N slots. Otherwise the `OpenAIConcurrencyLimiter` (semaphore default 16) is exhausted by a single 1 000-prompt call and all other traffic stalls. The A/B implementation already wires it this way.
 2. A tuned default threshold (guided by the A/B curve shape).
-3. Clean merge of `usage` (summed tokens), `system_fingerprint` (take first), and `created` (take first).
-4. Stable `choices[*].index` ordering by the original array position.
-5. An early-exit on error that cancels outstanding sub-requests.
-6. Metrics instrumentation that records the logical request once, not N times (otherwise per-request Prometheus labels explode).
+3. Clean merge of `usage` (summed tokens), `system_fingerprint` (take first), and `created` (take first). Already done in `_merge_completion_responses`.
+4. Stable `choices[*].index` ordering by the original array position. Already done.
+5. An early-exit on error that cancels outstanding sub-requests. Currently short-circuits on first error, no cancellation of in-flight siblings.
+6. Metrics instrumentation that records the logical request once, not N times. Already done.
+
+### The real residual gap — N=1 000 distinct prompts vs scalarlm
+
+The doc's "22 % gap at N=1 000" came from identical-prompts measurements where vLLM's prefix cache helped openai but not scalarlm. With distinct prompts the picture is different:
+
+**Paired A/B on the same pod, same hardware, same model, 5 runs each, distinct prompts:**
+
+| Path                                           | N=1 000 p/s   | Notes                          |
+|------------------------------------------------|---------------|--------------------------------|
+| openai `/v1/completions` array (Phase 6+7+null patches) | **8.35**      | from Phase 8a OFF condition    |
+| scalarlm `/v1/generate`                        | **16.57 ± 0.04** | 0.2 % CV — extraordinarily stable |
+| **openai disadvantage**                        | **−49 %**     | nearly 2× slower               |
+
+**This is much larger than the 22 % the doc previously reported, and it's the right number to optimise against.** The 22 % was a partial-comparison artefact: identical-prompts gives openai a prefix-cache advantage scalarlm doesn't need. Distinct prompts is the realistic offline-bulk workload and exposes the full gap.
+
+scalarlm's stability at N=1 000 distinct (CV 0.2 %) is itself a clue — it gets the same throughput identical-vs-distinct (16.57 either way), which means prefix-cache state doesn't reach scalarlm's request stream. Either it bypasses prefix caching, pre-tokenizes around it, or its scheduler doesn't respect cache hits the way `OpenAIServingCompletion` does. **Whatever scalarlm's worker is doing differently is the real lever for closing the gap, and none of Phases 6 / 6.5 / 7 / 8a touched it.**
+
+Open investigation hook: read `infra/cray_infra/one_server/create_generate_worker.py` against `vllm/entrypoints/openai/completion/serving.py` and identify what the worker bypasses that the OpenAI serving doesn't. Candidates: pre-tokenized prompts, different sampling-params construction, no per-prompt response-builder, different engine entry point.
 
 ### Phase 9 — Dynamic, KV-aware concurrency limiter
 
@@ -830,7 +864,7 @@ If pursued: `OpenAIConcurrencyLimiter` consults `engine_client.get_current_kv_ca
 
 - **Phase 6.5**: ~~N=100 distinct-prompts throughput improvement ≥ 10 % on Blackwell~~. **Failed.** Paired 30-run A/B at N=100 on Blackwell came back null (8.32 patched vs 8.56 unpatched, CIs overlap). Two measurements still pending before final disposition: Spark N=1 000 (the plateau-break hypothesis) and Blackwell N=1 000 (more iterations per request → more accumulated tax). If both null, revert the patch.
 - **Phase 7**: ~~Batch API N=1 000 within 10 % of `scalarlm` `upload_download` on Blackwell~~. **Cleared.** Phase 7 lifts N=1 000 from 3.2 → 13.14 p/s (+311 %), matching array `/v1/completions` throughput at N=1 000 and reaching 79 % of scalarlm. The remaining gap is the same residual that limits array-completions itself (Phase 8a).
-- **Phase 8a → 8b**: openai `/v1/completions` array at N=1 000 within **5 %** of `scalarlm` on Blackwell (Phase 8b only lands if 8a shows > 10 % improvement).
+- **Phase 8a → 8b**: ~~openai `/v1/completions` array at N=1 000 within **5 %** of `scalarlm` on Blackwell (Phase 8b only lands if 8a shows > 10 % improvement)~~. **Phase 8a failed its 10 % gate (0.9 % observed); Phase 8b not shipped.** The dormant scatter path stays in the codebase under `SCALARLM_SCATTER_THRESHOLD` env var. The N=1 000 distinct-prompts gap to scalarlm is now properly measured at **49 %** (8.35 vs 16.57 p/s) — and lives in vLLM's serving-or-engine code path, not in our proxy. Closing it needs a different attack than scatter-gather; see "The real residual gap" section.
 - **Deprecation gate**: once Phase 6.5 and Phase 7 are verified and Phase 8 is either landed (after 8a pass) or formally abandoned (after 8a fail), the scalarlm path is redundant by both capability and performance; Phase 4's telemetry-gated deprecation can proceed.
 
 ### Open questions for a reviewer to double-check

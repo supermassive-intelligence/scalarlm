@@ -32,11 +32,22 @@ from cray_infra.util.get_config import get_config
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+import asyncio
 import json
 import logging
+import os
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+# Phase 8a — scatter-gather A/B. Set SCALARLM_SCATTER_THRESHOLD=N to make
+# /v1/completions calls with a list-prompt of length >= N fan out into N
+# single-prompt sub-requests dispatched in parallel via asyncio.gather.
+# Unset / 0 = pre-Phase-8 monolithic dispatch (vLLM scatters internally
+# via merge_async_iterators). The N=1000 profile showed merge_async_iterators
+# at 13.4 % in-stack — this experiment tests whether moving the scatter
+# one layer up (asyncio.gather + N create_completion calls) is faster.
+_SCATTER_THRESHOLD = int(os.environ.get("SCALARLM_SCATTER_THRESHOLD", "0") or 0)
 
 openai_v1_router = APIRouter()
 
@@ -227,6 +238,24 @@ async def _dispatch(
     """
     servings = get_vllm_servings()
     if servings is not None and config.get("openai_inprocess_enabled", True):
+        # Phase 8a A/B: if scatter threshold is set and the request is an
+        # array-prompt /v1/completions call past the threshold, fan out into
+        # single-prompt sub-requests rather than letting vLLM's internal
+        # merge_async_iterators do the scatter. See _scatter_gather_completions.
+        if (
+            endpoint == "completions"
+            and _SCATTER_THRESHOLD > 0
+            and isinstance(getattr(request, "prompt", None), list)
+            and len(request.prompt) >= _SCATTER_THRESHOLD
+            and all(isinstance(p, str) for p in request.prompt)
+        ):
+            return await _scatter_gather_completions(
+                request=request,
+                raw_request=raw_request,
+                servings=servings,
+                base_model_name=config["model"],
+                queue_slot=queue_slot,
+            )
         return await _call_inprocess(
             endpoint=endpoint,
             request=request,
@@ -311,6 +340,109 @@ async def _call_inprocess(
         except Exception:  # noqa: BLE001
             logger.exception("Failed to release OpenAI proxy queue slot")
     return JSONResponse(content=body)
+
+
+async def _scatter_gather_completions(
+    *,
+    request,            # CompletionRequest with list[str] prompt
+    raw_request: Request,
+    servings,
+    base_model_name: Optional[str],
+    queue_slot,
+):
+    """Phase 8a: dispatch each prompt as its own create_completion call,
+    gather sub-responses, return a merged CompletionResponse.
+
+    Sub-requests share the parent's queue_slot — we never acquire N slots
+    for one logical call, otherwise the OpenAIConcurrencyLimiter (default
+    semaphore=16) would be exhausted by a single 1 000-prompt request.
+    Per Gemini's correctness note in the amended plan.
+
+    Streaming and non-string prompts (e.g. token-id arrays) are not
+    handled — _dispatch only routes string-list prompts here.
+    """
+    prompts = request.prompt
+    sub_requests = [request.model_copy(update={"prompt": p}) for p in prompts]
+
+    sub_results = await asyncio.gather(*[
+        servings.openai_serving_completion.create_completion(r, raw_request)
+        for r in sub_requests
+    ])
+
+    # Per-sub error short-circuits the whole call (matches array-prompt
+    # behaviour today — vLLM aborts the batch if any one prompt errors).
+    for r in sub_results:
+        if hasattr(r, "error") and hasattr(r.error, "code"):
+            status_code = getattr(r.error, "code", 500)
+            body = r.model_dump() if hasattr(r, "model_dump") else {"error": str(r)}
+            if queue_slot is not None:
+                await queue_slot.release()
+            return JSONResponse(content=body, status_code=status_code)
+
+    # Merge: concatenate choices arrays with index renumbered to original
+    # array position; sum usage; first sub's id/created/model/system_fp.
+    merged = _merge_completion_responses(sub_results)
+
+    # Run the same metric-recording the non-streaming inprocess path runs,
+    # ONCE for the whole logical request — not N times. Otherwise per-request
+    # Prometheus labels and the FLOP counter would each fire N times.
+    token_count = 0
+    if isinstance(merged, dict):
+        token_count = (merged.get("usage") or {}).get("total_tokens") or 0
+    flop_count: Optional[int] = None
+    if token_count and base_model_name:
+        per_token = compute_flops_per_token(base_model_name)
+        if per_token:
+            flop_count = per_token * token_count
+    metrics = get_metrics()
+    metrics.record_new_request()
+    metrics.record_completed_request(token_count=token_count, flop_count=flop_count)
+
+    if queue_slot is not None:
+        try:
+            await queue_slot.release()
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to release OpenAI proxy queue slot (scatter)")
+    return JSONResponse(content=merged)
+
+
+def _merge_completion_responses(sub_results) -> dict:
+    """Merge N single-prompt CompletionResponse objects into one.
+
+    Choices: concatenate, renumber `index` by original array position so
+    the response shape matches what an unscattered call would have returned.
+    Usage: sum prompt/completion/total tokens. id/created/model/system_fp:
+    take the first sub's value (one logical request → one logical id).
+    """
+    merged_choices = []
+    prompt_tokens = completion_tokens = total_tokens = 0
+
+    for original_idx, sub in enumerate(sub_results):
+        body = sub.model_dump() if hasattr(sub, "model_dump") else dict(sub)
+        for choice in body.get("choices", []):
+            choice = dict(choice)
+            choice["index"] = original_idx
+            merged_choices.append(choice)
+        usage = body.get("usage") or {}
+        prompt_tokens += usage.get("prompt_tokens", 0) or 0
+        completion_tokens += usage.get("completion_tokens", 0) or 0
+        total_tokens += usage.get("total_tokens", 0) or 0
+
+    first = sub_results[0]
+    first_body = first.model_dump() if hasattr(first, "model_dump") else dict(first)
+    return {
+        "id": first_body.get("id"),
+        "object": first_body.get("object", "text_completion"),
+        "created": first_body.get("created"),
+        "model": first_body.get("model"),
+        "system_fingerprint": first_body.get("system_fingerprint"),
+        "choices": merged_choices,
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+        },
+    }
 
 
 def _proxy_streaming(
