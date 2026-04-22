@@ -10,7 +10,7 @@ Phases 0–7 implemented; measurement summary:
 - **Phase 8a**: shipped behind `SCALARLM_SCATTER_THRESHOLD` env var. **Failed its 10 % gate** — paired A/B at N=1 000 distinct prompts shows scatter ON (8.43) ≈ scatter OFF (8.35), Δ +0.9 % well within both CIs. **Phase 8b not shipped.**
 - **Phase 9**: deferred per analysis above.
 
-**Updated parity picture (N=1 000 distinct prompts on Blackwell, properly paired):** openai is **49 %** behind scalarlm (8.35 vs 16.57 p/s), not the 22 % the doc previously claimed (which was identical-prompts where openai got prefix-cache help that scalarlm doesn't need). Three Phase 8a variants tested (v1 unbounded, v2 bounded-to-16, v3 fresh-raw_request + fresh-CompletionRequest) — all sit in the 7.5–8.5 p/s band. Three hypotheses refuted: scheduler-pressure-from-pending-requests, raw_request-sharing, model_copy cost. Two open: `api_router` decorators (`@with_cancellation` + `@load_aware_call`) and the OpenAIConcurrencyLimiter slot duration. Detail in the Phase 8 section below.
+**Updated parity picture (N=1 000 distinct prompts on Blackwell, properly paired):** openai is **40 %** behind scalarlm (10.02 vs 16.57 p/s) after Phase 8a v4 closed 9 percentage points by routing through `api_router.create_completion` (which gets the `@with_cancellation` + `@load_aware_call` decorators that the direct serving call bypassed). Five Phase 8a variants tested: v1 unbounded (8.43), v2 bounded-to-16 (7.52, worse), v3 fresh raw + fresh request (8.97), **v4 via api_router (10.02 — first non-null)**, v5 high-concurrency-limit pending. Hypotheses refuted: scheduler pressure, raw_request sharing, model_copy cost. v4 is confounded (decorators OR JSONResponse wrapping) — isolation A/B pending. Detail in Phase 8 section below.
 
 ## Why this work exists
 
@@ -882,15 +882,26 @@ Two of the four open hypotheses tested simultaneously:
 
 v3 is statistically indistinguishable from v1 (CIs overlap completely). **Two more hypotheses refuted.** Neither Pydantic model_copy cost nor raw_request-sharing is the lever.
 
-### Open hypotheses for the 49 % gap (in order of next test)
+### Phase 8a v4 — route through api_router.create_completion (FIRST NON-NULL)
 
-1. **`@with_cancellation` / `@load_aware_call` decorators on api_router.create_completion**. scalarlm worker imports `create_completion` from `vllm.entrypoints.openai.completion.api_router` — that's the FastAPI handler, wrapped by these two decorators. Phase 6 / Phase 8a calls `servings.openai_serving_completion.create_completion(...)` directly, bypassing them. The decorators could change scheduling, yield behaviour, or load-balancing decisions inside vLLM. Easy A/B: import and call the api_router function from `_call_inprocess`.
-2. **`OpenAIConcurrencyLimiter` slot held for full 120 s call duration**. scalarlm's worker has no equivalent on its path. We're a single caller in the bench so contention shouldn't matter, but worth confirming by setting `openai_queue_concurrency=999` and re-running.
-3. **Engine-internal request_id namespace**. scalarlm passes its own request_id; Phase 6 lets vLLM auto-generate. Long shot — vLLM's request_id is just a key in dicts, hash-distributed. But scalarlm's IDs are a hash of the request content, openai's are UUID-style — different distributions.
+scalarlm worker imports `create_completion` from `vllm.entrypoints.openai.completion.api_router` — that's the FastAPI handler, wrapped by `@with_cancellation` and `@load_aware_call`. Phases 6 / 8a v1–v3 call `servings.openai_serving_completion.create_completion(...)` directly, bypassing them. v4 swaps the call site to mimic scalarlm's import pattern: a SimpleNamespace fake-app with `state.openai_serving_completion` lets a fresh `fastapi.Request` satisfy the api_router's `completion(raw_request)` resolver.
 
-Each is a one-pod-restart A/B (~12 min cycle on Blackwell). The api_router-decorator test is queued next; if that closes the gap, the fix is a two-line change in `_call_inprocess`.
+| Variant | Mean p/s | Stdev | 95 % CI | Gap to scalarlm 16.57 |
+|---|---|---|---|---|
+| v1 unbounded direct serving | 8.43 | 0.82 | ±0.71 | −49 % |
+| v2 bounded(16) | 7.52 | 0.37 | ±0.32 | −55 % |
+| v3 fresh raw + fresh request | 8.97 | 0.86 | ±0.75 | −46 % |
+| **v4 via api_router (decorators)** | **10.02** | **0.85** | **±0.74** | **−40 %** |
 
-**If after testing all four/five hypotheses the gap is still unexplained**, the next step is a comparative py-spy profile: run a scalarlm bench at N=1 000 distinct + a Phase 8a bench at N=1 000 distinct and diff the flamegraphs. Whatever's different in the API server stack between them is the residual cost. Have not done this yet because we already have py-spy data on the openai path; the missing comparison is a scalarlm-only profile.
+**+19 % over v1, +12 % over v3.** First non-null result in the Phase 8a series. Per-run breakdown: 8.50, then 4 higher (~10.4). Run 1 may be warmup-affected; dropping it gives ~10.4 p/s mean. CIs of v3 and v4 marginally overlap, so the magnitude is suggestive at 5 runs — a 10-run repeat would tighten it.
+
+Note: v4 is a confounded change — switching to `api_router.create_completion` brings BOTH the `@with_cancellation` + `@load_aware_call` decorators AND the `JSONResponse` wrapping path (vs the direct serving's Pydantic-model return). Either or both could be the lever. To isolate: either re-add decorators to the direct serving path (keep Pydantic return), or use direct serving but wrap in JSONResponse manually. Phase 8a v4-isolation experiment if the v4 result holds at 10-run sample.
+
+### Open hypotheses for the remaining 40 % gap
+
+1. **`OpenAIConcurrencyLimiter` slot held for full 120 s call duration**. scalarlm's worker has no equivalent on its path. We're a single caller in the bench so contention shouldn't matter, but worth confirming by setting `openai_queue_concurrency=999` and re-running. Queued as Phase 8a v5.
+2. **Engine-internal request_id namespace**. scalarlm passes its own request_id (sha256-hash distribution); Phase 6 lets vLLM auto-generate (UUID distribution). Long shot — request_id is just a hash key — but cheap to test.
+3. **Comparative py-spy profile of scalarlm vs Phase 8a v4 at N=1 000 distinct.** We have py-spy data on the openai path; the missing comparison is scalarlm-only. Whatever's different in the API-server stack between them is the residual cost. The fallback after (1) and (2).
 
 ### Phase 9 — Dynamic, KV-aware concurrency limiter
 

@@ -59,6 +59,14 @@ _SCATTER_THRESHOLD = int(os.environ.get("SCALARLM_SCATTER_THRESHOLD", "0") or 0)
 # 0 / unset = no in-flight cap (pure asyncio.gather, the v1 behaviour).
 _SCATTER_MAX_INFLIGHT = int(os.environ.get("SCALARLM_SCATTER_MAX_INFLIGHT", "0") or 0)
 
+# Phase 8a v4 — route through the api_router.create_completion FastAPI
+# handler instead of calling OpenAIServingCompletion.create_completion
+# directly. The handler is wrapped by @with_cancellation and
+# @load_aware_call which the direct serving call bypasses. Tests whether
+# those decorators (which scalarlm worker gets) are the levers behind
+# the 49 % distinct-prompts gap to scalarlm.
+_SCATTER_VIA_API_ROUTER = bool(int(os.environ.get("SCALARLM_SCATTER_VIA_API_ROUTER", "0") or 0))
+
 openai_v1_router = APIRouter()
 
 # Tail-window for sniffing the upstream payload for `usage`. The terminal
@@ -396,10 +404,26 @@ async def _scatter_gather_completions(
         await asyncio.sleep(10.0)
         return {"type": "http.request"}
 
+    # Phase 8a v4: a SimpleNamespace mock app whose state has the
+    # openai_serving_completion attribute that vLLM's api_router
+    # `completion(request)` resolver looks up. Lets a fresh fastapi.Request
+    # serve as the raw_request input to the api_router handler without
+    # needing to thread the actual vllm app object through vllm_registry.
+    from types import SimpleNamespace
+    _fake_app = SimpleNamespace(state=SimpleNamespace(
+        openai_serving_completion=servings.openai_serving_completion
+    ))
+
     def _fresh_raw_request():
+        # Use the real raw_request.app (scalarlm's FastAPI) by default —
+        # OpenAIServingCompletion.create_completion doesn't read
+        # raw_request.app.state.openai_serving_completion. The api_router
+        # variant DOES need it (via the `completion()` resolver), so v4
+        # swaps in the fake app whose .state has the attribute.
+        app_for_scope = _fake_app if _SCATTER_VIA_API_ROUTER else raw_request.app
         return Request(
             scope={
-                "app": raw_request.app,
+                "app": app_for_scope,
                 "type": "http",
                 "headers": [],
                 "path": "/v1/completions",
@@ -407,9 +431,25 @@ async def _scatter_gather_completions(
             receive=_pass_receive,
         )
 
-    async def _call_one(r):
-        rr = _fresh_raw_request()
-        return await servings.openai_serving_completion.create_completion(r, rr)
+    if _SCATTER_VIA_API_ROUTER:
+        # Lazy import to avoid loading the api_router module on the hot
+        # path when this flag is off.
+        from vllm.entrypoints.openai.completion.api_router import (
+            create_completion as _api_router_create_completion,
+        )
+
+        async def _call_one(r):
+            rr = _fresh_raw_request()
+            response = await _api_router_create_completion(r, raw_request=rr)
+            # api_router returns JSONResponse / StreamingResponse. For
+            # non-streaming completions it's JSONResponse with body=bytes.
+            if hasattr(response, "body"):
+                return json.loads(response.body.decode("utf-8"))
+            return response  # streaming or error fallthrough — handled by caller
+    else:
+        async def _call_one(r):
+            rr = _fresh_raw_request()
+            return await servings.openai_serving_completion.create_completion(r, rr)
 
     if _SCATTER_MAX_INFLIGHT > 0:
         sem = asyncio.Semaphore(_SCATTER_MAX_INFLIGHT)
@@ -422,8 +462,15 @@ async def _scatter_gather_completions(
 
     # Per-sub error short-circuits the whole call (matches array-prompt
     # behaviour today — vLLM aborts the batch if any one prompt errors).
+    # sub_results are Pydantic models (v1/v3) or dicts (v4 via api_router).
     for r in sub_results:
-        if hasattr(r, "error") and hasattr(r.error, "code"):
+        if isinstance(r, dict):
+            err = r.get("error") if isinstance(r.get("error"), dict) else None
+            if err and "code" in err:
+                if queue_slot is not None:
+                    await queue_slot.release()
+                return JSONResponse(content=r, status_code=err["code"])
+        elif hasattr(r, "error") and hasattr(r.error, "code"):
             status_code = getattr(r.error, "code", 500)
             body = r.model_dump() if hasattr(r, "model_dump") else {"error": str(r)}
             if queue_slot is not None:
