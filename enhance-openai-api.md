@@ -476,7 +476,7 @@ Platform: RTX PRO 6000 Max-Q × 2 (TP=2), `Qwen/Qwen3-Next-80B-A3B-Instruct-FP8`
 - vLLM's GDN-prefill kernels compile JIT per sequence-length bucket. First call at a new length eats seconds of Triton compile. Repeating the same bucket is cheap. One discarded warmup per scenario removes this.
 - scalarlm's `/v1/generate` derives `request_id = sha256(json.dumps(requests_list))` (`generate.py:85-86`). Identical request lists across iterations collide; the queue returns cached results without re-running inference. A first attempt at the repeat run produced a fake **470 p/s** for scalarlm because of this. Varying the prompt per iteration defeats the hash collision.
 
-**Consolidated parity table** (prompts per second, mean ± stdev over 10 runs):
+**Consolidated parity table — Blackwell (2 × RTX PRO 6000 Max-Q, `Qwen/Qwen3-Next-80B-A3B-FP8`, TP=2):**
 
 | N per call | scalarlm `/v1/generate` | openai `/v1/completions` array | openai − scalarlm |
 |---|---|---|---|
@@ -485,9 +485,23 @@ Platform: RTX PRO 6000 Max-Q × 2 (TP=2), `Qwen/Qwen3-Next-80B-A3B-Instruct-FP8`
 | 100 | 11.04 ± 1.66 | **14.54 ± 2.77** | **+31.7 %** |
 | 1 000 | **16.57 ± 0.03** | 12.06 ± 0.86 | **−27.2 %** |
 
-**The picture flips between N=100 and N=1 000.** At N≤100 openai wins by 30–50 % — the scalarlm pipeline's fixed per-call tax dominates. At N=1 000 the gap reverses: scalarlm wins by 27 %, and its variance collapses to effectively zero (stdev 0.03 p/s) while openai's widens (stdev 0.86 p/s).
+On Blackwell the picture flips between N=100 and N=1 000. At N≤100 openai wins by 30–50 % — scalarlm's fixed per-call pipeline tax dominates. At N=1 000 the gap reverses: scalarlm wins by 27 %, with variance collapsing to 0.03 p/s while openai's widens to 0.86 p/s.
 
-**The plan's 5 % parity threshold is *not* met at N=1 000.** The first-pass number that looked like it cleared the threshold (openai 17.5 p/s vs scalarlm 16.6 p/s) was a single-sample fluke sitting high in openai's distribution; the mean of 10 runs is 12.06, well below scalarlm's 16.57.
+**Consolidated parity table — DGX Spark (1 × GB10, `nvidia/Qwen3-32B-NVFP4`, TP=1, co-resident sql-gen vLLM using ~50 GB GPU):**
+
+| N per call | scalarlm `/v1/generate` | openai `/v1/completions` array | openai − scalarlm |
+|---|---|---|---|
+| 1 | **0.80 ± 0.27** | 0.60 ± 0.00 | **−24.4 %** |
+| 10 | **3.54 ± 1.22** | 2.87 ± 0.05 | **−18.9 %** |
+| 100 | **5.67 ± 1.94** | 4.25 ± 0.11 | **−24.9 %** |
+| 1 000 | **16.60 ± 0.09** | 4.46 ± 0.12 | **−73.2 %** |
+
+Spark shape is very different from Blackwell. openai loses at **every** N, from −19 % to −73 %. Two contributors:
+
+- One-GPU GB10 is CPU-bound on the proxy side; the HTTP encode/decode of even a 1-element prompt list shows up relative to decode time.
+- The running sql-gen vLLM pod is contending for the same GB10, which inflates both paths' numbers and adds the very high scalarlm stdev at small N (up to 34 % of mean). At N=1 000 the stdev collapses to 0.09 — enough work per call to average out scheduler jitter and let vLLM's prefix cache hit cleanly.
+
+**The plan's 5 % parity threshold is not met on either platform** under the current openai implementation. Phase 6 (collapse the HTTP hop — see Architectural strategy / Phase 6) is the proposed fix; measurement of that landed below.
 
 #### Why the curve has the shape it does
 
