@@ -13,10 +13,10 @@ from cray_infra.one_server import vllm_registry
 
 def _fake_app_state(**overrides):
     defaults = dict(
-        engine_client=object(),
-        model_config=object(),
         openai_serving_completion=object(),
         openai_serving_chat=object(),
+        engine_client=object(),
+        model_config=object(),
         openai_serving_models=object(),
     )
     defaults.update(overrides)
@@ -49,10 +49,10 @@ def test_set_twice_replaces():
     assert vllm_registry.get_vllm_servings().engine_client is second.engine_client
 
 
-def test_missing_attribute_fails_loudly():
+def test_missing_required_attribute_fails_loudly():
     vllm_registry._reset_for_tests()
-    # Drop one required field on purpose — we want a clean AttributeError at
-    # startup, not a mysterious failure at first-request time.
+    # Drop a REQUIRED serving on purpose — we want a clean AttributeError
+    # at startup, not a mysterious failure at first-request time.
     state = _fake_app_state()
     del state.openai_serving_chat
 
@@ -61,4 +61,20 @@ def test_missing_attribute_fails_loudly():
     except AttributeError:
         pass
     else:
-        raise AssertionError("expected AttributeError when a serving attr is missing")
+        raise AssertionError("expected AttributeError when a required serving is missing")
+
+
+def test_missing_optional_attribute_is_tolerated():
+    vllm_registry._reset_for_tests()
+    state = _fake_app_state()
+    # model_config / engine_client / openai_serving_models are optional —
+    # some vLLM fork versions don't set them on app.state.
+    del state.model_config
+    del state.engine_client
+
+    vllm_registry.set_vllm_servings(state)
+    servings = vllm_registry.get_vllm_servings()
+    assert servings is not None
+    assert servings.openai_serving_completion is state.openai_serving_completion
+    assert servings.model_config is None
+    assert servings.engine_client is None

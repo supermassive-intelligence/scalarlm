@@ -20,11 +20,12 @@ from typing import Any, Optional
 
 @dataclass
 class VLLMServings:
-    engine_client: Any
-    model_config: Any
     openai_serving_completion: Any
     openai_serving_chat: Any
-    openai_serving_models: Any
+    # Optional references we stash for future callers; not required today.
+    engine_client: Any = None
+    model_config: Any = None
+    openai_serving_models: Any = None
 
 
 _servings: Optional[VLLMServings] = None
@@ -33,18 +34,18 @@ _servings: Optional[VLLMServings] = None
 def set_vllm_servings(app_state) -> None:
     """Called from create_vllm.run_server_worker after init_app_state.
 
-    Accepts vLLM's ``app.state`` (a Starlette ``State`` with the attributes
-    init_app_state sets) and copies the references we need into a plain
-    dataclass. A missing attribute means vLLM's version shifted its
-    layout; fail loudly so we notice at startup, not on the first request.
+    Only the two serving objects the openai proxy actually calls are
+    required; the rest are best-effort so future callers have them
+    without needing a registry change. If vLLM ever drops one of the two
+    required names, fail loudly at startup rather than at first request.
     """
     global _servings
     _servings = VLLMServings(
-        engine_client=app_state.engine_client,
-        model_config=app_state.model_config,
         openai_serving_completion=app_state.openai_serving_completion,
         openai_serving_chat=app_state.openai_serving_chat,
-        openai_serving_models=app_state.openai_serving_models,
+        engine_client=getattr(app_state, "engine_client", None),
+        model_config=getattr(app_state, "model_config", None),
+        openai_serving_models=getattr(app_state, "openai_serving_models", None),
     )
 
 
