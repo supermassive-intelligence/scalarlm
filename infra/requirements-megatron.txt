@@ -1,4 +1,4 @@
-torchao==0.14.1
+torchao>=0.16.1
 accelerate
 transformers>=5.5.0
 huggingface_hub>=0.37
