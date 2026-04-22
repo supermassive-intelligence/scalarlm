@@ -1,0 +1,192 @@
+{
+  "patha_generate_bulk": [
+    {
+      "prompt_count": 1,
+      "duration_seconds": 0.42790950601920485,
+      "status_code": 200,
+      "prompts_per_second": 2.3369427085247305,
+      "results_returned": 1
+    },
+    {
+      "prompt_count": 10,
+      "duration_seconds": 1.649272306007333,
+      "status_code": 200,
+      "prompts_per_second": 6.0632801288033855,
+      "results_returned": 10
+    },
+    {
+      "prompt_count": 100,
+      "duration_seconds": 7.661375627969392,
+      "status_code": 200,
+      "prompts_per_second": 13.052486244758695,
+      "results_returned": 100
+    },
+    {
+      "prompt_count": 1000,
+      "duration_seconds": 60.26029638800537,
+      "status_code": 200,
+      "prompts_per_second": 16.594674436401327,
+      "results_returned": 1000
+    }
+  ],
+  "patha_upload_download": [
+    {
+      "file": "patha_upload_download_n1.json",
+      "error": "empty (client crashed)"
+    },
+    {
+      "file": "patha_upload_download_n10.json",
+      "error": "empty (client crashed)"
+    },
+    {
+      "file": "patha_upload_download_n100.json",
+      "error": "empty (client crashed)"
+    },
+    {
+      "file": "patha_upload_download_n1000.json",
+      "error": "empty (client crashed)"
+    }
+  ],
+  "pathb_batches": [
+    {
+      "prompt_count": 1,
+      "submit_seconds": 0.025133979972451925,
+      "poll_seconds": 0.509241774037946,
+      "fetch_seconds": 0.004800568975042552,
+      "total_seconds": 0.5391763229854405,
+      "status": "completed",
+      "prompts_per_second": 1.8546808481184054,
+      "completed_count": 1,
+      "failed_count": 0
+    },
+    {
+      "prompt_count": 10,
+      "submit_seconds": 0.021005946036893874,
+      "poll_seconds": 3.5555391350062564,
+      "fetch_seconds": 0.007124077994376421,
+      "total_seconds": 3.5836691590375267,
+      "status": "completed",
+      "prompts_per_second": 2.7904361580871266,
+      "completed_count": 10,
+      "failed_count": 0
+    },
+    {
+      "prompt_count": 100,
+      "submit_seconds": 0.020328533020801842,
+      "poll_seconds": 34.05779314303072,
+      "fetch_seconds": 0.008146975946146995,
+      "total_seconds": 34.08626865199767,
+      "status": "completed",
+      "prompts_per_second": 2.9337326716791976,
+      "completed_count": 100,
+      "failed_count": 0
+    },
+    {
+      "prompt_count": 1000,
+      "submit_seconds": 0.02618399099446833,
+      "poll_seconds": 309.70983985299245,
+      "fetch_seconds": 0.01827472198056057,
+      "total_seconds": 309.7542985659675,
+      "status": "completed",
+      "prompts_per_second": 3.22836520632508,
+      "completed_count": 1000,
+      "failed_count": 0
+    }
+  ],
+  "pathb_chat_single": [
+    {
+      "concurrency": 1,
+      "duration_seconds": 20.332872690050863,
+      "requests_total": 57,
+      "requests_per_second": 2.803342197086142,
+      "p50_ms": 357.0550630101934,
+      "p95_ms": 367.31836040271446,
+      "p99_ms": 372.81664218287915,
+      "max_ms": 375.10269100312144,
+      "status_counts": {
+        "200": 57
+      },
+      "retry_after_count": 0,
+      "errors": 0
+    },
+    {
+      "concurrency": 10,
+      "duration_seconds": 21.08296446397435,
+      "requests_total": 130,
+      "requests_per_second": 6.166115786142805,
+      "p50_ms": 1369.9681464931928,
+      "p95_ms": 3911.682468286017,
+      "p99_ms": 3919.381339387619,
+      "max_ms": 3920.0557349831797,
+      "status_counts": {
+        "200": 130
+      },
+      "retry_after_count": 0,
+      "errors": 0
+    },
+    {
+      "concurrency": 50,
+      "duration_seconds": 23.736695357016288,
+      "requests_total": 291,
+      "requests_per_second": 12.259499295211867,
+      "p50_ms": 3815.3890459798276,
+      "p95_ms": 4846.333513502032,
+      "p99_ms": 5482.273192179855,
+      "max_ms": 6075.573250011075,
+      "status_counts": {
+        "200": 291
+      },
+      "retry_after_count": 0,
+      "errors": 0
+    },
+    {
+      "concurrency": 200,
+      "duration_seconds": 31.653068716987036,
+      "requests_total": 502,
+      "requests_per_second": 15.85944176498107,
+      "p50_ms": 12415.738453477388,
+      "p95_ms": 12997.391245621839,
+      "p99_ms": 13209.156165131717,
+      "max_ms": 13384.804255969357,
+      "status_counts": {
+        "200": 502
+      },
+      "retry_after_count": 0,
+      "errors": 0
+    }
+  ],
+  "pathb_completions_array": [
+    {
+      "prompt_count": 1,
+      "duration_seconds": 0.2359848100459203,
+      "status_code": 200,
+      "prompts_per_second": 4.2375608828611036,
+      "total_tokens": 17,
+      "tokens_per_second": 72.03853500863877
+    },
+    {
+      "prompt_count": 10,
+      "duration_seconds": 1.088943773007486,
+      "status_code": 200,
+      "prompts_per_second": 9.183210600839034,
+      "total_tokens": 194,
+      "tokens_per_second": 178.15428565627727
+    },
+    {
+      "prompt_count": 100,
+      "duration_seconds": 9.047498526982963,
+      "status_code": 200,
+      "prompts_per_second": 11.052778809718871,
+      "total_tokens": 2340,
+      "tokens_per_second": 258.6350241474216
+    },
+    {
+      "prompt_count": 1000,
+      "duration_seconds": 57.07627367199166,
+      "status_code": 200,
+      "prompts_per_second": 17.520414975701502,
+      "total_tokens": 17000,
+      "tokens_per_second": 297.84705458692554
+    }
+  ]
+}

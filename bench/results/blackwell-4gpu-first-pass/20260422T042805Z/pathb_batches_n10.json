@@ -1,0 +1,11 @@
+{
+  "prompt_count": 10,
+  "submit_seconds": 0.021005946036893874,
+  "poll_seconds": 3.5555391350062564,
+  "fetch_seconds": 0.007124077994376421,
+  "total_seconds": 3.5836691590375267,
+  "status": "completed",
+  "prompts_per_second": 2.7904361580871266,
+  "completed_count": 10,
+  "failed_count": 0
+}
