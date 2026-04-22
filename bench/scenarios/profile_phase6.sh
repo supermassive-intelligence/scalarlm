@@ -25,11 +25,20 @@ mkdir -p "${OUT}"
 echo "Output: ${OUT}"
 
 # Find the APIServer uvicorn process — the FastAPI app hosting the
-# openai proxy. It's the parent python that imports cray_infra.one_server
-# and whose children include the vLLM EngineCore workers.
-PID=$(pgrep -f "cray_infra.one_server.main" | head -1)
+# openai proxy. The main.py process spawns a uvicorn worker via
+# multiprocessing.spawn; that worker is the actual ASGI server whose
+# handlers we want to profile. On this fork it shows up with
+# `spawn_main` in argv, and is the parent of VLLM::EngineCore.
+PID=$(pgrep -f "VLLM::EngineCore" | head -1)
+if [[ -n "${PID}" ]]; then
+  # Walk up to the parent spawn_main worker.
+  PID=$(ps -o ppid= -p "${PID}" | tr -d ' ')
+fi
 if [[ -z "${PID}" ]]; then
-  echo "could not find cray_infra.one_server.main PID" >&2
+  PID=$(pgrep -f "spawn_main" | head -1)
+fi
+if [[ -z "${PID}" ]]; then
+  echo "could not find APIServer uvicorn PID" >&2
   ps -ef | grep -E "python|uvicorn" | grep -v grep | head
   exit 3
 fi
