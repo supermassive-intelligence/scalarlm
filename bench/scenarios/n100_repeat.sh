@@ -33,14 +33,23 @@ run_many() {
   local script="$1" subdir="$2"
   echo ">>> ${subdir} warmup"
   for w in $(seq 1 "${WARMUP}"); do
+    # Warmup uses a distinct tag too so scalarlm's request-id dedup
+    # (SHA-256 of the request list) doesn't feed cached results into
+    # the measurement runs.
     python3 "${ROOT}/bench/client/${script}" \
       --url "${URL}" --model "${MODEL}" --prompt-count 100 --max-tokens 16 \
+      --prompt "w${subdir}${w} Say hello in five words." \
       > /dev/null
   done
   echo ">>> ${subdir} measurement"
   for i in $(seq 1 "${ITER}"); do
+    # Unique prompt per iteration → unique SHA-256 on the scalarlm side
+    # → no dedup shortcut. vLLM's prefix cache still helps both paths
+    # equally since token prefixes repeat, but decode work is not
+    # skipped.
     python3 "${ROOT}/bench/client/${script}" \
       --url "${URL}" --model "${MODEL}" --prompt-count 100 --max-tokens 16 \
+      --prompt "${subdir} run ${i} $(date +%N) Say hello in five words." \
       > "${OUT}/${subdir}/run_$(printf %02d "$i").json"
   done
 }
