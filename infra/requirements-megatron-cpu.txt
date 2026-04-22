@@ -1,5 +1,5 @@
 sentence-transformers
-torchao==0.16.0
+torchao>=0.16.1
 transformers>=5.5.0
 huggingface_hub>=0.37
 peft
