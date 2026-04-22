@@ -1,0 +1,12 @@
+{
+  "concurrency": 1000000,
+  "duration_seconds": 8.63320261699846,
+  "requests_total": 0,
+  "requests_per_second": 0.0,
+  "p50_ms": 0.0,
+  "p95_ms": 0.0,
+  "p99_ms": 0.0,
+  "max_ms": 0.0,
+  "status_counts": {},
+  "errors": 0
+}

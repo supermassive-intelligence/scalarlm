@@ -1,0 +1,87 @@
+{
+  "scenario": "nop",
+  "runs": [
+    {
+      "concurrency": 10,
+      "duration_seconds": 5.0037551280111074,
+      "requests_total": 4851,
+      "requests_per_second": 969.471901781128,
+      "p50_ms": 6.691311951726675,
+      "p95_ms": 32.605738000711426,
+      "p99_ms": 60.9717330080457,
+      "max_ms": 137.55931297782809,
+      "status_counts": {
+        "200": 4851
+      },
+      "errors": 0
+    },
+    {
+      "concurrency": 100,
+      "duration_seconds": 5.37681397900451,
+      "requests_total": 945,
+      "requests_per_second": 175.75463902788061,
+      "p50_ms": 391.9915329897776,
+      "p95_ms": 1710.6589953997172,
+      "p99_ms": 2409.6216649678536,
+      "max_ms": 3329.1187940048985,
+      "status_counts": {
+        "200": 945
+      },
+      "errors": 0
+    },
+    {
+      "concurrency": 1000,
+      "duration_seconds": 7.502729596046265,
+      "requests_total": 2857,
+      "requests_per_second": 380.7947445561095,
+      "p50_ms": 1398.6093510175124,
+      "p95_ms": 6350.015274377074,
+      "p99_ms": 7167.054690262303,
+      "max_ms": 7443.607488996349,
+      "status_counts": {
+        "200": 2857
+      },
+      "errors": 0
+    },
+    {
+      "concurrency": 10000,
+      "duration_seconds": 27.4783658850356,
+      "requests_total": 10050,
+      "requests_per_second": 365.7422731048615,
+      "p50_ms": 15998.979502503062,
+      "p95_ms": 22357.536448241444,
+      "p99_ms": 26961.18930368102,
+      "max_ms": 27418.744189024437,
+      "status_counts": {
+        "200": 10050
+      },
+      "errors": 0
+    },
+    {
+      "concurrency": 100000,
+      "duration_seconds": 32.35773722198792,
+      "requests_total": 12127,
+      "requests_per_second": 374.778987690134,
+      "p50_ms": 19076.100733946078,
+      "p95_ms": 27085.4151976062,
+      "p99_ms": 27308.694428744493,
+      "max_ms": 27418.24742499739,
+      "status_counts": {
+        "200": 12127
+      },
+      "errors": 0
+    },
+    {
+      "concurrency": 1000000,
+      "duration_seconds": 8.63320261699846,
+      "requests_total": 0,
+      "requests_per_second": 0.0,
+      "p50_ms": 0.0,
+      "p95_ms": 0.0,
+      "p99_ms": 0.0,
+      "max_ms": 0.0,
+      "status_counts": {},
+      "errors": 0
+    }
+  ]
+}
