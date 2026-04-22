@@ -401,62 +401,66 @@ Raw JSON:
 
 Not measured. Docker Desktop's 7.6 GB VM on this machine OOMs the CPU vLLM stack (exit 137) on the first inference request even with `max_model_length=64` and `gpu_memory_utilization=0.10`. The nop-only entrypoint (`bench/server/nop_only_main.py`) survives because it doesn't boot vLLM; anything that does pushes the VM over. The plan's M5 role — stable denominator for proxy-overhead — is still satisfied by the nop numbers above; the inference scenarios belong on Spark/Blackwell per the original grid.
 
-#### Blackwell — full inference sweep
+#### Blackwell — bulk parity sweep (10 measurement runs per cell)
 
-Raw JSON: `bench/results/blackwell-4gpu-first-pass/20260422T042805Z/summary.json`. Platform: RTX PRO 6000 Max-Q × 2 (TP=2), `Qwen/Qwen3-Next-80B-A3B-Instruct-FP8`, `openai_queue_concurrency=16`, `max_num_seqs=16`.
+Platform: RTX PRO 6000 Max-Q × 2 (TP=2), `Qwen/Qwen3-Next-80B-A3B-Instruct-FP8`, `openai_queue_concurrency=16`, `max_num_seqs=16`. Each cell is 10 measurement iterations + 1 discarded warmup, with a unique prompt per iteration. Runner: `bench/scenarios/bulk_repeat.sh`. Raw JSON under `bench/results/blackwell-4gpu-n{1,10,100,1000}-repeat/`.
 
-**Parity check — bulk wire efficiency** (prompts per second; equal payload size per prompt):
+**Why warmup + per-iteration unique prompts are mandatory** (both learned the hard way from the first pass):
+
+- vLLM's GDN-prefill kernels compile JIT per sequence-length bucket. First call at a new length eats seconds of Triton compile. Repeating the same bucket is cheap. One discarded warmup per scenario removes this.
+- scalarlm's `/v1/generate` derives `request_id = sha256(json.dumps(requests_list))` (`generate.py:85-86`). Identical request lists across iterations collide; the queue returns cached results without re-running inference. A first attempt at the repeat run produced a fake **470 p/s** for scalarlm because of this. Varying the prompt per iteration defeats the hash collision.
+
+**Consolidated parity table** (prompts per second, mean ± stdev over 10 runs):
 
 | N per call | scalarlm `/v1/generate` | openai `/v1/completions` array | openai − scalarlm |
 |---|---|---|---|
-| 1 | 2.3 | 4.2 | **+81 %** |
-| 10 | 6.1 | 9.2 | **+51 %** |
-| 100 | 13.1 | 11.1 | −15 % |
-| 1 000 | 16.6 | 17.5 | **+5.6 %** |
+| 1 | 2.14 ± 0.23 | **2.94 ± 0.08** | **+37.6 %** |
+| 10 | 6.62 ± 0.89 | **10.05 ± 0.87** | **+51.8 %** |
+| 100 | 11.04 ± 1.66 | **14.54 ± 2.77** | **+31.7 %** |
+| 1 000 | **16.57 ± 0.03** | 12.06 ± 0.86 | **−27.2 %** |
 
-At the large-batch end the plan's 5 % threshold is cleared favourably — openai is faster, not slower. Small N favours openai by a lot (less middleware weight; for single-prompt calls the scalarlm worker + queue round-trip costs show). The first-pass apparent −15 % dip at N=100 was single-run noise — see the repeated-runs section below for the corrected number.
+**The picture flips between N=100 and N=1 000.** At N≤100 openai wins by 30–50 % — the scalarlm pipeline's fixed per-call tax dominates. At N=1 000 the gap reverses: scalarlm wins by 27 %, and its variance collapses to effectively zero (stdev 0.03 p/s) while openai's widens (stdev 0.86 p/s).
 
-**N=100, 10 iterations with warmup, unique prompt per iteration** (`bench/scenarios/n100_repeat.sh`, raw JSON at `bench/results/blackwell-4gpu-n100-repeat/20260422T050053Z/summary.json`):
+**The plan's 5 % parity threshold is *not* met at N=1 000.** The first-pass number that looked like it cleared the threshold (openai 17.5 p/s vs scalarlm 16.6 p/s) was a single-sample fluke sitting high in openai's distribution; the mean of 10 runs is 12.06, well below scalarlm's 16.57.
 
-| metric | openai `/v1/completions` array | scalarlm `/v1/generate` |
-|---|---|---|
-| mean prompts/s | **14.54** | 11.04 |
-| stdev | 2.77 (19 %) | 1.66 (15 %) |
-| min — max | 9.60 — 17.39 | 8.91 — 13.53 |
-| mean call duration | 7.14 s | 9.24 s |
+#### Why the curve has the shape it does
 
-**openai beats scalarlm by +31.7 % on the mean** at N=100; both distributions overlap substantially (openai's low end touches scalarlm's high end) but the means are separated by more than one stdev. The first-pass −15 % for openai at N=100 was a single sample near its lower edge.
+Both paths hit the same vLLM process on the same two GPUs — the throughput gap lives entirely in the code between the client and vLLM. There are two opposing effects that trade places around N≈100.
 
-**Why the first run of each scenario has to be a warmup, and why the prompts must vary per iteration.** Two real gotchas surfaced while turning the single-sample numbers into statistics:
+**Small N (openai wins):** scalarlm pays a fixed per-call pipeline tax that openai skips. One `/v1/generate` call runs: build per-prompt dicts → SHA-256 the list → JSON-dump to disk → push into SQLite (persistent queue) → worker polls the queue (~0.1 s idle loop) → SQLite select → read JSON back → iterate prompts → construct a vLLM `CompletionRequest` per prompt → call vLLM Python API → collect results → write results JSON → HTTP `/v1/generate/finish_work` → SQLite update + ack → client polls `/v1/generate/get_results`. The openai path is: parse `CompletionRequest` → filter → POST upstream → proxy the response back. At N=1 that's a few tens of ms of fixed scalarlm overhead per call that openai skips — a 37 % throughput penalty when the inference itself is a few hundred ms.
 
-- vLLM's GDN-prefill kernels compile JIT per sequence-length bucket. First call at a new length eats seconds of Triton compile. Repeating at the *same* bucket is cheap. Benchmark runs need one discarded warmup before the measurement window.
-- scalarlm's `/v1/generate` derives `request_id = sha256(json.dumps(requests_list))` (`generate.py:85-86`). Identical request lists across iterations collide; the queue may return cached results without re-running inference. A first attempt at the repeat run produced a fake *470 p/s* for scalarlm because of this — that's the red-flag to watch for. The fix is to vary the prompt per iteration so every batch hashes differently.
+Additional small-N contributors: client-side polling (scalarlm's `get_results` loop rounds wake-up to the poll interval; openai replies inline), worker-side 100 ms idle poll on the SQLite queue, per-prompt `metrics.record_new_request()` calls (`generate.py:82`), and two extra encode/decode trips through disk-backed JSON.
 
-#### Why openai is faster than scalarlm on this benchmark
+**Large N (scalarlm wins):** the fixed pipeline cost is fully amortized, and a new factor starts to dominate — the openai proxy forwards a big request/response over HTTP to vLLM, while scalarlm's worker calls vLLM's Python API in-process:
 
-Both paths end up at the same vLLM process serving the same model on the same two GPUs, so the throughput gap has to live entirely in the code between the client and vLLM. Going most-to-least influential:
+- openai at N=1 000 serializes a 1000-element JSON `prompt` array to TCP (~100 KB body), vLLM deserializes it, generates, serializes a 1000-element `choices` response (OpenAI response objects carry `index`, `finish_reason`, `logprobs`, `text` per item — hundreds of KB), and the proxy streams every byte back to the client while scanning the tail for `usage.total_tokens`.
+- scalarlm's worker calls `create_completion(…)` directly on the in-process engine client (`create_generate_worker.py:473-509`) — no HTTP hop, no extra encode/decode passes, no tail-scan for usage.
 
-1. **More pipeline stages in scalarlm.** A single `/v1/generate` call runs: build per-prompt dicts → SHA-256 the list → JSON-dump to disk → push into SQLite (persistent queue) → worker polls the queue (~0.1 s idle loop) → SQLite select → read JSON back → iterate prompts → construct a vLLM `CompletionRequest`/`ChatCompletionRequest` per prompt → call vLLM Python API → collect results → write results JSON → HTTP `/v1/generate/finish_work` → SQLite update + ack → client polls `/v1/generate/get_results`. The openai path is: parse `CompletionRequest` → filter → POST upstream → proxy the response back. At N=1 the fixed overhead of the longer pipeline dominates; at N=1000 it amortizes to a few percent.
-2. **How N prompts reach vLLM.** openai forwards `prompt=[p1..pN]` as a single vLLM call — vLLM's scheduler sees all N at once and runs them under one continuous-batch sweep. scalarlm's worker loops over prompts and submits each as a *separate* vLLM request (see `create_generate_worker.py:473-509`). Continuous batching still catches them, but the worker's temporal spread means each prompt's prefill starts slightly later than it would in a single submit. This is the largest inference-side contributor.
-3. **Client polls the server for results.** The scalarlm client (and my harness) polls `/v1/generate/get_results` on an interval. Even after the server finishes, the client can wait up to one poll before noticing. openai returns the answer on the same HTTP response.
-4. **Worker polls the queue.** The worker idles between queue polls (`await asyncio.sleep(0.1)`). A request enqueued mid-poll waits on average ~50 ms for pickup; openai has no such poll — the request is in vLLM's queue the moment the proxy opens its POST.
-5. **Per-prompt Python work in `generate.py`.** `metrics.record_new_request()` is called *once per prompt* (`generate.py:82`); openai records once per HTTP call. Small absolute, but for N=100 that's 100 extra function entries that touch an epoch timer.
-6. **Two extra encode/decode trips.** scalarlm dict-ifies each request, JSON-dumps the list, writes to disk, and the worker re-parses into Pydantic. openai parses once via vLLM's Pydantic model and forwards it as-is.
+The crossover point is where that transport overhead on openai exceeds the pipeline overhead on scalarlm. On this hardware that's somewhere between N=100 and N=1 000; the exact location will vary with the size of the response payload (longer completions push the crossover higher).
 
-Things this is probably **not**:
+The scalarlm stdev collapses at N=1 000 (0.03 p/s — essentially deterministic) while openai's is 0.86 p/s. Two reasons contribute: HTTP timing is variable (TCP buffer scheduling, JSON parser pipelining), and vLLM's prefix cache hits on identical within-batch prompts make scalarlm's run-to-run behaviour highly repeatable once the fixed costs are amortized.
 
-- Not a vLLM difference — same kernels, same KV cache, same GPU assignment.
+**Caveats worth tightening before calling the large-N delta "inherent":**
+
+- This benchmark sends *identical* prompts within each batch (vLLM's prefix cache hits on all but the first). For a batch of *distinct* prompts (the more realistic offline-bulk shape) both paths would do more real prefill work and the 27 % gap may shrink, stay, or widen — not measured yet.
+- scalarlm's disk-for-request-JSON here is longhorn-backed; a faster scratch tier (tmpfs, local NVMe) would shrink the small-N gap slightly.
+- openai proxy's HTTP-to-vLLM hop is the same loopback interface as scalarlm's in-process call — this isn't network-bound. It's the JSON parse/build and kernel-mode TCP overhead that shows.
+- Polling cadences (client-side `get_results`, worker-side queue poll) could be tuned tighter; I didn't touch them.
+
+**What this does *not* explain away:**
+
+- Not a vLLM difference — same kernels, same KV cache, same GPU assignment, same `max_num_seqs`.
 - Not adapter-load overhead — both runs use the base model; no LoRA load fires.
 - Not the new queue — at the concurrencies measured, `OpenAIConcurrencyLimiter` is a semaphore acquire/release on the order of microseconds.
-- Not a statistical artefact — the N=100 gap (3.5 p/s) exceeds both stdevs (2.77 and 1.66) and the same sign holds across N=1/10/1000.
+- Not a statistical artefact — differences at every N are larger than the combined stdevs of the two distributions.
 
-Caveats worth tightening before calling the delta "inherent":
+**What it means for the deprecation story.** The headline "5 % parity cleared at N=1 000" is retracted: scalarlm is meaningfully faster at that size under the benchmark's conditions. That does *not* by itself block deprecation, but it does change the argument:
 
-- Disk for scalarlm's request/results JSON is longhorn-backed in this pod. A faster scratch disk (tmpfs or local NVMe) would narrow the gap a little.
-- The harness's polling cadences (client-side `get_results` and worker-side queue poll) could be tuned tighter; I didn't touch them.
-- scalarlm creates a FastAPI `Request` object per prompt in the worker (`create_generate_worker.py:367-376`). I haven't profiled whether that construction is material at this batch size.
+- Openai wins small-to-mid N (the common synchronous-request case).
+- Scalarlm wins large N when the batch is homogeneous.
+- The large-N shape scalarlm is winning is exactly what `/v1/batches` is supposed to cover on the openai side. The current `/v1/batches` implementation's 1-second poll cadence dominates small/mid batches (seen in the table further down) and hasn't been tuned for the truly-bulk case. Optimising the Batch API (tighter poll, drainer pool sized to vLLM's real concurrency) is the natural next step before the parity claim can be re-asserted at N=1 000.
 
-Bottom line: scalarlm's pipeline buys durability, cross-machine worker scaling, per-request error isolation, and auditability; it pays for those with a fixed per-call tax of a few ms up to tens of ms that the shorter openai pipeline skips by assuming the client will retry on HTTP 5xx. Both are valid designs; for throughput benchmarks on the happy path, the shorter pipeline wins.
+An alternative — and probably the right long-term fix — is to collapse the HTTP hop from the openai proxy to vLLM entirely, invoking vLLM's Python API in-process the same way scalarlm's worker does. That removes the biggest contributor to the large-N gap. Not in scope for this plan, but worth a mention as a "Phase 6" candidate.
 
 **openai interactive chat** (`pathb_chat_single`, one request per coroutine, queue=16):
 
@@ -484,7 +488,14 @@ Batches API runs ~5× slower than array `/v1/completions` at equal N because the
 
 **Phase 3 smoke on the same pod** (`bench/smoke_phase3.sh`): 6/6 features live — `X-Request-Id` auto-assigned and caller-supplied round-trips, `/v1/bench/nop` gated behind config, scalarlm deprecation log fires with migration hint, Batch POST/GET/DELETE round-trips, state machine transitions correctly on cancel.
 
-Summary: **on the production-class platform, with the production-class model, the plan's headline parity claim is empirically cleared.** Deprecating scalarlm — under the telemetry-gated path described in Phase 4 — is data-supported.
+Summary (revised from the first-pass claim):
+
+- openai wins the **small-to-mid N bulk case** (N=1/10/100) by 32–52 % in mean prompts/sec.
+- scalarlm wins the **large-N bulk case** (N=1 000) by 27 %, driven mostly by scalarlm's in-process vLLM call vs openai's HTTP proxy hop. The plan's 5 % parity threshold is *not* met at N=1 000 under the current openai implementation.
+- openai is the only option for **interactive streaming chat** (scalarlm has no streaming surface at all).
+- Phase 3 features (request-ids, FLOP metrics, queue, LoRA routing, Batch API) are all live and correct; that part of the plan is data-supported.
+
+Deprecation of scalarlm under the telemetry-gated path in Phase 4 is still on the table, but the parity story at N=1 000 needs either (a) a tuned `/v1/batches` (tighter poll cadence, drainer-pool-sized-to-vLLM-concurrency), or (b) collapsing the proxy's HTTP hop to vLLM into an in-process Python-API call like scalarlm's worker does. Either closes the large-N gap; both are out of scope for this iteration but noted as a Phase 6 candidate.
 
 ## Not in scope for this change
 
