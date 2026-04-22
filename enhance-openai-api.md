@@ -372,6 +372,49 @@ Before the benchmark runs:
 - Latency under cold start (adapter not yet loaded). The LoRA-load path runs once per adapter per worker; bench runs should be warm.
 - Mixed-shape workloads (streaming + bulk interleaved). Worth doing eventually but harder to attribute results; a separate follow-up.
 
+### First-pass results (2026-04-22, Blackwell)
+
+Raw JSON: `bench/results/blackwell-4gpu-first-pass/20260422T042805Z/summary.json`. Platform: RTX PRO 6000 Max-Q × 2 (TP=2), `Qwen/Qwen3-Next-80B-A3B-Instruct-FP8`, `openai_queue_concurrency=16`, `max_num_seqs=16`.
+
+**Parity check — bulk wire efficiency** (prompts per second; equal payload size per prompt):
+
+| N per call | Path A `/v1/generate` | Path B `/v1/completions` array | Path B − Path A |
+|---|---|---|---|
+| 1 | 2.3 | 4.2 | **+81 %** |
+| 10 | 6.1 | 9.2 | **+51 %** |
+| 100 | 13.1 | 11.1 | −15 % |
+| 1 000 | 16.6 | 17.5 | **+5.6 %** |
+
+At the large-batch end the plan's 5 % threshold is cleared favourably — Path B is faster, not slower. Small N favours Path B by a lot (less middleware weight; for single-prompt calls the Path A worker + queue round-trip costs show). The −15 % dip at N=100 is a real finding — likely worker-batch-scheduler behaviour in the mid-zone; worth a follow-up but not a blocker for parity.
+
+**Path B interactive chat** (`pathb_chat_single`, one request per coroutine, queue=16):
+
+| concurrency | RPS | P50 | P95 | P99 |
+|---|---|---|---|---|
+| 1 | 2.8 | 357 ms | 367 ms | 373 ms |
+| 10 | 6.2 | 1.37 s | 3.91 s | 3.92 s |
+| 50 | 12.3 | 3.82 s | 4.85 s | 5.48 s |
+| 200 | 15.9 | 12.4 s | 13.0 s | 13.2 s |
+
+Throughput plateaus at vLLM's decode ceiling; latency climbs with queue wait as designed. Zero 5xx across all levels — the limiter produces smooth degradation, not a cliff.
+
+**Path B async bulk** (`/v1/batches`, submit + 1 s poll + fetch, wall-clock end-to-end):
+
+| N | total s | prompts/s |
+|---|---|---|
+| 1 | 0.54 | 1.9 |
+| 10 | 3.58 | 2.8 |
+| 100 | 34.1 | 2.9 |
+| 1 000 | 309.8 | 3.2 |
+
+Batches API runs ~5× slower than array `/v1/completions` at equal N because the 1-second poll interval dominates small-batch runs and is still visible at 1000. The right default today is array prompts when the caller can block; batches belong to the truly-async/offline workload they were designed for. Tightening the poll interval would narrow the gap — worth revisiting if anyone hits it in practice.
+
+**Path A `upload_download` not measured** — harness script sends JSON; the endpoint requires multipart/form-data. Client fix is a follow-up; not blocking the parity claim since the 1000-prompt-per-call comparison in the first table is sufficient.
+
+**Phase 3 smoke on the same pod** (`bench/smoke_phase3.sh`): 6/6 features live — `X-Request-Id` auto-assigned and caller-supplied round-trips, `/v1/bench/nop` gated behind config, Path A deprecation log fires with migration hint, Batch POST/GET/DELETE round-trips, state machine transitions correctly on cancel.
+
+Summary: **on the production-class platform, with the production-class model, the plan's headline parity claim is empirically cleared.** Deprecating Path A — under the telemetry-gated path described in Phase 4 — is data-supported.
+
 ## Not in scope for this change
 
 - Rewriting the vLLM fork's OpenAI server. No evidence yet that we need to.
