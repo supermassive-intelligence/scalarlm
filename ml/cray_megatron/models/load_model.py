@@ -6,7 +6,7 @@ from cray_megatron.collectives.main_rank_only import is_main_rank
 
 from gpu_aware_mpi import get_size, get_rank, allgather
 
-from ml.adapters.add_adapters_to_model import add_adapters_to_model
+from adapters.add_adapters_to_model import add_adapters_to_model
 
 from cray_infra.util.get_job_config import get_job_config
 from cray_infra.util.get_config import get_config
