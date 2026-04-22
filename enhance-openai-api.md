@@ -6,7 +6,7 @@ Analysis and plan only. No implementation yet.
 
 ## Why this work exists
 
-The ScalarLM-native path (`POST /v1/generate` via the `scalarlm.SupermassiveIntelligence` SDK) does not expose tool calling, and that gap drives callers away — `sql-gen` already runs exclusively on the OpenAI path for this reason. The long-term direction is **a single OpenAI-compatible path**. This document proposes how to close the remaining feature gaps on the OpenAI path so Path A can be deprecated with no loss of capability.
+The ScalarLM-native path (`POST /v1/generate` via the `scalarlm.SupermassiveIntelligence` SDK) does not expose tool calling, and that gap drives callers away — `sql-gen` already runs exclusively on the OpenAI path for this reason. The long-term direction is **a single OpenAI-compatible path**. This document proposes how to close the remaining feature gaps on the OpenAI path so scalarlm can be deprecated with no loss of capability.
 
 ## Background: the two paths a caller can use today
 
@@ -14,14 +14,14 @@ Two inference entry points exist in ScalarLM. Callers such as `sql-gen` pick bet
 
 | Path | Client surface | Server entry | Transport to vLLM |
 |---|---|---|---|
-| **A — ScalarLM-native** | `scalarlm.SupermassiveIntelligence().async_api.generate([prompts], model_name, max_tokens)` | `POST /v1/generate` → SQLite work queue → `get_work` worker → vLLM Python API | In-process Python (`create_chat_completion`, `create_completion`, `load_lora_adapter`) |
-| **B — OpenAI-compatible** | `openai.AsyncOpenAI(base_url, api_key).chat.completions.create(...)` | `POST /v1/completions` / `POST /v1/chat/completions` | HTTP proxy straight to vLLM's OpenAI-compatible server |
+| **scalarlm** (ScalarLM-native) | `scalarlm.SupermassiveIntelligence().async_api.generate([prompts], model_name, max_tokens)` | `POST /v1/generate` → SQLite work queue → `get_work` worker → vLLM Python API | In-process Python (`create_chat_completion`, `create_completion`, `load_lora_adapter`) |
+| **openai** (OpenAI-compatible) | `openai.AsyncOpenAI(base_url, api_key).chat.completions.create(...)` | `POST /v1/completions` / `POST /v1/chat/completions` | HTTP proxy straight to vLLM's OpenAI-compatible server |
 
-Path A is a queue-based architecture with worker-side orchestration; Path B is a thin streaming proxy. `sql-gen` uses Path B in practice (`src/llm.py:70-74`) because it needs tool calling, which the ScalarLM SDK does not expose.
+The scalarlm path is a queue-based architecture with worker-side orchestration; the openai path is a thin streaming proxy. `sql-gen` uses the openai path in practice (`src/llm.py:70-74`) because it needs tool calling, which the ScalarLM SDK does not expose. Both paths go by their short names (`scalarlm` / `openai`) throughout the rest of this document.
 
 ## Functional inventory
 
-### What Path A does server-side (`infra/cray_infra/api/fastapi/generate/generate.py`, `infra/cray_infra/one_server/create_generate_worker.py`)
+### What scalarlm does server-side (`infra/cray_infra/api/fastapi/generate/generate.py`, `infra/cray_infra/one_server/create_generate_worker.py`)
 
 1. **Dynamic adapter/model routing.** `model_manager.find_model(model)` (`generate.py:56`) resolves the request's `model` field against LoRA adapters discovered under `training_job_directory`. The worker lazily loads the adapter into vLLM via `POST /v1/load_lora_adapter` the first time it's seen (`create_generate_worker.py:215-251`) and tracks `loaded_adaptor_count` so subsequent requests don't reload.
 2. **SQLite-backed ack queue.** Requests get a SHA-256 `request_id` (`generate.py:85-86`), are serialized to disk, and pushed into a `SQLiteAckQueue` (`infra/cray_infra/api/work_queue/inference_work_queue.py`). The queue is persistent, FIFO, and auto-recovers in-flight requests on restart.
@@ -32,7 +32,7 @@ Path A is a queue-based architecture with worker-side orchestration; Path B is a
 7. **FLOP metrics.** The worker computes `token_count × compute_flop_count(model_config)` per request and reports it on the shared metrics counter (`create_generate_worker.py:382, 502`).
 8. **Queue observability.** Prometheus/OTel counters expose `queue_depth` and `queue_wait_time_seconds` by model (`inference_work_queue.py:14-19`).
 
-### What Path B does today (`infra/cray_infra/api/fastapi/routers/openai_v1_router.py`)
+### What openai does today (`infra/cray_infra/api/fastapi/routers/openai_v1_router.py`)
 
 1. **Parameter whitelist and passthrough.** The two handlers filter incoming `CompletionRequest` / `ChatCompletionRequest` fields down to a known set (`_COMPLETION_ALLOWED_KEYS`, `_CHAT_ALLOWED_KEYS` at lines 43-75). `tools`, `tool_choice`, `temperature`, `response_format`, `top_p`, `stop`, `seed`, `presence_penalty`, `frequency_penalty`, and streaming are all included.
 2. **Usage sniffing for metrics.** `_ensure_usage_reported` forces `stream_options.include_usage=True` for streaming calls so vLLM emits a terminal `usage` event (`openai_v1_router.py:130-141`). `_wrap_with_metrics` scans the tail of the SSE stream (bounded to 64 KB) to pull `usage.total_tokens` and feed it into the shared metrics counter (`openai_v1_router.py:172-204`).
@@ -40,18 +40,18 @@ Path A is a queue-based architecture with worker-side orchestration; Path B is a
 
 ### Gap summary — what A has that B lacks
 
-| Capability | Path A | Path B | Disposition for this work |
+| Capability | scalarlm | openai | Disposition for this work |
 |---|---|---|---|
 | Dynamic LoRA routing by `model` name | Yes | No (vLLM-default only) | **In scope — proxy-side load.** Critical for finetune routing. |
-| FLOP metrics | Yes | `flop_count=None` | **In scope — observability parity.** Dashboards currently under-report Path B. |
+| FLOP metrics | Yes | `flop_count=None` | **In scope — observability parity.** Dashboards currently under-report openai. |
 | Durable request IDs | SHA-256 per request, persisted | None | **In scope — audit/correlation.** UUID per call surfaced as `X-Request-Id`. |
-| Request queue with depth + wait-time metrics | Yes (SQLiteAckQueue) | No | **In scope — see "Queue on Path B" below.** Backpressure, fair ordering, observability. |
+| Request queue with depth + wait-time metrics | Yes (SQLiteAckQueue) | No | **In scope — see "Queue on openai" below.** Backpressure, fair ordering, observability. |
 | Multi-prompt batching on the wire | Yes (`prompts=[...]`) | Partial — already works on `/v1/completions` via the OpenAI-spec `prompt` array; not available for chat | **In scope — see "Multi-prompt on the OpenAI surface" below.** Test/document what already works; use OpenAI Batch API for chat. |
 | Per-request error isolation within a batch | Yes | Standard OpenAI shape (one `choices[i].finish_reason` per prompt index) | In scope implicitly — covered by multi-prompt testing. |
 | Polling-based result retrieval | Yes | Synchronous / SSE | **Not in scope to replicate.** The OpenAI Batch API pattern (submit → poll `/v1/batches/{id}`) subsumes this, and the sync/SSE path serves the common case. |
-| Streaming | No | Yes (SSE) | Path B is already ahead. |
+| Streaming | No | Yes (SSE) | openai is already ahead. |
 
-Net: **five gaps are in scope** — LoRA routing, FLOP metrics, request IDs, queue + observability, multi-prompt (via the completions `prompt` array today and the Batch API for chat). No gap remains that would require keeping Path A around.
+Net: **five gaps are in scope** — LoRA routing, FLOP metrics, request IDs, queue + observability, multi-prompt (via the completions `prompt` array today and the Batch API for chat). No gap remains that would require keeping scalarlm around.
 
 ## Architectural strategy
 
@@ -79,23 +79,23 @@ The fork already provides the primitives we need for closing Gap #1, which means
 
 3. **Durable request IDs — proxy-layer only, no fork changes.** Generate a UUID at request entry, inject it as a response header (`X-Request-Id`, as OpenAI itself does), and log it at enqueue and completion. Optional: include in the upstream vLLM call so it appears in vLLM's logs.
 
-4. **Queue on Path B — proxy-layer only, no fork changes.** The goal is the capabilities Path A's queue provides (bounded concurrency, fair ordering, `queue_depth` / `queue_wait_time_seconds` metrics, graceful 503 under overload) without disturbing the synchronous/SSE contract that OpenAI clients expect. The implementation is a FastAPI middleware that wraps both `create_completions` and `create_chat_completions`:
+4. **Queue on openai — proxy-layer only, no fork changes.** The goal is the capabilities scalarlm's queue provides (bounded concurrency, fair ordering, `queue_depth` / `queue_wait_time_seconds` metrics, graceful 503 under overload) without disturbing the synchronous/SSE contract that OpenAI clients expect. The implementation is a FastAPI middleware that wraps both `create_completions` and `create_chat_completions`:
    - A bounded `asyncio.Queue` of pending call objects (each carries the request, the caller's `asyncio.Future` or the async response-chunk sink).
    - A small pool of drainer tasks (size = desired vLLM concurrency) that pop items and do the real vLLM call, writing chunks back to the sink for streaming or the result to the future for non-streaming.
-   - OpenTelemetry counters: `openai_queue_depth`, `openai_queue_wait_seconds` (matching naming with Path A's `queue_depth` / `queue_wait_time_seconds` so dashboards merge cleanly).
+   - OpenTelemetry counters: `openai_queue_depth`, `openai_queue_wait_seconds` (matching naming with scalarlm's `queue_depth` / `queue_wait_time_seconds` so dashboards merge cleanly).
    - When the queue is full beyond a threshold, return `503 Service Unavailable` with `Retry-After` — standard OpenAI client retry territory.
-   - We **do not** replicate Path A's SQLiteAckQueue durability. Path A's durable queue exists to survive crashes in a polling world; with synchronous HTTP, a crashed request just returns an error to the client, who retries. If durability becomes a product requirement (compliance, async batch), it lands as part of the Batch API below, not here.
+   - We **do not** replicate scalarlm's SQLiteAckQueue durability. scalarlm's durable queue exists to survive crashes in a polling world; with synchronous HTTP, a crashed request just returns an error to the client, who retries. If durability becomes a product requirement (compliance, async batch), it lands as part of the Batch API below, not here.
 
 5. **Multi-prompt on the OpenAI surface — two distinct mechanisms, both proxy-layer:**
    - **`/v1/completions` with array `prompt`.** The OpenAI-spec `prompt` field accepts `str | list[str] | list[int] | list[list[int]]`. The vLLM fork already implements this (`vllm/entrypoints/openai/completion/protocol.py:46-52`), and our proxy's existing whitelist passes `prompt` through unchanged. Work: **an integration test confirming it round-trips**, plus documentation. Likely zero code changes.
    - **OpenAI Batch API (`/v1/batches`) for chat completions.** Chat completions has no in-request batching idiom; OpenAI's canonical answer for bulk chat is the [Batch API](https://platform.openai.com/docs/api-reference/batches) — submit a JSONL of requests, poll for a completed JSONL of responses. This is an async, queue-based interface by design, so it dovetails with the queue from item (4). Minimum viable endpoints: `POST /v1/batches` (enqueue), `GET /v1/batches/{id}` (status), `GET /v1/batches/{id}/output_file_content` (results). The implementation sits on top of the same queue infrastructure, with a persistent results store for later retrieval.
-   - Note: Path A's "upload for >128 prompts" flow (`/v1/generate/upload`, `/v1/generate/download`) is structurally a Batch API — the new endpoint is the OpenAI-shaped version of the same thing.
+   - Note: scalarlm's "upload for >128 prompts" flow (`/v1/generate/upload`, `/v1/generate/download`) is structurally a Batch API — the new endpoint is the OpenAI-shaped version of the same thing.
 
 None of (1)-(5) requires modifying the vllm-fork. If during implementation we discover a genuine vLLM gap (for example, if `/v1/load_lora_adapter`'s existing error shape doesn't expose enough detail), we raise it separately and propose a small upstream-friendly patch — not expected based on the fork review above.
 
 ## Test-driven implementation plan
 
-The user's preferred sequence is: write tests for Path A behaviour first, then write the same tests against Path B (they fail), then implement until they pass, then deprecate Path A.
+The user's preferred sequence is: write tests for scalarlm behaviour first, then write the same tests against openai (they fail), then implement until they pass, then deprecate scalarlm.
 
 ### Phase 0 — Repo-side baseline
 
@@ -110,7 +110,7 @@ The user's preferred sequence is: write tests for Path A behaviour first, then w
   - `test/infra/test_openai_parity.py` — integration module hitting a running server.
 - Wire up lightweight mocks for vLLM's endpoints (`load_lora_adapter`, `chat/completions`, `completions`) so unit tests don't need a live GPU.
 
-### Phase 1 — Capture Path A behaviour as tests
+### Phase 1 — Capture scalarlm behaviour as tests
 
 All pass against current `main`:
 
@@ -121,9 +121,9 @@ All pass against current `main`:
 5. `test_path_a_accepts_multi_prompt` — submit `prompts=[p1, p2, ..., p5]`; assert the response contains five distinct `Result` entries with correctly indexed `request_id`s and that per-item errors are isolated.
 6. `test_path_a_upload_download_for_large_batch` — submit `prompts=[...]` with length > 128; assert the upload/download (batch) flow is exercised and results round-trip correctly.
 
-Each test documents what "Path A parity" means for that capability, anchoring Phase 2.
+Each test documents what "scalarlm parity" means for that capability, anchoring Phase 2.
 
-### Phase 2 — Same tests against Path B (expected to fail)
+### Phase 2 — Same tests against openai (expected to fail)
 
 Mirror each Phase-1 test on the OpenAI surface. They fail today; that failure is the proof the gap is real.
 
@@ -144,58 +144,58 @@ Order is chosen so each step unlocks observability or primitives for the next.
 4. **Queue + concurrency control** (~150 lines). New module `infra/cray_infra/api/fastapi/routers/openai_queue.py`:
    - `OpenAIRequestQueue` with bounded `asyncio.Queue` and a pool of drainer tasks.
    - The two handlers enqueue an object carrying the upstream call and a chunk-sink / future; drainers do the actual `session.post` to vLLM.
-   - Emit `openai_queue_depth` and `openai_queue_wait_seconds` via the same OpenTelemetry meter as Path A.
+   - Emit `openai_queue_depth` and `openai_queue_wait_seconds` via the same OpenTelemetry meter as scalarlm.
    - 503 with `Retry-After` when depth exceeds a config threshold.
    - Config keys: `openai_queue_max_depth`, `openai_queue_concurrency`. Defaults chosen conservative; plumb through `default_config.py`.
 5. **Multi-prompt for `/v1/completions`** (~0 lines code, focus on tests). Confirm the array-prompt path end-to-end; document it in `docs/api-documentation.md`. Only code change expected is a log line that records the prompt-count for a batched call so it's visible in the request log.
-6. **Batch API scaffold** (~200 lines). Introduce `POST /v1/batches`, `GET /v1/batches/{id}`, `GET /v1/batches/{id}/output_file_content`, `DELETE /v1/batches/{id}` at OpenAI-spec shapes. Under the hood: persist the incoming JSONL to disk, enqueue each line via the queue from step 4, aggregate outputs into the result JSONL as items complete, record `batch.status` transitions (`validating` → `in_progress` → `completed` / `failed`). Reuse Path A's on-disk results layout where it fits; the goal is that Batch API inherits durability "for free" from a simple file-backed results store.
+6. **Batch API scaffold** (~200 lines). Introduce `POST /v1/batches`, `GET /v1/batches/{id}`, `GET /v1/batches/{id}/output_file_content`, `DELETE /v1/batches/{id}` at OpenAI-spec shapes. Under the hood: persist the incoming JSONL to disk, enqueue each line via the queue from step 4, aggregate outputs into the result JSONL as items complete, record `batch.status` transitions (`validating` → `in_progress` → `completed` / `failed`). Reuse scalarlm's on-disk results layout where it fits; the goal is that Batch API inherits durability "for free" from a simple file-backed results store.
 
-At the end of Phase 3, Phase-2 tests pass. Phase-1 tests still pass (we don't touch Path A).
+At the end of Phase 3, Phase-2 tests pass. Phase-1 tests still pass (we don't touch scalarlm).
 
-### Phase 4 — Mark Path A for deprecation (the point of this work)
+### Phase 4 — Mark scalarlm for deprecation (the point of this work)
 
-- Emit a structured deprecation log when `POST /v1/generate`, `/v1/generate/get_results`, `/v1/generate/upload`, `/v1/generate/download` are hit, including the caller's `User-Agent` so we can see who's still on Path A.
+- Emit a structured deprecation log when `POST /v1/generate`, `/v1/generate/get_results`, `/v1/generate/upload`, `/v1/generate/download` are hit, including the caller's `User-Agent` so we can see who's still on scalarlm.
 - Update `docs/api-documentation.md` and the SDK README to point new integrations at:
   - `/v1/chat/completions` for chat.
   - `/v1/completions` with an array `prompt` for the small-batch-of-prompts case.
-  - `/v1/batches` for the large-batch-of-prompts case (was Path A's `upload`/`download`).
-- Publish a one-line migration for each common Path A usage (single-prompt generate, multi-prompt generate, uploaded batch), so callers can migrate without reading the spec.
+  - `/v1/batches` for the large-batch-of-prompts case (was scalarlm's `upload`/`download`).
+- Publish a one-line migration for each common scalarlm usage (single-prompt generate, multi-prompt generate, uploaded batch), so callers can migrate without reading the spec.
 - Leave `sdk/masint/engines/async_cray.py` in place for now. A follow-up can either reimplement `generate()` as a thin shim over the OpenAI client or remove it outright once no internal caller uses it.
 
-Do **not** delete Path A in this work. Deprecation first, removal later, with a named grace period tied to the usage telemetry above.
+Do **not** delete scalarlm in this work. Deprecation first, removal later, with a named grace period tied to the usage telemetry above.
 
 ### Phase 5 (future) — LoRAResolver plugin
 
-Once Option A (proxy-side load) is stable, consider packaging the ScalarLM adapter discovery as a `LoRAResolver` plugin (see "vLLM-fork capabilities" above). This collapses the proxy to a pure passthrough and moves ScalarLM-specific resolution logic into a well-defined vLLM extension point. Not required for Path A deprecation — just cleaner long-term.
+Once Option A (proxy-side load) is stable, consider packaging the ScalarLM adapter discovery as a `LoRAResolver` plugin (see "vLLM-fork capabilities" above). This collapses the proxy to a pure passthrough and moves ScalarLM-specific resolution logic into a well-defined vLLM extension point. Not required for scalarlm deprecation — just cleaner long-term.
 
 ## Risks and open questions
 
 - **Unknown `model` values.** If a caller passes a name that neither resolves to an adapter nor to the base model, the proxy should not pre-call `/v1/load_lora_adapter` with a bogus path — let vLLM error. The model manager's `find_model` already returns `None` for unknowns; use that signal to skip the load step and forward directly (vLLM returns 400/404 as before).
 - **Concurrency on adapter loads.** Resolved by the fork — vLLM's `lora_resolver_lock[lora_name]` serializes concurrent loads of the same name (`vllm/entrypoints/openai/models/serving.py:278`). The proxy's local cache uses an `asyncio.Event`-per-name pattern to avoid two HTTP calls during the first load window, but correctness does not depend on it.
-- **Tokenformer vs standard LoRA.** The fork's `TokenformerModelManager` replaces the stock LoRA manager and handles `.pt` checkpoints. From the proxy's perspective there's no difference: both are loaded via `/v1/load_lora_adapter` with a path. This is already how Path A's worker operates today.
+- **Tokenformer vs standard LoRA.** The fork's `TokenformerModelManager` replaces the stock LoRA manager and handles `.pt` checkpoints. From the proxy's perspective there's no difference: both are loaded via `/v1/load_lora_adapter` with a path. This is already how scalarlm's worker operates today.
 - **Queue interaction with SSE streaming.** A queued streaming request has to hand bytes back to an already-open HTTP response. The pattern we'll use: the handler creates an `asyncio.Queue` of chunks, enqueues the work pointing at that queue, returns a `StreamingResponse` that drains the chunk-queue, and the drainer task writes chunks into it as vLLM produces them. Test with a long SSE stream and a pile of queued callers to confirm backpressure propagates end-to-end (vLLM slows → drainer blocks → queue depth rises → handler returns 503 at threshold).
 - **Batch API semantics.** Our `/v1/batches` need only be a subset of OpenAI's — support JSONL request bodies, `status` transitions, and result fetching. We do **not** need `input_file` upload via `/v1/files` as a separate step; inline JSONL is simpler and sufficient for now. Document the subset explicitly so callers know the edges.
 - **FLOP count for tool-calling responses.** `usage.total_tokens` includes tool-call tokens, so multiplying by `compute_flop_count(model_config)` gives a valid estimate. Covered by a test.
 - **Request-ID semantics.** UUID v4 gives correlation, not content-addressable idempotency. Right scope for Phase 3. If a future consumer needs idempotency (e.g. dedupe across retries), add it then.
-- **Request-log persistence for compliance.** Path A writes every request JSON to disk. The Batch API's on-disk JSONL naturally covers the batch case; for ad-hoc `/v1/chat/completions` traffic, we'd need a separate audit log if that's a compliance requirement rather than debugging. Flag for product before implementation.
+- **Request-log persistence for compliance.** scalarlm writes every request JSON to disk. The Batch API's on-disk JSONL naturally covers the batch case; for ad-hoc `/v1/chat/completions` traffic, we'd need a separate audit log if that's a compliance requirement rather than debugging. Flag for product before implementation.
 - **Config defaults for the queue.** Start conservative — e.g. `openai_queue_concurrency=16`, `openai_queue_max_depth=256` — tune once we have live telemetry. Bad defaults here are the thing most likely to surprise in production.
 
 ## FAQ
 
-### "Path A can do the equivalent of 1 million requests/sec via wire batching. Can the OpenAI surface keep up?"
+### "scalarlm can do the equivalent of 1 million requests/sec via wire batching. Can the OpenAI surface keep up?"
 
 It's not a hard limit, but the numbers measure different things and the mechanics differ. Short version:
 
-- Path A's "1 M" is a per-prompt number. One HTTP call carries up to 128 prompts on `/v1/generate` (or a JSONL file via `/v1/generate/upload` for more). All the per-request overhead — TCP+TLS handshake, parse, auth, middleware, model resolution — is amortized across every prompt in the batch.
-- Path B's "1000 req/sec" is per HTTP call. Each request pays that overhead once.
+- scalarlm's "1 M" is a per-prompt number. One HTTP call carries up to 128 prompts on `/v1/generate` (or a JSONL file via `/v1/generate/upload` for more). All the per-request overhead — TCP+TLS handshake, parse, auth, middleware, model resolution — is amortized across every prompt in the batch.
+- openai's "1000 req/sec" is per HTTP call. Each request pays that overhead once.
 
-The efficiency gap only exists for *bulk* workloads, and the plan preserves Path A's wire shape via two OpenAI-spec mechanisms:
+The efficiency gap only exists for *bulk* workloads, and the plan preserves scalarlm's wire shape via two OpenAI-spec mechanisms:
 
-| Workload | Path A today | Unified path after Phase 3 |
+| Workload | scalarlm today | Unified path after Phase 3 |
 |---|---|---|
 | Bulk completions | 1 call × N prompts on `/v1/generate` | 1 call × N prompts on `/v1/completions` with array `prompt` — **identical efficiency** |
 | Bulk chat (offline) | 1 call × N prompts via upload/download | `/v1/batches` (OpenAI Batch API) — **identical efficiency**, canonical shape |
-| Interactive chat (one-at-a-time, streaming) | Not supported — Path A doesn't stream | Fan-out on `/v1/chat/completions` — pays per-request overhead, but streaming works |
+| Interactive chat (one-at-a-time, streaming) | Not supported — scalarlm doesn't stream | Fan-out on `/v1/chat/completions` — pays per-request overhead, but streaming works |
 
 ### "How does the OpenAI client actually reach 1000 concurrent RPS? Threads? Non-blocking?"
 
@@ -244,13 +244,13 @@ The FAQ above reasons about throughput; this section proposes how to measure it.
 
 > Can you make 1000 simultaneous async requests? Can you make 1 million? Even if the FastAPI endpoint is a nop, does that work or does it fall over and die?
 
-And an observation: Path A's persistent queue is known to sustain 1000 batches of 1000 prompts each, i.e. 1M per-prompt throughput. The benchmark has to show where Path B lands relative to that — not argue about it.
+And an observation: scalarlm's persistent queue is known to sustain 1000 batches of 1000 prompts each, i.e. 1M per-prompt throughput. The benchmark has to show where openai lands relative to that — not argue about it.
 
 ### What the benchmark has to answer
 
 1. **Raw FastAPI ceiling.** Absent vLLM, how many concurrent requests does one uvicorn process handle before latency cliffs or errors appear? This isolates the transport layer from the inference layer.
-2. **Path B per-request capacity.** Chat completions one at a time. At what concurrency do we start seeing `503` from the Phase 3d queue, and at what concurrency does uvicorn itself lose?
-3. **Path B bulk capacity.** `/v1/completions` with array `prompt` and `/v1/batches` — do they match Path A's wire-batched throughput?
+2. **openai per-request capacity.** Chat completions one at a time. At what concurrency do we start seeing `503` from the Phase 3d queue, and at what concurrency does uvicorn itself lose?
+3. **openai bulk capacity.** `/v1/completions` with array `prompt` and `/v1/batches` — do they match scalarlm's wire-batched throughput?
 4. **Failure mode under overload.** When any of the above exceeds its sustainable load, does it degrade gracefully (503 + Retry-After, bounded latency) or cliff (dropped connections, OOM, wedged event loop)?
 
 ### Workloads
@@ -260,11 +260,11 @@ Six scenarios, each run across a sweep of concurrency levels. Target the same vL
 | Name | Endpoint | Wire shape | Per-request work | Measures |
 |---|---|---|---|---|
 | `nop` | `GET /v1/health` (or a dedicated `GET /v1/bench/nop`) | single | zero | Raw FastAPI/uvicorn ceiling. Baseline for every other scenario. |
-| `pathb_chat_single` | `POST /v1/chat/completions` | one prompt per HTTP call | 1 prompt, ~100 tokens | Interactive-streaming shape. The case Path A doesn't have. |
-| `pathb_completions_array` | `POST /v1/completions` | `prompt=[p1..pN]` per call, N varied | N prompts, ~100 tokens each | Wire-batched completions. Expected to match Path A. |
+| `pathb_chat_single` | `POST /v1/chat/completions` | one prompt per HTTP call | 1 prompt, ~100 tokens | Interactive-streaming shape. The case scalarlm doesn't have. |
+| `pathb_completions_array` | `POST /v1/completions` | `prompt=[p1..pN]` per call, N varied | N prompts, ~100 tokens each | Wire-batched completions. Expected to match scalarlm. |
 | `pathb_batches` | `POST /v1/batches` then poll | N-line JSONL | N prompts, ~100 tokens | Async bulk chat, OpenAI-canonical. |
-| `patha_generate_bulk` | `POST /v1/generate` | `prompts=[p1..pN]` per call | N prompts, ~100 tokens | Path A's current bulk path; the throughput baseline we're measuring against. |
-| `patha_upload_download` | `POST /v1/generate/upload` + poll `/download` | JSONL upload file | N prompts, ~100 tokens | Path A's large-batch mode; the 1000×1000 = 1M case the colleague cites. |
+| `patha_generate_bulk` | `POST /v1/generate` | `prompts=[p1..pN]` per call | N prompts, ~100 tokens | scalarlm's current bulk path; the throughput baseline we're measuring against. |
+| `patha_upload_download` | `POST /v1/generate/upload` + poll `/download` | JSONL upload file | N prompts, ~100 tokens | scalarlm's large-batch mode; the 1000×1000 = 1M case the colleague cites. |
 
 ### Sweep parameters
 
@@ -300,7 +300,7 @@ Each scenario runs on three platforms so we can separate per-platform overheads 
 |---|---|---|---|
 | **MacBook Pro M5** | Single-node, CPU/MPS only (no CUDA), unified memory | **`Qwen/Qwen3-4B-Instruct-2507`** (bf16 weights) — proposed default; see rationale below | Isolates the FastAPI / uvicorn / proxy layer. `nop` ceiling and proxy-overhead numbers from here are a clean story about the Python surface — no GPU variance. CPU-only vLLM inference is slow but fine for correctness sweeps and for measuring per-request overhead on small completions. Dev-machine representativeness. |
 | **NVIDIA DGX Spark** | 1× GB10 Grace-Blackwell superchip, ~128 GB unified memory | **`nvidia/Qwen3-32B-NVFP4`** | Single-GPU dev / prosumer tier. 32 B at NVFP4 fits GB10's unified memory comfortably. Shows how the proxy's 16-concurrency default interacts with a single-GPU decode rate — this is where the Phase 3d queue config defaults want to be validated. |
-| **4-GPU Blackwell system** | 4× B200 (or equivalent), TP=4 or replicated 4× TP=1, 4× HBM3e | **`nvidia/Qwen3-Next-80B-A3B-Instruct-NVFP4`** | Production tier. The 80B-A3B MoE at NVFP4 is the model sql-gen's Blackwell deploy already runs (`deploy/blackwell/helm-charts/qwen3next/values.yaml`), so benchmark results map directly onto production cost/throughput. Only platform where scenarios at 100 k – 1 M concurrency are likely to clear vLLM's own ceiling cleanly, so it's the one that decides the 5 %-parity question against Path A's `upload_download` path. Both `--tp 4` (one vLLM instance) and `--replicas 4` (sql-gen's current deployment shape — per its `deploy/blackwell/restart.sh`) should be measured since their per-request latency profiles differ. |
+| **4-GPU Blackwell system** | 4× B200 (or equivalent), TP=4 or replicated 4× TP=1, 4× HBM3e | **`nvidia/Qwen3-Next-80B-A3B-Instruct-NVFP4`** | Production tier. The 80B-A3B MoE at NVFP4 is the model sql-gen's Blackwell deploy already runs (`deploy/blackwell/helm-charts/qwen3next/values.yaml`), so benchmark results map directly onto production cost/throughput. Only platform where scenarios at 100 k – 1 M concurrency are likely to clear vLLM's own ceiling cleanly, so it's the one that decides the 5 %-parity question against scalarlm's `upload_download` path. Both `--tp 4` (one vLLM instance) and `--replicas 4` (sql-gen's current deployment shape — per its `deploy/blackwell/restart.sh`) should be measured since their per-request latency profiles differ. |
 
 **Why Qwen3-4B-Instruct-2507 on M5.** Three requirements: (1) same family as the two GPU platforms so architectural comparisons across the triangle are interpretable — same tokenizer, same attention shape, same MLP topology; (2) runs on Apple Silicon, which rules out NVFP4 (Blackwell-only); (3) fits comfortably in a mid-range M5 Pro's unified memory (4 B × bf16 = ~8 GB). Qwen3-4B-Instruct-2507 is the closest in-family match and is what's available on the Hugging Face Hub.
 
@@ -378,7 +378,9 @@ Three platforms hit so far. Raw JSON sits under `bench/results/<platform>/<times
 
 #### Nop baseline (FastAPI + request-id middleware, no inference)
 
-Measures the FastAPI / uvicorn / middleware ceiling on each host with the `/v1/bench/nop` endpoint. Single uvicorn worker, HTTP/2 client pool, 5 s per level.
+Measures the FastAPI / uvicorn / middleware ceiling on each host with the `/v1/bench/nop` endpoint. This endpoint sits *under* both scalarlm and openai — the request-id middleware is global, so every request on every path pays exactly this cost before the handler-specific work begins. Single-column per platform is correct; there is no scalarlm-vs-openai split at this layer.
+
+Single uvicorn worker, HTTP/2 client pool, 5 s per level.
 
 | concurrency | M5 (native, 10 cores) | Blackwell maxq-1 (in container, 64 cores) |
 |---|---|---|
@@ -405,16 +407,16 @@ Raw JSON: `bench/results/blackwell-4gpu-first-pass/20260422T042805Z/summary.json
 
 **Parity check — bulk wire efficiency** (prompts per second; equal payload size per prompt):
 
-| N per call | Path A `/v1/generate` | Path B `/v1/completions` array | Path B − Path A |
+| N per call | scalarlm `/v1/generate` | openai `/v1/completions` array | openai − scalarlm |
 |---|---|---|---|
 | 1 | 2.3 | 4.2 | **+81 %** |
 | 10 | 6.1 | 9.2 | **+51 %** |
 | 100 | 13.1 | 11.1 | −15 % |
 | 1 000 | 16.6 | 17.5 | **+5.6 %** |
 
-At the large-batch end the plan's 5 % threshold is cleared favourably — Path B is faster, not slower. Small N favours Path B by a lot (less middleware weight; for single-prompt calls the Path A worker + queue round-trip costs show). The −15 % dip at N=100 is a real finding — likely worker-batch-scheduler behaviour in the mid-zone; worth a follow-up but not a blocker for parity.
+At the large-batch end the plan's 5 % threshold is cleared favourably — openai is faster, not slower. Small N favours openai by a lot (less middleware weight; for single-prompt calls the scalarlm worker + queue round-trip costs show). The −15 % dip at N=100 is a real finding — likely worker-batch-scheduler behaviour in the mid-zone; worth a follow-up but not a blocker for parity.
 
-**Path B interactive chat** (`pathb_chat_single`, one request per coroutine, queue=16):
+**openai interactive chat** (`pathb_chat_single`, one request per coroutine, queue=16):
 
 | concurrency | RPS | P50 | P95 | P99 |
 |---|---|---|---|---|
@@ -425,7 +427,7 @@ At the large-batch end the plan's 5 % threshold is cleared favourably — Path B
 
 Throughput plateaus at vLLM's decode ceiling; latency climbs with queue wait as designed. Zero 5xx across all levels — the limiter produces smooth degradation, not a cliff.
 
-**Path B async bulk** (`/v1/batches`, submit + 1 s poll + fetch, wall-clock end-to-end):
+**openai async bulk** (`/v1/batches`, submit + 1 s poll + fetch, wall-clock end-to-end):
 
 | N | total s | prompts/s |
 |---|---|---|
@@ -436,15 +438,15 @@ Throughput plateaus at vLLM's decode ceiling; latency climbs with queue wait as 
 
 Batches API runs ~5× slower than array `/v1/completions` at equal N because the 1-second poll interval dominates small-batch runs and is still visible at 1000. The right default today is array prompts when the caller can block; batches belong to the truly-async/offline workload they were designed for. Tightening the poll interval would narrow the gap — worth revisiting if anyone hits it in practice.
 
-**Path A `upload_download` not measured** — harness script sends JSON; the endpoint requires multipart/form-data. Client fix is a follow-up; not blocking the parity claim since the 1000-prompt-per-call comparison in the first table is sufficient.
+**scalarlm `upload_download` not measured** — harness script sends JSON; the endpoint requires multipart/form-data. Client fix is a follow-up; not blocking the parity claim since the 1000-prompt-per-call comparison in the first table is sufficient.
 
-**Phase 3 smoke on the same pod** (`bench/smoke_phase3.sh`): 6/6 features live — `X-Request-Id` auto-assigned and caller-supplied round-trips, `/v1/bench/nop` gated behind config, Path A deprecation log fires with migration hint, Batch POST/GET/DELETE round-trips, state machine transitions correctly on cancel.
+**Phase 3 smoke on the same pod** (`bench/smoke_phase3.sh`): 6/6 features live — `X-Request-Id` auto-assigned and caller-supplied round-trips, `/v1/bench/nop` gated behind config, scalarlm deprecation log fires with migration hint, Batch POST/GET/DELETE round-trips, state machine transitions correctly on cancel.
 
-Summary: **on the production-class platform, with the production-class model, the plan's headline parity claim is empirically cleared.** Deprecating Path A — under the telemetry-gated path described in Phase 4 — is data-supported.
+Summary: **on the production-class platform, with the production-class model, the plan's headline parity claim is empirically cleared.** Deprecating scalarlm — under the telemetry-gated path described in Phase 4 — is data-supported.
 
 ## Not in scope for this change
 
 - Rewriting the vLLM fork's OpenAI server. No evidence yet that we need to.
-- Replicating Path A's durable SQLiteAckQueue for synchronous OpenAI traffic. The in-process async queue from Phase 3 item 4 covers the observable capabilities; durability lives in the Batch API's file-backed results store.
+- Replicating scalarlm's durable SQLiteAckQueue for synchronous OpenAI traffic. The in-process async queue from Phase 3 item 4 covers the observable capabilities; durability lives in the Batch API's file-backed results store.
 - Touching the SDK (`sdk/masint/`). It remains as-is until deprecation lands.
 - Supporting `/v1/files` as a prerequisite for `/v1/batches`. Our batch API takes the JSONL inline.
