@@ -1,0 +1,8 @@
+{
+  "prompt_count": 100,
+  "duration_seconds": 22.772850223002024,
+  "status_code": 200,
+  "prompts_per_second": 4.391193856752882,
+  "total_tokens": 4100,
+  "tokens_per_second": 180.03894812686818
+}
