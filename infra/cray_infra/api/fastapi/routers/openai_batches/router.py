@@ -110,12 +110,13 @@ async def create_batch(request: Request):
 
     from cray_infra.util.get_config import get_config
 
-    vllm_api_url = get_config()["vllm_api_url"]
+    cfg = get_config()
     runner = BatchRunner(
         batch_id=status.id,
         store=store,
         upstream_call=_default_upstream_call,
-        vllm_api_url=vllm_api_url,
+        vllm_api_url=cfg["vllm_api_url"],
+        concurrency=int(cfg.get("batch_runner_concurrency", 16)),
     )
     async with _runners_lock:
         _runners[status.id] = runner

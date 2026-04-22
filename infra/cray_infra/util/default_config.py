@@ -64,6 +64,15 @@ class Config(BaseModel):
     # a vLLM in a separate process / host.
     openai_inprocess_enabled: bool = True
 
+    # Phase 7. Concurrency bound for the Batch API runner — how many
+    # input-JSONL lines we dispatch in parallel via asyncio.gather. The
+    # pre-Phase-7 behaviour was sequential per-line awaits (effective
+    # concurrency 1); raising this lifts the Batch API from the flat
+    # 1.9–3.2 p/s curve toward the array-completions throughput. Bounded
+    # so a 1000-line batch can't saturate the proxy's openai_queue_concurrency
+    # by itself — set this no larger than openai_queue_concurrency.
+    batch_runner_concurrency: int = 16
+
     inference_work_queue_path: str = "/app/cray/inference_work_queue.sqlite"
     upload_base_path: str = "/app/cray/inference_requests"
 

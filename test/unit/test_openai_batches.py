@@ -243,3 +243,121 @@ async def test_runner_cancel_stops_before_next_line(tmp_path: Path):
     final = store.get(status.id)
     assert final.status == "cancelled"
     assert final.status in TERMINAL_STATUSES
+
+
+# ---- Phase 7: parallel dispatch -------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_runner_parallel_overlaps_inflight_calls(tmp_path: Path):
+    """With concurrency > 1, multiple upstream calls are in-flight at once.
+
+    Sequential pre-Phase-7 behaviour finishes call N before starting N+1, so
+    `inflight_peak` would be 1. Phase 7's gather lets up to `concurrency`
+    overlap, so a slow upstream + many lines must produce inflight_peak > 1.
+    """
+    inflight = 0
+    inflight_peak = 0
+    lock = asyncio.Lock()
+
+    async def slow_upstream(*, method, url, body):
+        nonlocal inflight, inflight_peak
+        async with lock:
+            inflight += 1
+            inflight_peak = max(inflight_peak, inflight)
+        try:
+            await asyncio.sleep(0.05)
+            return 200, {"ok": body.get("i")}
+        finally:
+            async with lock:
+                inflight -= 1
+
+    lines = [
+        json.dumps({
+            "custom_id": f"req-{i}",
+            "method": "POST",
+            "url": "/v1/chat/completions",
+            "body": {"i": i},
+        })
+        for i in range(8)
+    ]
+
+    store = BatchStore(str(tmp_path))
+    status = store.create(lines, endpoint="/v1/chat/completions")
+    runner = BatchRunner(
+        batch_id=status.id,
+        store=store,
+        upstream_call=slow_upstream,
+        vllm_api_url="http://vllm",
+        concurrency=4,
+    )
+    await runner.run()
+
+    final = store.get(status.id)
+    assert final.status == "completed"
+    assert final.request_counts == {"total": 8, "completed": 8, "failed": 0}
+    # Concurrency=4 means inflight_peak should be 4 (or close); pre-Phase-7
+    # would be 1.
+    assert inflight_peak >= 2, f"expected fan-out, saw inflight_peak={inflight_peak}"
+    assert inflight_peak <= 4, f"semaphore broken? inflight_peak={inflight_peak}"
+
+    # All 8 responses present (in any order — OpenAI batches are unordered).
+    output = [json.loads(ln) for ln in store.read_output(status.id).strip().splitlines()]
+    assert len(output) == 8
+    assert {o["custom_id"] for o in output} == {f"req-{i}" for i in range(8)}
+
+
+@pytest.mark.asyncio
+async def test_runner_concurrency_zero_rejected(tmp_path: Path):
+    """concurrency=0 is meaningless — semaphore would never release."""
+    store = BatchStore(str(tmp_path))
+    status = store.create(["ignored"], endpoint="/v1/chat/completions")
+
+    async def noop_upstream(*, method, url, body):
+        return 200, {}
+
+    with pytest.raises(ValueError, match="concurrency must be"):
+        BatchRunner(
+            batch_id=status.id,
+            store=store,
+            upstream_call=noop_upstream,
+            vllm_api_url="http://vllm",
+            concurrency=0,
+        )
+
+
+@pytest.mark.asyncio
+async def test_runner_counts_correct_under_parallel_dispatch(tmp_path: Path):
+    """Phase 7 added a counts_lock around bump_counts. Without it, two
+    coroutines reading the same status, both incrementing, both writing
+    back would lose increments. This test fans out 50 concurrent successes
+    and asserts the counter ends at 50.
+    """
+    async def fast_upstream(*, method, url, body):
+        # Yield to the loop so other tasks get a chance to interleave.
+        await asyncio.sleep(0)
+        return 200, {"i": body.get("i")}
+
+    lines = [
+        json.dumps({
+            "custom_id": f"req-{i}",
+            "method": "POST",
+            "url": "/v1/chat/completions",
+            "body": {"i": i},
+        })
+        for i in range(50)
+    ]
+    store = BatchStore(str(tmp_path))
+    status = store.create(lines, endpoint="/v1/chat/completions")
+    runner = BatchRunner(
+        batch_id=status.id,
+        store=store,
+        upstream_call=fast_upstream,
+        vllm_api_url="http://vllm",
+        concurrency=16,
+    )
+    await runner.run()
+
+    final = store.get(status.id)
+    assert final.request_counts == {"total": 50, "completed": 50, "failed": 0}
+    assert final.status == "completed"
