@@ -44,16 +44,40 @@ if [[ -z "${PID}" ]]; then
 fi
 echo "Profiling PID=${PID}"
 
-# py-spy: sample every 10 ms (rate=100), native frames on, duration
-# slightly longer than the sweep wall-clock so we catch the full run.
-DURATION="${PROFILE_SECONDS:-90}"
-py-spy record \
+# Resolve py-spy: prefer PATH, fall back to the user-site path we install
+# into when the image doesn't bake it in.
+PYSPY=$(command -v py-spy || true)
+if [[ -z "${PYSPY}" && -x "${HOME}/.local/bin/py-spy" ]]; then
+  PYSPY="${HOME}/.local/bin/py-spy"
+fi
+if [[ -z "${PYSPY}" ]]; then
+  echo "py-spy not found — install with: python3 -m pip install --break-system-packages py-spy" >&2
+  exit 4
+fi
+
+# py-spy: Python-only (no --native), rate 50 Hz, ONLY the uvicorn worker
+# — no --subprocesses. We tried --subprocesses once and the EngineCore
+# child (~200 CUDA threads doing shm_broadcast IPC) drowned out the API
+# server's signal. The question this profile needs to answer is "where
+# does time go in the proxy's in-process code path?", so sampling just
+# the uvicorn worker PID is exactly right.
+#
+# Speedscope format: opens in https://speedscope.app for humans, and is
+# a simple JSON schema we can diff programmatically.
+DURATION="${PROFILE_SECONDS:-120}"
+# --gil: only sample threads holding the Python GIL. The uvicorn worker
+# has ~260 threads because torch / NCCL / CUDA spin up C++ worker pools;
+# those threads hold no Python state and sampling them at 50 Hz had py-spy
+# falling hundreds of seconds behind (only 48 samples landed in 120 s).
+# With --gil py-spy only walks Python threads, which is all we care about
+# for "where does the Phase 6 in-process dispatch spend time".
+"${PYSPY}" record \
   --pid "${PID}" \
-  --output "${OUT}/flamegraph.svg" \
-  --rate 100 \
+  --output "${OUT}/profile.speedscope.json" \
+  --format speedscope \
+  --rate 50 \
   --duration "${DURATION}" \
-  --native \
-  --subprocesses \
+  --gil \
   > "${OUT}/py-spy.log" 2>&1 &
 SPY_PID=$!
 echo "py-spy running pid=${SPY_PID} duration=${DURATION}s"
@@ -63,7 +87,7 @@ sleep 2  # let py-spy attach
 mkdir -p "${OUT}/runs"
 for i in $(seq 1 10); do
   echo ">>> run ${i}/10"
-  /app/.venv/bin/python "${ROOT}/bench/client/pathb_completions_array.py" \
+  python3 "${ROOT}/bench/client/pathb_completions_array.py" \
     --url "${URL}" --model "${MODEL}" --prompt-count 100 --max-tokens 16 \
     --distinct-prompts --prompt "bench ${i} $(date +%N)" \
     > "${OUT}/runs/run_$(printf %02d "$i").json"

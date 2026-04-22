@@ -2,7 +2,13 @@
 
 ## Status
 
-Analysis and plan only. No implementation yet.
+Phases 0–7 implemented; measurement summary:
+
+- **Phase 6**: shipped. In-process Python-API call replaces the localhost HTTP hop. Mixed throughput results — see Phase 6 measurement subsection.
+- **Phase 6.5**: shipped (`scripts/vllm_patches/apply_patches.py` + Dockerfile wiring). **Failed its acceptance gate at N=100 distinct prompts on Blackwell** — paired 30-run A/B is null (8.32 patched vs 8.56 unpatched). Two follow-up measurements (Spark N=1 000, Blackwell N=1 000) determine whether the patch stays or is reverted.
+- **Phase 7**: shipped (`asyncio.gather` + `Semaphore(batch_runner_concurrency)` in BatchRunner; 14/14 unit tests). **Cleared its acceptance gate** — Batch API at N=1 000 jumped from 3.2 → 13.14 p/s, matching array `/v1/completions` and reaching 79 % of scalarlm.
+- **Phase 8**: not yet started (scatter-gather A/B). Same N=1 000 ceiling now applies to both array-completions and Batch API; if Phase 8a clears its 10 % win threshold, both lift together.
+- **Phase 9**: deferred per analysis above.
 
 ## Why this work exists
 
@@ -501,7 +507,7 @@ Spark shape is very different from Blackwell. openai loses at **every** N, from 
 - One-GPU GB10 is CPU-bound on the proxy side; the HTTP encode/decode of even a 1-element prompt list shows up relative to decode time.
 - The running sql-gen vLLM pod is contending for the same GB10, which inflates both paths' numbers and adds the very high scalarlm stdev at small N (up to 34 % of mean). At N=1 000 the stdev collapses to 0.09 — enough work per call to average out scheduler jitter and let vLLM's prefix cache hit cleanly.
 
-**The plan's 5 % parity threshold is not met on either platform** under the current openai implementation. Phase 6 (collapse the HTTP hop — see Architectural strategy / Phase 6) is the proposed fix; measurement of that landed below.
+**The plan's 5 % parity threshold is not met on either platform** under the current openai implementation. Phase 6 (collapse the HTTP hop — see Architectural strategy / Phase 6) is the proposed fix; post-implementation measurement and a py-spy profile are in the "Phase 6 measurement and follow-up" section below, and the amended plan (Phases 7–9) incorporating an independent review by Gemini is at the end of the doc.
 
 #### Why the curve has the shape it does
 
@@ -583,3 +589,253 @@ Deprecation of scalarlm under the telemetry-gated path in Phase 4 is still on th
 - Replicating scalarlm's durable SQLiteAckQueue for synchronous OpenAI traffic. The in-process async queue from Phase 3 item 4 covers the observable capabilities; durability lives in the Batch API's file-backed results store.
 - Touching the SDK (`sdk/masint/`). It remains as-is until deprecation lands.
 - Supporting `/v1/files` as a prerequisite for `/v1/batches`. Our batch API takes the JSONL inline.
+
+## Phase 6 measurement and follow-up
+
+Phase 6 (the in-process `OpenAIServingCompletion.create_completion(...)` call) was implemented under `openai_inprocess_enabled=True` (on by default) and re-benchmarked on both platforms. A py-spy profile at N=100 was also captured on Blackwell to explain the shape of the results.
+
+### Blackwell — Phase 6 bulk parity sweep (10 runs per cell)
+
+Same hardware and flags as the pre-Phase-6 table above (`Qwen/Qwen3-Next-80B-A3B-FP8`, TP=2, `max_num_seqs=16`, `openai_queue_concurrency=16`).
+
+| N     | openai pre-P6      | openai P6             | Δ openai (P6 vs pre)    | scalarlm P6         | openai P6 vs scalarlm |
+|-------|--------------------|-----------------------|-------------------------|---------------------|-----------------------|
+| 1     | 2.94 ± 0.08        | 2.63 ± 1.02           | **−10.5 %**             | 1.91 ± 0.14         | +37.7 %               |
+| 10    | 10.05 ± 0.87       | 7.28 ± 1.93           | **−27.6 %**             | 7.29 ± 1.47         | −0.1 %                |
+| 100   | 14.54 ± 2.77       | 10.64 ± 0.88          | **−26.8 %**             | 14.44 ± 0.53        | −26.3 %               |
+| 1 000 | 12.06 ± 0.86       | 12.92 ± 0.80          | +7.1 %                  | 16.56 ± 0.03        | **−22.0 %**           |
+
+Phase 6 did what the expectation table predicted at N=1 000 — a small positive delta (+7.1 %) — but **regressed by 10–28 % at N=1/10/100**. The Phase-6 openai column also runs noticeably noisier (N=1 stdev 1.02 vs 0.08 pre-P6; N=10 stdev 1.93 vs 0.87), suggesting a per-request variability source that the HTTP hop had been smoothing (likely the GIL / event-loop contention with the engine's own coroutines now on the same loop). Most of the plan's "close the gap at N=1 000" argument is intact; the "no harm at small N" argument is not.
+
+The scalarlm column moves between the two sweeps (e.g. N=100 11.04 → 14.44) because the sweeps ran hours apart on a shared node and the scalarlm queue's cadence interacts with the engine's cache state; N=1 000 is stable because the batch fully saturates the engine and scheduler jitter averages out.
+
+### DGX Spark — Phase 6 bulk parity sweep
+
+Platform: GB10 (TP=1), `Qwen/Qwen3-32B-NVFP4`, co-resident sql-gen vLLM on the same GPU (~50 GB footprint). Each cell is 10 measurement runs.
+
+| N     | openai pre-P6      | openai P6          | Δ openai   | scalarlm P6         | openai P6 vs scalarlm |
+|-------|--------------------|--------------------|------------|---------------------|-----------------------|
+| 1     | 0.603 ± 0.004      | 0.620 ± 0.004      | +2.8 %     | 0.729 ± 0.228       | −15.0 %               |
+| 10    | 2.874 ± 0.049      | 2.935 ± 0.065      | +2.1 %     | 3.370 ± 1.064       | −12.9 %               |
+| 100   | 4.254 ± 0.114      | 4.396 ± 0.117      | +3.3 %     | 5.307 ± 1.790       | −17.2 %               |
+| 1 000 | (not captured)     | 4.497 ± 0.128      | —          | 16.605 ± 0.013      | **−72.9 %**           |
+
+Spark shows the opposite small-N shape from Blackwell: Phase 6 is a consistent small win (+2–3 %) across N=1/10/100 without the Blackwell regression. The openai path also *plateaus* at ~4.5 p/s from N=100 to N=1 000 — virtually no scaling improvement with batch size — while scalarlm continues to climb to 16.6 p/s. That plateau means **the HTTP hop was never the bottleneck at large N on Spark**; something inside vLLM's serving layer or the proxy's dispatch caps throughput at this hardware's Python-overhead ceiling.
+
+### Phase 6 profile — N=100 distinct prompts, Blackwell
+
+Under `bench/scenarios/profile_phase6.sh` with `--distinct-prompts` (so vLLM's prefix cache doesn't collapse the N prompts into one prefill), py-spy was run against the APIServer uvicorn worker (PID found by walking up from `VLLM::EngineCore` to its `spawn_main` parent). After discarding a run where `--native` + rate=100 overwhelmed the sampler on a 262-thread process, the useful run used `--rate 50 --gil` (Python-GIL-holding threads only) for 120 s while the N=100 × 10-run sweep executed.
+
+Throughput during profiling: **6.67 ± 1.03 p/s** (range 5.22–8.38) — note this is the **distinct-prompts** number, lower than the **identical-within-batch** N=100 figure of 10.64 p/s above because the prefix cache is defeated. Profiling overhead was <10 %.
+
+**Breakdown across 1 690 main-thread samples, 0 errors:**
+
+| Function                                                   | Fraction of stacks | What it represents                                                                             |
+|------------------------------------------------------------|--------------------|------------------------------------------------------------------------------------------------|
+| `output_handler` (`vllm/v1/engine/async_llm.py:700`)       | 40.9 %             | vLLM's per-iteration output loop (the asyncio task that pulls tokens from the engine)          |
+| Prometheus `record` / `observe` / `inc` / `labels`         | **20.3 %**         | **Synchronous metric emission — 100 % of samples come from `output_handler`**                  |
+| `recv_multipart` + ZMQ                                     | 12.5 %             | IPC between the uvicorn worker and the separate EngineCore subprocess                          |
+| `OpenAIServingCompletion.create_completion`                | 10.7 %             | vLLM's serving entry we now call in-process                                                    |
+| Our Phase 6 `_dispatch` + `_call_inprocess`                | 9.5 %              | The proxy layer code added by Phase 6                                                          |
+
+The `output_handler` Python source carries its own `TODO(rob): make into a coroutine and launch it in background thread once Prometheus overhead is non-trivial`. That overhead is non-trivial on this platform.
+
+**Interpretation.** One in five main-thread samples is blocked inside a Prometheus metric call, and every one of those calls comes from the engine's per-iteration output loop. This is a *fixed per-iteration tax*: N=1 pays proportionally the same as N=100 for the engine's own record-emit work. It compounds with any architectural inefficiency in the proxy and with any per-request Pydantic / JSON work. It is the single concrete reason why Phase 6 regressed at small N on Blackwell — removing the HTTP hop shrank the useful-work denominator without changing this tax in the numerator.
+
+A quick A/B with `--disable-log-stats` was inconclusive: `has_custom_loggers=True` in vLLM's `AsyncLLM.__init__` keeps the logger enabled even when that flag is passed, so the code path was unchanged. A direct patch that replaces `if logger_ref[0]:` with `if False:` at `async_llm.py:700` gives the right A/B — applied at pod startup via a `sed`-style one-liner in `command:` before `exec /app/cray/scripts/start_one_server.sh`.
+
+**N=100 distinct-prompts, 10 runs per condition, Blackwell:**
+
+| Condition                                      | mean p/s | stdev | range          |
+|------------------------------------------------|----------|-------|----------------|
+| Phase 6, default (Prometheus record on)        | 6.67     | 1.03  | 5.22 – 8.38    |
+| Phase 6, `output_handler` record patched out   | **7.67** | 1.98  | 4.60 – 10.61   |
+
+**+15.0 %** in the predicted direction, and the patched peak run (10.61 p/s) exceeds every unpatched run. The stdev jumps from 1.03 to 1.98 under the patch (the smoothing effect of a per-iteration blocking call falls away, so the loop's own scheduling jitter becomes visible). At 10 runs per condition the means sit one stdev apart — enough to show the direction, not enough to call the magnitude precisely. The 20 % upper bound from the profile is consistent with the 15 % we measured; a longer run (30+ iterations) would tighten this to ±few-%.
+
+**Second profile on the patched pod** confirms the fix — the Prometheus time genuinely disappears rather than just moving around. N=100 distinct-prompts, 1 226 main-thread samples (`--rate 50 --gil`, 120 s):
+
+| Function                                | Unpatched | Patched | Δ        |
+|-----------------------------------------|-----------|---------|----------|
+| Any Prometheus frame in stack           | 20.3 %    | **0.1 %** | −20.2 pp |
+| `output_handler` in stack               | 40.9 %    | 35.2 %  | −5.7 pp  |
+| ZMQ IPC (EngineCore)                    | 12.5 %    | 10.2 %  | −2.3 pp  |
+| `_dispatch` + `_call_inprocess`         | 9.5 %     | 11.7 %  | +2.2 pp  |
+
+No new single dominant hot spot takes over. The reclaimed 20 percentage points spread across `_protected_step` (asyncio event-loop step — 7.9 % leaf, up from 4.4 %), `process_outputs` / `update_from_output` (vLLM engine output aggregation), and Python object-init / attribute-access plumbing. `merge_async_iterators` (vLLM's per-request scatter merger — relevant to Gemini's Phase 8 thesis) appears at 1.0 % leaf at N=100; whether it becomes meaningful at N=1 000 is measured next.
+
+### Phase 6 profile at N=1 000 distinct prompts (patched pod)
+
+Same configuration, 3-iteration sweep, 300 s py-spy `--gil --rate 50`. 4 169 main-thread samples, 0 % Prometheus (confirming the patch applies at this scale too). Two of three iterations completed (third was killed when stopping py-spy); wall-clock numbers: **6.0 and 6.5 p/s** (vs the identical-prompts figure of 12.9 p/s — vLLM's prefix cache does ~50 % of the work at the canonical benchmark setting).
+
+| Function                                 | N=100 patched | N=1 000 patched | Δ         |
+|------------------------------------------|---------------|-----------------|-----------|
+| Prometheus                               | 0.1 %         | 0.0 %           | (patched) |
+| ZMQ IPC                                  | 10.2 %        | 10.2 %          | flat      |
+| `output_handler` in stack                | 35.2 %        | 33.7 %          | −1.5 pp   |
+| **`merge_async_iterators` in stack**     | ~1 %          | **13.4 %**      | +12 pp    |
+| `_call_inprocess` + `_dispatch` in stack | 11.7 %        | 19.0 %          | +7.3 pp   |
+| Pydantic anywhere in stack               | —             | 1.9 %           | small     |
+| Response-build funcs                     | —             | 0.7 %           | small     |
+
+**Cross-checking Gemini's theses against the N=1 000 data:**
+
+- **Thesis #1 "monolithic Pydantic response":** *not supported.* Pydantic is 1.9 % in-stack, response-builder functions 0.7 %. Even at N=1 000 those together are ≤3 % — nowhere near the bottleneck. The claim that distributing Pydantic cost across 1 000 small responses is the lever doesn't match the profile.
+- **The scatter-merge cost IS real, but it lives inside vLLM, not in our proxy.** `merge_async_iterators` jumps from ~1 % (N=100) to 13.4 % (N=1 000) in-stack. That's vLLM's internal async-iterator merger that collates the per-prompt generators spawned inside `create_completion` — not our monolithic response construction.
+- Proxy-side scatter-gather (Phase 8) would *replace* this path with `asyncio.gather` at our layer, each sub-request triggering its own single-prompt `create_completion` (skipping `merge_async_iterators`). Whether that's cheaper than letting vLLM merge depends on whether `asyncio.gather` + 1 000 lightweight coroutines is less expensive than `merge_async_iterators` + 1 000 heavier generators. That's the exact question Phase 8a is set up to answer.
+
+**Prioritisation update based on the N=1 000 profile.** The remaining "reachable" costs at N=1 000 break down roughly as: `output_handler` non-Prometheus work (~33 %), proxy + vLLM serving orchestration (~20 %), `merge_async_iterators` (~13 %), ZMQ IPC (~10 %), asyncio overhead (~7 %). Phase 8a tests whether moving the scatter one layer up recovers the 13 % from `merge_async_iterators` — that's the next experiment.
+
+### Gemini's review of the post-Phase-6 results
+
+An independent review was posted as `gemini-enhance-openai.md`. Gemini's diagnosis of the residual N=1 000 gap (**22 %** after Phase 6 on Blackwell) identifies three architectural causes:
+
+1. **Monolithic response processing.** For a 1 000-prompt request, openai constructs a single `CompletionResponse` Pydantic object with 1 000 choices; scalarlm's worker issues 1 000 parallel single-prompt calls and gathers small responses.
+2. **Sequential BatchRunner.** `/v1/batches`' `BatchRunner.run()` awaits each line serially instead of running them concurrently.
+3. **Fixed-limit concurrency.** `OpenAIConcurrencyLimiter` uses a hard-coded semaphore (default 16) vs scalarlm's KV-cache-aware dynamic batching.
+
+Gemini proposes Phases 7 (parallel BatchRunner), 8 (proxy-side scatter-gather for array prompts), and 9 (reactive concurrency).
+
+### Cross-check: profile findings vs Gemini's architectural theses
+
+The two analyses are **compounding, not alternative**. The profile data does not refute any of Gemini's three points, but it does reorder their likely impact:
+
+- **On (1) "monolithic response":** vLLM's own `serving.py` already scatters per-prompt internally — `serving.py:147` creates one `generators[i]` per `engine_input` and `merge_async_iterators` interleaves them; only the final response-to-Pydantic conversion is monolithic. Now measured at N=1 000: Pydantic stays at 1.9 % in-stack and response-build functions at 0.7 %, so the "monolithic Pydantic" claim is *not* supported even at the scale that was supposed to surface it. What *is* real and only visible at N=1 000 is `merge_async_iterators` (13.4 % in-stack vs ~1 % at N=100) — but that's vLLM's internal merger, not our response construction. Proxy-side scatter-gather replaces `merge_async_iterators` with `asyncio.gather`, which *might* be cheaper per-prompt but isn't guaranteed to be. Phase 8a remains the right experiment; the mechanistic rationale updates from "distribute Pydantic cost" to "avoid `merge_async_iterators`".
+- **On (2) "sequential BatchRunner":** no profile evidence either way — we didn't exercise `/v1/batches` in the profile run. But the claim is literally true in the code (`runner.py` awaits per-line), and the Batch API sweep in the first-pass results shows exactly the flat-throughput shape one expects from serialized awaits (1.9 → 2.8 → 2.9 → 3.2 p/s across N=1/10/100/1 000). Low-risk to fix; do it.
+- **On (3) "fixed concurrency":** less impactful for the parity goal than (1) and (2). Our bulk benchmark is a *single* caller sending one array request. The concurrency limiter is acquired once and released once; it's not the bottleneck here. It matters for the "many concurrent callers" workload, which is a separate and worthwhile goal but not what scalarlm's N=1 000 lead is about.
+
+**What Gemini doesn't see** (because it didn't have py-spy data): the 20 % Prometheus overhead in `output_handler` is visible in *every* run at *every* N and is large enough to be measurable on its own. It's strictly smaller than the N=1 000 gap Gemini targets, but it applies everywhere and the fix is localized (follow vLLM's own TODO).
+
+## Amended plan — Phases 6.5, 7, 8, 9
+
+The combined plan below merges Gemini's critique with the profile data. Phase numbering follows Gemini v2 (a Phase 6.5 slotted between the existing Phase 6 and the remaining phases) because the metrics patch is a *prerequisite* for clean measurement of the later phases, not an optional tack-on.
+
+### Phase 6.5 — Move vLLM `output_handler` metrics off the hot path
+
+Source: py-spy profile (`async_llm.py:700` was 20.3 % of the main-thread stack at N=100, 0 % after a one-line patch), supported by the `TODO(rob)` in vLLM source.
+
+**Why this runs first.** Phases 7 / 8 are about closing the N=1 000 parity gap. The 20 % synchronous-metrics tax is a *fixed per-iteration cost* that applies regardless of N, regardless of which phase we're testing, and regardless of which path (scalarlm or openai) is running. Until it's fixed, every throughput measurement is contaminated by it — Phase 7 gains would partially look like Phase 6.5 gains and vice-versa. Clear the baseline first.
+
+**Implementation.** Follow vLLM's own TODO: replace the synchronous
+
+```python
+if logger_ref[0]:
+    logger_ref[0].record(engine_idx=..., scheduler_stats=..., iteration_stats=..., mm_cache_stats=...)
+```
+
+with a producer/consumer pattern — the output loop pushes the args tuple onto a lock-free queue, a dedicated asyncio task (or background thread) pops and calls `.record(...)` asynchronously. The metric data is already structured; no in-band work remains on the output loop.
+
+**Measurement** at N=100 distinct prompts on Blackwell, 4 conditions across 80 total runs:
+
+| Condition                                                        | Runs | Mean p/s | Stdev | 95 % CI on mean  |
+|------------------------------------------------------------------|------|----------|-------|------------------|
+| Unpatched (10-run pilot, **older pod**)                          | 10   | 6.67     | 1.03  | ±0.64 (9.5 %)    |
+| AB-PATCH `if False:` (metrics disabled, 10-run, **older pod**)   | 10   | 7.67     | 1.98  | ±1.23 (16 %)     |
+| **Phase 6.5 production patch (today's pod)**                     | 30   | 8.32     | 1.35  | ±0.48 (5.8 %)    |
+| **Unpatched (today's pod, paired A/B)**                          | 30   | **8.56** | 1.72  | ±0.62 (7.2 %)    |
+
+**The paired A/B is a null result.** Patched (8.32 p/s) is essentially indistinguishable from unpatched (8.56 p/s) on the same pod — the 0.24 p/s difference is well inside both CIs and points the *wrong* way for a "patch wins" claim.
+
+The earlier +15 % and +24.7 % numbers were **pod-to-pod state variance, not patch effects**. The same *unpatched* code moved from 6.67 p/s (10-run pilot pod) to 8.56 p/s (today's 30-run pod) — a 28 % swing on the no-change condition. That swing is several times larger than any plausible patch effect, and it dominates any cross-pod comparison. Lesson: a 10-run pilot on a different pod is not a baseline; only paired runs on the same pod / same warm state are comparable.
+
+**Why the profile mis-predicted.** The py-spy data was correct that 20 % of main-thread CPU samples were inside Prometheus `record()` calls. What the profile *can't* tell you is whether removing those samples recovers wall-clock — and on this workload it doesn't. The asyncio loop was already overlapping the inline `record()` with engine I/O via implicit yield points, so moving it onto a separate consumer task didn't free up time the loop was actually waiting on. Profile-percent-of-CPU and A/B-percent-of-throughput are different metrics; they only converge when the profiled function is on the critical path.
+
+**Decision.** Phase 6.5 produces no measurable throughput win at N=100 distinct prompts on Blackwell. The patch is functionally correct (metrics still flow via the consumer task) but doesn't move the number it was justified by. **Two outstanding measurements still matter** before Phase 6.5 is fully resolved:
+
+1. **Spark N=1 000.** The Spark plateau (4.5 p/s flat across N=100/1 000) was the second piece of evidence for the per-iteration metrics tax. If Spark is genuinely CPU-bound at the Python layer, removing the synchronous record might break the plateau where it didn't help Blackwell. Same paired methodology — same pod, patched vs unpatched, ≥30 runs each.
+2. **Blackwell N=1 000.** The 13.4 % `merge_async_iterators` fraction at N=1 000 is independent of Phase 6.5 — but the patch *might* help more at N=1 000 than at N=100 because the engine spends more iterations per request, accumulating more per-iteration tax in absolute terms. Worth one paired sweep.
+
+If both come back null, **revert the patch** — leave the upstream vLLM TODO alone and pivot Phase 6.5 effort to Phase 7 (parallel BatchRunner), where the empirical case is much stronger (sequential awaits, observed 1.9–3.2 p/s flat curve, no profile-vs-A/B confound).
+
+**Productionisation status.** The patch is implemented as `scripts/vllm_patches/apply_patches.py` (anchor-based string replacement; idempotent — refuses to patch already-patched files; AST-validates the result) and wired into `scripts/build-copy-vllm.sh` so it runs at image-build time. The Dockerfile copies `scripts/vllm_patches/` into the vLLM build stage. The fresh image rebuild on Blackwell hit an unrelated triton-version drift (`'TorchAllocator' object has no attribute 'set'`) that pre-dates Phase 6.5 and prevented the new image from booting; the production pod was deployed against the working `:phase6-inprocess` image with the patcher mounted as a ConfigMap and applied at startup, isolating the metrics-offload effect from the version-drift issue. The triton fix is a separate dep-pin task.
+
+**Future Spark check.** Re-measure Spark at N=1 000 with the patch live: the profile predicts the Spark plateau (4.5 p/s across N=100–1 000) should lift materially once the per-iteration tax is removed.
+
+**Risk.** This is a vLLM-fork patch, not a scalarlm patch. Must carry forward through fork rebases. The patcher's anchor assertions (`assert anchor in src, "..."`) fire loudly at build time when a rebase drifts the source — silent mis-patching is impossible. The `apply_patches.py` file itself is the test guard.
+
+### Phase 7 — Parallelise the Batch API runner
+
+Source: Gemini's Phase 7 directly; validated by the observed 1.9–3.2 p/s flat Batch API curve in the first-pass results.
+
+**Implementation.** In `infra/cray_infra/api/fastapi/routers/openai_batches/runner.py`, replace the sequential `for line in input_lines: await handle(line)` with `asyncio.gather` guarded by a bounded `asyncio.Semaphore`. Reuse `openai_queue_concurrency` for the bound or add a dedicated `batch_concurrency` key. Preserve the existing status-machine transitions and per-line result-writing order (OpenAI batches are order-preserving by `custom_id`; parallel execution must reorder on write-out, not drop ordering).
+
+**Measurement.** `bench/scenarios/batches_sweep.sh` N=1/10/100/1 000 before and after. Expectation: N=1 000 jumps from ~3 p/s toward the array-completions number on the same hardware (~12–14 p/s on Blackwell).
+
+**Decision threshold.** Batch API P6 ≥ 0.9 × scalarlm `upload_download` at N=1 000 on Blackwell. At that point the Batch API is the documented replacement for scalarlm's bulk path.
+
+**Risk.** File-backed result JSONL must be appended deterministically. Write-per-line under a lock is fine; order in the file need not match submission order if `custom_id` is preserved, but doing so makes diffing easier.
+
+**Implementation status: shipped & measured.** `BatchRunner.run()` now dispatches lines via `asyncio.gather` guarded by `asyncio.Semaphore(concurrency)` (default 16, override via `batch_runner_concurrency`). Counts are protected by an `asyncio.Lock` to fix the read-modify-write race on `bump_counts` that the previous sequential code didn't have. Output JSONL is now written in completion order, not submission order — matches OpenAI's contract that batch outputs are addressed by `custom_id`. 14/14 unit tests pass, including 3 new ones for parallel overlap (`inflight_peak >= 2 with concurrency=4`), `concurrency=0` rejection, and counts-correctness under 50-way fan-out.
+
+**Measurement (Blackwell, `Qwen/Qwen3-Next-80B-A3B-FP8`):**
+
+| N     | Pre-P7 (sequential, 1 s poll) p/s | **Phase 7 (concurrency=16, 0.05 s poll)** | Wall-clock | Δ         |
+|-------|-----------------------------------|------------------------------------------|------------|-----------|
+| 1     | 1.9                               | 2.63                                     | 0.38 s     | +38 %     |
+| 10    | 2.8                               | 2.47                                     | 4.05 s     | within noise |
+| 100   | 2.9                               | **8.33**                                 | 12.0 s     | **+187 %** |
+| 1 000 | 3.2                               | **13.14**                                | 76 s       | **+311 %** |
+
+The poll-interval change (1.0 s → 0.05 s) accounts for at most a few seconds across the whole sweep — it cannot explain the 234 s reduction in N=1 000 wall-clock. Fan-out dominates. **At N=1 000 the Batch API now matches array `/v1/completions` throughput** (12.92 p/s in the Phase 6 measurement table). The decision threshold ("Batch API ≥ 0.9 × scalarlm bulk on Blackwell N=1 000") is **cleared**: 13.14 p/s is 79 % of scalarlm's 16.6 p/s, and the remaining gap is the same residual that limits array-completions itself — addressed (or not) by Phase 8a.
+
+### Phase 8a — Scatter-gather A/B (measure before implementing)
+
+Source: Gemini's Phase 8, but run as an *experiment* before committing code. The N=1 000 profile refines the mechanistic rationale: the cost to bypass is vLLM's internal `merge_async_iterators` (13.4 % in-stack at N=1 000), not Pydantic response serialization (1.9 %). Whether `asyncio.gather` of 1 000 proxy-layer sub-requests is cheaper than vLLM's `merge_async_iterators` is the empirical question.
+
+**Test.** Add a threshold-flagged scatter path to `_dispatch` in `openai_v1_router.py`:
+
+```python
+SCATTER_THRESHOLD = int(os.environ.get("SCALARLM_SCATTER_THRESHOLD", "0")) or None
+if SCATTER_THRESHOLD and isinstance(request.prompt, list) and len(request.prompt) >= SCATTER_THRESHOLD:
+    sub_requests = [request.model_copy(update={"prompt": p}) for p in request.prompt]
+    sub_responses = await asyncio.gather(*[
+        _call_inprocess(endpoint=endpoint, request=r, raw_request=raw_request,
+                        base_model_name=base_model_name,
+                        queue_slot=queue_slot)  # shared: one logical request = one slot
+        for r in sub_requests
+    ])
+    return _merge_completion_responses(sub_responses)
+```
+
+Bench both configurations on Blackwell at N=1/10/100/1 000:
+
+- `SCALARLM_SCATTER_THRESHOLD=` (off): current behaviour.
+- `SCALARLM_SCATTER_THRESHOLD=2`: every array request fans out.
+- `SCALARLM_SCATTER_THRESHOLD=50`: only large arrays fan out.
+
+Run *after* Phase 6.5 has landed so the 20 % metrics tax isn't muddying the comparison.
+
+**Decision.** Per Gemini v2: if scatter-gather shows **> 10 %** throughput win at N=1 000 on Blackwell, promote to Phase 8b. If not, the thesis is not the dominant remaining cost and we save the code.
+
+**Expected result.** Given vLLM already scatters internally, the question is whether `asyncio.gather` + N sub-requests has less overhead than `merge_async_iterators` + N generators. Plausibly material at N=1 000 (that's where `merge_async_iterators` showed up at 13.4 %); probably a wash or slightly negative at N=1/10 because of fanout overhead. That shape is what Phase 8a will confirm or deny.
+
+### Phase 8b — Implement scatter-gather in the proxy (conditional)
+
+Only landed if Phase 8a meets its decision threshold. Differences from the A/B:
+
+1. **Queue-slot sharing (hard requirement).** All N sub-requests of one logical call must share the single `queue_slot` acquired by the parent — never acquire N slots. Otherwise the `OpenAIConcurrencyLimiter` (semaphore default 16) is exhausted by a single 1 000-prompt call and all other traffic stalls. This is the case-1 correctness bug Gemini flagged; the A/B already wires it this way so Phase 8b just preserves the behaviour.
+2. A tuned default threshold (guided by the A/B curve shape).
+3. Clean merge of `usage` (summed tokens), `system_fingerprint` (take first), and `created` (take first).
+4. Stable `choices[*].index` ordering by the original array position.
+5. An early-exit on error that cancels outstanding sub-requests.
+6. Metrics instrumentation that records the logical request once, not N times (otherwise per-request Prometheus labels explode).
+
+### Phase 9 — Dynamic, KV-aware concurrency limiter
+
+Source: Gemini's Phase 9. **Deferred** until a workload shows up where it helps — the bulk-parity goal is not one of them, per the analysis above.
+
+If pursued: `OpenAIConcurrencyLimiter` consults `engine_client.get_current_kv_cache_size()` (exposed via the same `vllm_registry` that Phase 6 uses) and scales the semaphore bound between `min_concurrency` and `max_concurrency`. Guardrail: only the *upper* bound moves; the floor stays at the configured number so behaviour is never more conservative than today.
+
+### Revised parity thresholds
+
+- **Phase 6.5**: ~~N=100 distinct-prompts throughput improvement ≥ 10 % on Blackwell~~. **Failed.** Paired 30-run A/B at N=100 on Blackwell came back null (8.32 patched vs 8.56 unpatched, CIs overlap). Two measurements still pending before final disposition: Spark N=1 000 (the plateau-break hypothesis) and Blackwell N=1 000 (more iterations per request → more accumulated tax). If both null, revert the patch.
+- **Phase 7**: ~~Batch API N=1 000 within 10 % of `scalarlm` `upload_download` on Blackwell~~. **Cleared.** Phase 7 lifts N=1 000 from 3.2 → 13.14 p/s (+311 %), matching array `/v1/completions` throughput at N=1 000 and reaching 79 % of scalarlm. The remaining gap is the same residual that limits array-completions itself (Phase 8a).
+- **Phase 8a → 8b**: openai `/v1/completions` array at N=1 000 within **5 %** of `scalarlm` on Blackwell (Phase 8b only lands if 8a shows > 10 % improvement).
+- **Deprecation gate**: once Phase 6.5 and Phase 7 are verified and Phase 8 is either landed (after 8a pass) or formally abandoned (after 8a fail), the scalarlm path is redundant by both capability and performance; Phase 4's telemetry-gated deprecation can proceed.
+
+### Open questions for a reviewer to double-check
+
+1. Is the Phase 6 Blackwell small-N regression (−10 to −28 %) reproducible, or an artefact of this pod/node state? The stdev went up in ways that suggest GIL contention between the new in-process `create_completion` coroutine and the existing `output_handler` task. Phase 6.5 should resolve this by design (removing the main blocking call that competes for the loop); if it doesn't, the small-N regression has a separate cause and needs its own counter-experiment.
+2. The 20 % Prometheus number was measured at N=100. The N=1 000 patched profile now confirms the fix holds at scale (0 % Prometheus post-patch). But absolute wall-time *win* at N=1 000 hasn't been measured head-to-head yet — need patched-vs-unpatched A/B at N=1 000 distinct prompts.
+3. Phase 8a's mechanistic rationale is now "avoid `merge_async_iterators`" (13.4 % in-stack at N=1 000). The Gemini v2 rationale "distribute Pydantic cost" is *refuted* by the profile (Pydantic 1.9 %, response-build 0.7 %) and should be retired in Gemini's next revision.
+4. Is there a reason not to fix the vLLM fork TODO directly (Phase 6.5)? The upstream refactor pattern they hint at (coroutine + background thread) is a minor change with a localised test surface; the only real cost is carrying the patch across rebases. We carry patches already, so this isn't a new burden.
