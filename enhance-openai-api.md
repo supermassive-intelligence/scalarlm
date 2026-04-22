@@ -168,6 +168,72 @@ Do **not** delete scalarlm in this work. Deprecation first, removal later, with 
 
 Once Option A (proxy-side load) is stable, consider packaging the ScalarLM adapter discovery as a `LoRAResolver` plugin (see "vLLM-fork capabilities" above). This collapses the proxy to a pure passthrough and moves ScalarLM-specific resolution logic into a well-defined vLLM extension point. Not required for scalarlm deprecation — just cleaner long-term.
 
+### Phase 6 — collapse the HTTP hop between the openai proxy and vLLM
+
+**Motivation.** The bulk-parity sweep at N=1 000 (see "First-pass results" below) shows scalarlm beating openai by 27 % — the gap is almost entirely the HTTP hop from the openai proxy (FastAPI on 8000) to vLLM's own OpenAI server (FastAPI on 8001). scalarlm's worker runs in the same process as vLLM and calls the Python API directly; openai serialises a 1000-element `prompt` array to TCP, vLLM deserialises, generates, serialises a 1000-element `choices` response, and the proxy streams every byte back. Eliminating this hop is the single biggest lever available.
+
+**Approach.** Call vLLM's `OpenAIServingCompletion.create_completion(...)` / `OpenAIServingChat.create_chat_completion(...)` directly from the openai proxy handler, using the same engine client the scalarlm worker already uses. vLLM's internal classes accept a parsed `CompletionRequest`/`ChatCompletionRequest` plus the FastAPI `raw_request`, and return either a `JSONResponse` (non-streaming) or a `StreamingResponse` (streaming) — the exact shape our proxy already produces.
+
+Alternative shapes considered:
+- *Include vLLM's router in the scalarlm app.* Works but bypasses our Phase 3d queue / request-id middleware unless we reorder carefully. More plumbing.
+- *`httpx.ASGITransport` to call vLLM's app in-process.* Skips TCP but still pays JSON encode/decode twice. Marginally faster than HTTP; doesn't address the biggest cost.
+
+Picking the direct-Python-API approach for the clearest throughput win with the smallest disruption.
+
+**Implementation sketch (≈80 lines in `openai_v1_router.py`):**
+
+1. At app startup, stash a reference to vLLM's already-initialised serving objects on scalarlm's `app.state`. `create_vllm.py` already calls `init_app_state(engine_client, vllm_app.state, args, supported_tasks)` — the completions serving lives at `vllm_app.state.openai_serving_completion`, chat at `vllm_app.state.openai_serving_chat`. Thread those through so both FastAPI apps in this process share them.
+2. Replace `_proxy_streaming` with `_call_inprocess`:
+   ```python
+   async def _call_inprocess(*, request, raw_request, endpoint, base_model_name, queue_slot):
+       servings = raw_request.app.state.vllm_servings
+       if endpoint == "completions":
+           resp = await servings.completion.create_completion(request, raw_request)
+       else:
+           resp = await servings.chat.create_chat_completion(request, raw_request)
+       if isinstance(resp, StreamingResponse):
+           resp.body_iterator = _wrap_with_metrics(resp.body_iterator,
+                                                  base_model_name=base_model_name,
+                                                  queue_slot=queue_slot)
+           return resp
+       # Non-streaming: run metrics synchronously, release slot, return.
+       _record_metrics_from_body(resp.body, base_model_name)
+       if queue_slot: await queue_slot.release()
+       return resp
+   ```
+3. Keep request-id middleware, `OpenAIConcurrencyLimiter`, LoRA pre-load, and the multi-prompt log line exactly where they are. Only the upstream-call line changes.
+4. Drop `vllm_api_url` from `default_config.py` (it becomes unused). The separate vLLM uvicorn on 8001 no longer needs to be started — one fewer server process.
+
+**Tests** (`test/unit/`):
+
+- `test_inprocess_completion_calls_serving`: inject a mock `OpenAIServingCompletion`, assert our handler passes the filtered request + `raw_request` through.
+- `test_inprocess_streaming_body_wrapped_with_metrics`: mock returns a `StreamingResponse` with a fake SSE body; assert our wrapper runs and records `token_count`.
+- `test_inprocess_queue_slot_released_on_normal_completion` and `_on_error`: slot is released exactly once in every path.
+- `test_inprocess_non_streaming_records_metrics_synchronously`: mock returns `JSONResponse`; assert metrics fired before the response left.
+
+Integration: the existing `bench/smoke_phase3.sh` should continue to pass 6/6 with zero changes.
+
+**Measurement plan.**
+
+1. Keep the current HTTP-hop image deployed on Blackwell until Phase 6 is built; those bench numbers are the baseline.
+2. Build and push the Phase 6 image under a distinct tag (`kapu/scalarlm-nvidia-12.0:phase6-inprocess`) so a simple pod-spec swap toggles between them.
+3. Re-run `bench/scenarios/bulk_repeat.sh` at N=1/10/100/1000 on both Blackwell and Spark.
+4. Report a 3-column table per platform: scalarlm, openai (HTTP hop), openai (in-process). Compute the delta between openai-HTTP and openai-in-process; that's the transport-overhead component.
+5. **Pre-registered expectations**:
+   - N=1: openai (in-process) within ±5 % of openai (HTTP). Small-N gap was pipeline cost, not transport.
+   - N=10, N=100: openai (in-process) 5–15 % faster than openai (HTTP). Transport cost becomes visible.
+   - N=1000: openai (in-process) ≥ 25 % faster than openai (HTTP) — closing or flipping scalarlm's current lead. The clean signal that transport was the bottleneck.
+   - scalarlm stays the same; this phase doesn't touch its code path.
+
+**Risks / trade-offs.**
+
+- **vLLM Python API is not versioned the way its HTTP API is.** A vLLM-fork update that changes `OpenAIServingCompletion`'s signature breaks us. Mitigated by pinning the fork tightly and catching the regression in the unit tests above.
+- **No process boundary between proxy and engine.** Today if vLLM crashes, the proxy survives and returns a 5xx. After Phase 6 a vLLM segfault takes the whole scalarlm server down too. Since ScalarLM already runs vLLM in-process for the scalarlm path (the worker + engine share a process), the blast radius doesn't actually increase. But noting it.
+- **Streaming-response wrapping.** `_wrap_with_metrics` was designed to consume an aiohttp `iter_any()` stream. vLLM's `StreamingResponse.body_iterator` is an async iterator of bytes — same shape. Needs one round of validation that backpressure still propagates end-to-end (vLLM slows → `body_iterator` yields slower → client read blocks).
+- **Config cleanup.** `vllm_api_url` becomes dead code; grep and remove. Downstream callers that read `get_config()["vllm_api_url"]` (there are a few — health check, model list) either need to switch to in-process calls or keep talking to vLLM's server on 8001 during a transition period. Cleanest: migrate all of them, then stop starting vLLM's own server.
+
+**Scope boundary.** Phase 6 is strictly about the openai path's transport to vLLM. It does not touch scalarlm's queue, the Batch API, or any of the Phase 3 features. The deprecation argument in Phase 4 stays the same — this just closes the large-N throughput gap that was the one empirical reason not to deprecate scalarlm today.
+
 ## Risks and open questions
 
 - **Unknown `model` values.** If a caller passes a name that neither resolves to an adapter nor to the base model, the proxy should not pre-call `/v1/load_lora_adapter` with a bogus path — let vLLM error. The model manager's `find_model` already returns `None` for unknowns; use that signal to skip the load step and forward directly (vLLM returns 400/404 as before).
