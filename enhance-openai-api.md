@@ -414,7 +414,23 @@ Raw JSON: `bench/results/blackwell-4gpu-first-pass/20260422T042805Z/summary.json
 | 100 | 13.1 | 11.1 | −15 % |
 | 1 000 | 16.6 | 17.5 | **+5.6 %** |
 
-At the large-batch end the plan's 5 % threshold is cleared favourably — openai is faster, not slower. Small N favours openai by a lot (less middleware weight; for single-prompt calls the scalarlm worker + queue round-trip costs show). The −15 % dip at N=100 is a real finding — likely worker-batch-scheduler behaviour in the mid-zone; worth a follow-up but not a blocker for parity.
+At the large-batch end the plan's 5 % threshold is cleared favourably — openai is faster, not slower. Small N favours openai by a lot (less middleware weight; for single-prompt calls the scalarlm worker + queue round-trip costs show). The first-pass apparent −15 % dip at N=100 was single-run noise — see the repeated-runs section below for the corrected number.
+
+**N=100, 10 iterations with warmup, unique prompt per iteration** (`bench/scenarios/n100_repeat.sh`, raw JSON at `bench/results/blackwell-4gpu-n100-repeat/20260422T050053Z/summary.json`):
+
+| metric | openai `/v1/completions` array | scalarlm `/v1/generate` |
+|---|---|---|
+| mean prompts/s | **14.54** | 11.04 |
+| stdev | 2.77 (19 %) | 1.66 (15 %) |
+| min — max | 9.60 — 17.39 | 8.91 — 13.53 |
+| mean call duration | 7.14 s | 9.24 s |
+
+**openai beats scalarlm by +31.7 % on the mean** at N=100; both distributions overlap substantially (openai's low end touches scalarlm's high end) but the means are separated by more than one stdev. The first-pass −15 % for openai at N=100 was a single sample near its lower edge.
+
+**Why the first run of each scenario has to be a warmup, and why the prompts must vary per iteration.** Two real gotchas surfaced while turning the single-sample numbers into statistics:
+
+- vLLM's GDN-prefill kernels compile JIT per sequence-length bucket. First call at a new length eats seconds of Triton compile. Repeating at the *same* bucket is cheap. Benchmark runs need one discarded warmup before the measurement window.
+- scalarlm's `/v1/generate` derives `request_id = sha256(json.dumps(requests_list))` (`generate.py:85-86`). Identical request lists across iterations collide; the queue may return cached results without re-running inference. A first attempt at the repeat run produced a fake *470 p/s* for scalarlm because of this — that's the red-flag to watch for. The fix is to vary the prompt per iteration so every batch hashes differently.
 
 **openai interactive chat** (`pathb_chat_single`, one request per coroutine, queue=16):
 
