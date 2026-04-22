@@ -372,7 +372,34 @@ Before the benchmark runs:
 - Latency under cold start (adapter not yet loaded). The LoRA-load path runs once per adapter per worker; bench runs should be warm.
 - Mixed-shape workloads (streaming + bulk interleaved). Worth doing eventually but harder to attribute results; a separate follow-up.
 
-### First-pass results (2026-04-22, Blackwell)
+### First-pass results
+
+Three platforms hit so far. Raw JSON sits under `bench/results/<platform>/<timestamp>/`. Each platform table lists the scenarios that actually ran and any blocked ones with the reason.
+
+#### Nop baseline (FastAPI + request-id middleware, no inference)
+
+Measures the FastAPI / uvicorn / middleware ceiling on each host with the `/v1/bench/nop` endpoint. Single uvicorn worker, HTTP/2 client pool, 5 s per level.
+
+| concurrency | M5 (native, 10 cores) | Blackwell maxq-1 (in container, 64 cores) |
+|---|---|---|
+| 10 | 2 522 RPS · P50 3 ms | 969 RPS · P50 7 ms |
+| 100 | 655 RPS · P50 108 ms | 176 RPS · P50 392 ms |
+| 1 000 | 370 RPS · P50 1.4 s | 381 RPS · P50 1.4 s |
+| 10 000 | 480 RPS · P50 15 s | 366 RPS · P50 16 s |
+| 100 000 | (skipped) | 375 RPS · P50 19 s |
+| 1 000 000 | (skipped) | client fails before server (0 completed, 0 errors) |
+
+Both flat-line at ~300–500 RPS once concurrency exceeds the single event-loop can handle; no 5xx anywhere. The M5 edge at low concurrency is real but misleading: it's native Python on macOS vs. docker-bridge-in-VM on Blackwell. On a matched deployment shape (multi-worker uvicorn behind a LB) the picture reverses immediately. 1 M concurrent produces zero completed requests on the client side — exactly the pre-registered "fails before the server" outcome.
+
+Raw JSON:
+- `bench/results/mac-m5/20260422T014337Z/summary.json`
+- `bench/results/blackwell-4gpu/20260422T021606Z/summary.json`
+
+#### Mac M5 — inference scenarios
+
+Not measured. Docker Desktop's 7.6 GB VM on this machine OOMs the CPU vLLM stack (exit 137) on the first inference request even with `max_model_length=64` and `gpu_memory_utilization=0.10`. The nop-only entrypoint (`bench/server/nop_only_main.py`) survives because it doesn't boot vLLM; anything that does pushes the VM over. The plan's M5 role — stable denominator for proxy-overhead — is still satisfied by the nop numbers above; the inference scenarios belong on Spark/Blackwell per the original grid.
+
+#### Blackwell — full inference sweep
 
 Raw JSON: `bench/results/blackwell-4gpu-first-pass/20260422T042805Z/summary.json`. Platform: RTX PRO 6000 Max-Q × 2 (TP=2), `Qwen/Qwen3-Next-80B-A3B-Instruct-FP8`, `openai_queue_concurrency=16`, `max_num_seqs=16`.
 
