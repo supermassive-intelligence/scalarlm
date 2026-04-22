@@ -63,7 +63,9 @@ class BatchRunner:
 
         for raw in self._store.iter_input_lines(self._batch_id):
             if self._cancelled.is_set():
-                self._store.transition(self._batch_id, "cancelled")
+                current = self._store.get(self._batch_id)
+                if current and current.status not in TERMINAL_STATUSES:
+                    self._store.transition(self._batch_id, "cancelled")
                 return
 
             custom_id, parsed_error = _parse_input_line(raw)

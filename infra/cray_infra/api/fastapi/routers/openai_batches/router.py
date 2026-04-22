@@ -157,11 +157,13 @@ async def cancel_batch(batch_id: str):
 
     async with _runners_lock:
         runner = _runners.get(batch_id)
+
+    # Reflect the decision to cancel synchronously on disk so the DELETE
+    # response shows status=cancelled even when the runner is mid-subcall
+    # (it'll drain the in-flight call and then observe the terminal state
+    # on its next check — see BatchRunner.run's final-status guard).
+    if status.status not in ("completed", "failed", "cancelled"):
+        store.transition(batch_id, "cancelled")
     if runner is not None:
         runner.cancel()
-    else:
-        # No live runner — either already terminal, or never started. If
-        # still pre-terminal on disk, mark cancelled directly.
-        if status.status not in ("completed", "failed", "cancelled"):
-            store.transition(batch_id, "cancelled")
     return asdict(store.get(batch_id) or status)
