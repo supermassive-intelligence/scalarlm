@@ -46,9 +46,10 @@ class Result:
 
 
 async def run(args) -> Result:
+    prompts = _build_prompts(args)
     body = {
         "model": args.model,
-        "prompt": [args.prompt] * args.prompt_count,
+        "prompt": prompts,
         "max_tokens": args.max_tokens,
         "temperature": 0.0,
     }
@@ -79,12 +80,31 @@ async def run(args) -> Result:
     )
 
 
+def _build_prompts(args) -> list[str]:
+    """Produce the prompt array. With ``--distinct-prompts`` each of the
+    N prompts is unique so vLLM's prefix cache can't collapse them to
+    one prefill — closer to a realistic multi-tenant workload. Without
+    the flag, N copies of the same prompt (prefix-cache-friendly, the
+    workload the parity sweep used up to this point).
+    """
+    if args.distinct_prompts:
+        # Pad the iteration counter so the prompts end up the same length
+        # and the benchmarker doesn't accidentally measure tokenization
+        # variance.
+        return [f"req {i:06d}: {args.prompt}" for i in range(args.prompt_count)]
+    return [args.prompt] * args.prompt_count
+
+
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--url", default="http://localhost:8000")
     p.add_argument("--model", required=True)
     p.add_argument("--prompt-count", type=int, required=True)
     p.add_argument("--prompt", default="Hello. Say hi back in five words.")
+    p.add_argument("--distinct-prompts", action="store_true",
+                   help="Generate N unique prompts instead of N copies; "
+                        "defeats vLLM's prefix cache so the bench exercises "
+                        "actual prefill work per prompt.")
     p.add_argument("--max-tokens", type=int, default=32)
     p.add_argument("--no-http2", action="store_true")
     p.add_argument("--timeout", type=float, default=600.0)

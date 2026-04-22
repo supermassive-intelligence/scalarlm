@@ -41,9 +41,13 @@ class Result:
 
 
 async def run(args) -> Result:
+    if args.distinct_prompts:
+        prompts = [f"req {i:06d}: {args.prompt}" for i in range(args.prompt_count)]
+    else:
+        prompts = [args.prompt] * args.prompt_count
     body = {
         "model": args.model,
-        "prompts": [args.prompt] * args.prompt_count,
+        "prompts": prompts,
         "max_tokens": args.max_tokens,
     }
     url = args.url.rstrip("/") + "/v1/generate"
@@ -78,6 +82,8 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p.add_argument("--model", required=True)
     p.add_argument("--prompt-count", type=int, required=True)
     p.add_argument("--prompt", default="Say hello in five words.")
+    p.add_argument("--distinct-prompts", action="store_true",
+                   help="Generate N unique prompts instead of N copies.")
     p.add_argument("--max-tokens", type=int, default=32)
     p.add_argument("--no-http2", action="store_true")
     p.add_argument("--timeout", type=float, default=600.0)
