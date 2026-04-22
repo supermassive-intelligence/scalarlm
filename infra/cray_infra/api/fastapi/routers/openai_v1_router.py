@@ -372,22 +372,53 @@ async def _scatter_gather_completions(
     handled — _dispatch only routes string-list prompts here.
     """
     prompts = request.prompt
-    sub_requests = [request.model_copy(update={"prompt": p}) for p in prompts]
+    # Fresh CompletionRequest per sub-call (build, don't model_copy) and a
+    # fresh raw_request per sub-call. Phase 8a v3: closes the remaining
+    # delta vs scalarlm's async_completion_task pattern — sharing one
+    # raw_request across 1 000 concurrent calls and using model_copy()
+    # were the two unisolated suspects after v2.
+    sub_requests = [
+        type(request)(
+            model=request.model,
+            prompt=p,
+            max_tokens=request.max_tokens,
+            temperature=getattr(request, "temperature", 0.0),
+            tools=getattr(request, "tools", None),
+            tool_choice=getattr(request, "tool_choice", None),
+        )
+        for p in prompts
+    ]
+
+    async def _pass_receive():
+        # Mirrors scalarlm worker's pass_receive — vLLM's with_cancellation
+        # decorator awaits this; sleeping prevents the early "client
+        # disconnected" abort.
+        await asyncio.sleep(10.0)
+        return {"type": "http.request"}
+
+    def _fresh_raw_request():
+        return Request(
+            scope={
+                "app": raw_request.app,
+                "type": "http",
+                "headers": [],
+                "path": "/v1/completions",
+            },
+            receive=_pass_receive,
+        )
+
+    async def _call_one(r):
+        rr = _fresh_raw_request()
+        return await servings.openai_serving_completion.create_completion(r, rr)
 
     if _SCATTER_MAX_INFLIGHT > 0:
-        # Bounded fan-out — only K sub-requests in flight at once. Mimics
-        # scalarlm's queue-driven batch_size pull pattern. Tests whether
-        # vLLM scheduler scales poorly with many pending requests.
         sem = asyncio.Semaphore(_SCATTER_MAX_INFLIGHT)
         async def _bounded(r):
             async with sem:
-                return await servings.openai_serving_completion.create_completion(r, raw_request)
+                return await _call_one(r)
         sub_results = await asyncio.gather(*[_bounded(r) for r in sub_requests])
     else:
-        sub_results = await asyncio.gather(*[
-            servings.openai_serving_completion.create_completion(r, raw_request)
-            for r in sub_requests
-        ])
+        sub_results = await asyncio.gather(*[_call_one(r) for r in sub_requests])
 
     # Per-sub error short-circuits the whole call (matches array-prompt
     # behaviour today — vLLM aborts the batch if any one prompt errors).

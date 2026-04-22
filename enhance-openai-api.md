@@ -10,7 +10,7 @@ Phases 0–7 implemented; measurement summary:
 - **Phase 8a**: shipped behind `SCALARLM_SCATTER_THRESHOLD` env var. **Failed its 10 % gate** — paired A/B at N=1 000 distinct prompts shows scatter ON (8.43) ≈ scatter OFF (8.35), Δ +0.9 % well within both CIs. **Phase 8b not shipped.**
 - **Phase 9**: deferred per analysis above.
 
-**Updated parity picture (N=1 000 distinct prompts on Blackwell, properly paired):** openai is **49 %** behind scalarlm (8.35 vs 16.57 p/s), not the 22 % the doc previously claimed (which was identical-prompts where openai got prefix-cache help that scalarlm doesn't need). The lever for closing this lives inside vLLM's `OpenAIServingCompletion` or its engine entry point — neither of Phases 6 / 6.5 / 7 / 8a touched it. Next investigation: diff `create_generate_worker.py` against `vllm/entrypoints/openai/completion/serving.py` to find what scalarlm bypasses.
+**Updated parity picture (N=1 000 distinct prompts on Blackwell, properly paired):** openai is **49 %** behind scalarlm (8.35 vs 16.57 p/s), not the 22 % the doc previously claimed (which was identical-prompts where openai got prefix-cache help that scalarlm doesn't need). Three Phase 8a variants tested (v1 unbounded, v2 bounded-to-16, v3 fresh-raw_request + fresh-CompletionRequest) — all sit in the 7.5–8.5 p/s band. Three hypotheses refuted: scheduler-pressure-from-pending-requests, raw_request-sharing, model_copy cost. Two open: `api_router` decorators (`@with_cancellation` + `@load_aware_call`) and the OpenAIConcurrencyLimiter slot duration. Detail in the Phase 8 section below.
 
 ## Why this work exists
 
@@ -867,14 +867,30 @@ Bounding is **worse**, not better. Hypothesis refuted. The Semaphore acquire/rel
 
 **Where the 2× gap lives is now genuinely unclear from the code reading alone.** Both paths route through `OpenAIServingCompletion.create_completion(...)` with what look like equivalent CompletionRequest objects (model, prompt, max_tokens, temperature, no tools/no LoRA in this bench). Same engine, same continuous batching, same KV cache. Yet 2× difference.
 
-Hypotheses that haven't been tested yet:
+### Phase 8a v3 — fresh raw_request + fresh CompletionRequest (also null)
 
-1. **`@with_cancellation` / `@load_aware_call` decorators**: the api_router.create_completion (which scalarlm uses) is wrapped by these; the direct serving call (which Phase 6 uses) isn't. Could change scheduling/yield behaviour. Easy A/B: have Phase 6 / Phase 8a route through `vllm.entrypoints.openai.completion.api_router.create_completion(...)` instead of the serving method directly. Test next.
-2. **Concurrency limiter holding the slot too long**: openai's request acquires `OpenAIConcurrencyLimiter` slot and holds it for the entire 1 000-prompt call (~120 s). scalarlm has no equivalent on the worker path. Probably not throughput-limiting at single-caller load (we're not contending), but worth verifying by setting `openai_queue_concurrency` very high and re-running.
-3. **Pydantic round-trip of CompletionRequest**: Phase 8a does `request.model_copy(update={"prompt": p})` 1 000 times — Pydantic v2 model copies aren't free. scalarlm builds its CompletionRequest fresh per request from a dict. A/B by switching scatter to construct fresh CompletionRequest instances rather than copying.
-4. **`raw_request` recycling**: Phase 8a passes the same `raw_request` to all 1 000 sub-`create_completion` calls. vLLM's serving may attach state to `raw_request.state`; sharing it across 1 000 concurrent calls could cause lock contention or unexpected behaviour. scalarlm builds a fresh fake `Request` per task. Easy fix.
+Two of the four open hypotheses tested simultaneously:
 
-Each is a one-pod-restart A/B. Logging this as the next investigation queue rather than blocking on it.
+- **Pydantic `model_copy()` cost**: Phase 8a v1 used `request.model_copy(update={"prompt": p})` 1 000 times. v3 constructs each sub-`CompletionRequest` fresh from individual fields (model, prompt, max_tokens, temperature, tools, tool_choice) — exactly the way scalarlm worker does in `async_completion_task`.
+- **Shared `raw_request` across 1 000 concurrent calls**: Phase 8a v1 passed the parent `raw_request` to all sub-`create_completion`s. v3 builds a fresh `fastapi.Request` per sub-call (with a `pass_receive` that sleeps 10 s, mirroring scalarlm worker exactly).
+
+| Variant | Mean p/s | Stdev | Range | vs scalarlm 16.57 |
+|---|---|---|---|---|
+| Phase 8a v1 unbounded (shared raw, model_copy) | 8.43 | 0.82 | 7.53 – 9.38 | −49 % |
+| Phase 8a v2 bounded (16 in flight) | 7.52 | 0.37 | 7.08 – 8.10 | −55 % |
+| **Phase 8a v3 fresh raw + fresh CompletionRequest** | **8.97** | 0.86 | 8.08 – 10.37 | **−46 %** |
+
+v3 is statistically indistinguishable from v1 (CIs overlap completely). **Two more hypotheses refuted.** Neither Pydantic model_copy cost nor raw_request-sharing is the lever.
+
+### Open hypotheses for the 49 % gap (in order of next test)
+
+1. **`@with_cancellation` / `@load_aware_call` decorators on api_router.create_completion**. scalarlm worker imports `create_completion` from `vllm.entrypoints.openai.completion.api_router` — that's the FastAPI handler, wrapped by these two decorators. Phase 6 / Phase 8a calls `servings.openai_serving_completion.create_completion(...)` directly, bypassing them. The decorators could change scheduling, yield behaviour, or load-balancing decisions inside vLLM. Easy A/B: import and call the api_router function from `_call_inprocess`.
+2. **`OpenAIConcurrencyLimiter` slot held for full 120 s call duration**. scalarlm's worker has no equivalent on its path. We're a single caller in the bench so contention shouldn't matter, but worth confirming by setting `openai_queue_concurrency=999` and re-running.
+3. **Engine-internal request_id namespace**. scalarlm passes its own request_id; Phase 6 lets vLLM auto-generate. Long shot — vLLM's request_id is just a key in dicts, hash-distributed. But scalarlm's IDs are a hash of the request content, openai's are UUID-style — different distributions.
+
+Each is a one-pod-restart A/B (~12 min cycle on Blackwell). The api_router-decorator test is queued next; if that closes the gap, the fix is a two-line change in `_call_inprocess`.
+
+**If after testing all four/five hypotheses the gap is still unexplained**, the next step is a comparative py-spy profile: run a scalarlm bench at N=1 000 distinct + a Phase 8a bench at N=1 000 distinct and diff the flamegraphs. Whatever's different in the API server stack between them is the residual cost. Have not done this yet because we already have py-spy data on the openai path; the missing comparison is a scalarlm-only profile.
 
 ### Phase 9 — Dynamic, KV-aware concurrency limiter
 
@@ -891,7 +907,22 @@ If pursued: `OpenAIConcurrencyLimiter` consults `engine_client.get_current_kv_ca
 
 ### Open questions for a reviewer to double-check
 
-1. Is the Phase 6 Blackwell small-N regression (−10 to −28 %) reproducible, or an artefact of this pod/node state? The stdev went up in ways that suggest GIL contention between the new in-process `create_completion` coroutine and the existing `output_handler` task. Phase 6.5 should resolve this by design (removing the main blocking call that competes for the loop); if it doesn't, the small-N regression has a separate cause and needs its own counter-experiment.
-2. The 20 % Prometheus number was measured at N=100. The N=1 000 patched profile now confirms the fix holds at scale (0 % Prometheus post-patch). But absolute wall-time *win* at N=1 000 hasn't been measured head-to-head yet — need patched-vs-unpatched A/B at N=1 000 distinct prompts.
-3. Phase 8a's mechanistic rationale is now "avoid `merge_async_iterators`" (13.4 % in-stack at N=1 000). The Gemini v2 rationale "distribute Pydantic cost" is *refuted* by the profile (Pydantic 1.9 %, response-build 0.7 %) and should be retired in Gemini's next revision.
-4. Is there a reason not to fix the vLLM fork TODO directly (Phase 6.5)? The upstream refactor pattern they hint at (coroutine + background thread) is a minor change with a localised test surface; the only real cost is carrying the patch across rebases. We carry patches already, so this isn't a new burden.
+1. **The 49 % distinct-prompts gap at N=1 000.** Three Phase 8a variants (unbounded, bounded-to-16, fresh-raw_request) all land in the 7.5–8.5 p/s band; scalarlm is 16.57 ± 0.04. Both paths route through `OpenAIServingCompletion.create_completion(...)` with what look like equivalent CompletionRequests. Two open-and-untested hypotheses (`api_router` decorators, `OpenAIConcurrencyLimiter` slot duration) — see Phase 8a v3 section. If they don't close it, comparative py-spy of scalarlm-vs-openai is the next step.
+2. Is the Phase 6 Blackwell small-N regression (−10 to −28 %) reproducible, or an artefact of this pod/node state? The stdev went up in ways that suggest GIL contention between the new in-process `create_completion` coroutine and the existing `output_handler` task. Phase 6.5 was supposed to address this; the paired N=100 A/B came back null. So either (a) the regression is pod-state noise too, or (b) the lever is something other than the metrics emit.
+3. The 20 % Prometheus number was measured at N=100. The N=1 000 patched profile confirms the fix applies (0 % Prometheus in-stack post-patch). But the absolute wall-time *win* at N=1 000 hasn't been measured paired yet — Phase 6.5 follow-up #1.
+4. Phase 8a's mechanistic rationale was "avoid `merge_async_iterators`" (13.4 % in-stack at N=1 000). All three Phase 8a variants tested (including the proxy-level scatter that bypasses `merge_async_iterators` entirely) land in the same 8 p/s band. So `merge_async_iterators` *appears* in the profile but isn't the bottleneck — analogous to the Phase 6.5 result. Profile-vs-A/B mismatch is a recurring theme on this codebase; treat py-spy as a hypothesis generator, not a diagnostic.
+5. Is there a reason not to fix the vLLM fork TODO directly (Phase 6.5)? The upstream refactor pattern they hint at (coroutine + background thread) is a minor change with a localised test surface; the only real cost is carrying the patch across rebases. We carry patches already, so this isn't a new burden — even though the throughput payoff is null on the workloads tested so far.
+
+### Remaining work — concrete next steps
+
+In ROI order:
+
+1. **Phase 8a v4 — route through `vllm.entrypoints.openai.completion.api_router.create_completion`** (gets `@with_cancellation` + `@load_aware_call` decorators). Most-likely remaining lever per Phase 8a v3 result. ~12 min pod cycle for the A/B.
+2. **Phase 8a v5 — bench with `openai_queue_concurrency=999`** (slot effectively unbounded). Long-shot but cheap — same code, just env override; ~12 min pod cycle.
+3. **If 1 and 2 are both null: comparative py-spy of scalarlm-vs-openai at N=1 000 distinct.** We have py-spy on the openai path; what's missing is the scalarlm-only profile to diff against. ~30 min including pod/setup. Whatever's different in the API-server stack between them is the residual cost.
+4. **Phase 6.5 follow-up #1 — paired Blackwell N=1 000 A/B (patched vs unpatched on same pod)**. The N=100 A/B came back null but the patch's predicted effect should grow with engine iterations per request, so N=1 000 might surface what N=100 hid. ~25 min (two pod cycles + benches).
+5. **Phase 6.5 follow-up #2 — Spark plateau check**. Spark sat at 4.5 p/s flat across N=100/1 000 in the first-pass measurements; the metrics-tax theory predicts the plateau breaks under the patch. Needs a Spark pod with the patcher applied. ~30 min including ssh/pod setup.
+6. **If Phase 6.5 follow-ups are also null — revert the patch.** It's correct but does no measurable work; carrying it through fork rebases is unjustified.
+7. **Phase 4 telemetry-gated deprecation** — gate is "Phase 7 cleared **and** the N=1 000 distinct-prompts parity argument resolved one way or the other". Phase 7 is in the bag; the parity argument needs (1)–(3) to land or fail.
+
+What's *not* on this list: Phase 8b (scatter-gather as productionised feature), Phase 9 (dynamic concurrency limiter). Both are deferred per the data above — Phase 8b because v1/v2/v3 all failed the gate, Phase 9 because no workload has surfaced where it would help.
