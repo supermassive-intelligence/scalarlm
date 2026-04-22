@@ -29,7 +29,10 @@ from cray_infra.api.fastapi.tasks.add_megatron_tasks import (
 from cray_infra.api.fastapi.routers.add_chat_proxy import (
     add_chat_proxy,
 )
-from cray_infra.api.fastapi.setup_ui import add_ui
+try:
+    from cray_infra.api.fastapi.setup_ui import add_ui
+except ImportError:  # UI is optional — benchmark / older images may not have it
+    add_ui = None
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -79,7 +82,8 @@ async def get_prometheus_metrics():
         return PlainTextResponse("Metrics unavailable", status_code=500)
 
 add_chat_proxy(app)
-add_ui(app)
+if add_ui is not None:
+    add_ui(app)
 
 origins = [
     "http://localhost:3000",
