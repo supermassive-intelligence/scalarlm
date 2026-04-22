@@ -57,3 +57,15 @@ fi
 
 echo "📍 vLLM is ready at: $DEST_DIR"
 ls -la "$DEST_DIR" | head -5
+
+# ScalarLM fork patches (see scripts/vllm_patches/apply_patches.py for why
+# each one exists and what anchors it's guarding). Runs after the vLLM
+# tree is staged, before the pip install compiles anything.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PATCHER="${SCRIPT_DIR}/vllm_patches/apply_patches.py"
+if [ -x "${PATCHER}" ]; then
+    echo "🩹 Applying ScalarLM vLLM-fork patches"
+    python3 "${PATCHER}" "${DEST_DIR}"
+else
+    echo "⚠️  Patcher not found at ${PATCHER}; skipping"
+fi

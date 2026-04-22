@@ -260,6 +260,9 @@ ARG VLLM_REPO=https://github.com/supermassive-intelligence/vllm-fork.git
 
 # Handle vLLM source - support both local and remote modes
 COPY scripts/build-copy-vllm.sh ${INSTALL_ROOT}/build-copy-vllm.sh
+# ScalarLM fork-patches — build-copy-vllm.sh shells to apply_patches.py
+# under ${INSTALL_ROOT}/vllm_patches/ after staging the tree.
+COPY scripts/vllm_patches/ ${INSTALL_ROOT}/vllm_patches/
 
 # Handle vLLM source - single RUN command with conditional mount
 # For remote: clone from repository
