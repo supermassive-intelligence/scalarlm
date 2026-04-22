@@ -852,7 +852,29 @@ The doc's "22 % gap at N=1 000" came from identical-prompts measurements where v
 
 scalarlm's stability at N=1 000 distinct (CV 0.2 %) is itself a clue — it gets the same throughput identical-vs-distinct (16.57 either way), which means prefix-cache state doesn't reach scalarlm's request stream. Either it bypasses prefix caching, pre-tokenizes around it, or its scheduler doesn't respect cache hits the way `OpenAIServingCompletion` does. **Whatever scalarlm's worker is doing differently is the real lever for closing the gap, and none of Phases 6 / 6.5 / 7 / 8a touched it.**
 
-Open investigation hook: read `infra/cray_infra/one_server/create_generate_worker.py` against `vllm/entrypoints/openai/completion/serving.py` and identify what the worker bypasses that the OpenAI serving doesn't. Candidates: pre-tokenized prompts, different sampling-params construction, no per-prompt response-builder, different engine entry point.
+### Phase 8a v2 — bounded scatter (also null)
+
+Reading `create_generate_worker.py` showed scalarlm's worker pulls work in batches sized by `kv_cache_size // max_model_length`, suggesting it naturally bounds in-flight requests rather than queueing 1 000 simultaneously. Hypothesis: vLLM's scheduler does O(pending_requests) work per iteration and gets slow when 1 000 are pending vs 16. Tested by adding `SCALARLM_SCATTER_MAX_INFLIGHT=16` env-var-controlled `asyncio.Semaphore` around the scatter:
+
+| Condition                                                         | Mean p/s | Stdev | 95 % CI | Range          |
+|-------------------------------------------------------------------|----------|-------|---------|----------------|
+| Phase 8a scatter OFF (vLLM internal `merge_async_iterators`)      | 8.35     | 1.22  | ±1.07   | 7.50 – 10.48   |
+| Phase 8a scatter ON, **unbounded**                                | 8.43     | 0.82  | ±0.71   | 7.53 – 9.38    |
+| Phase 8a scatter ON, **bounded to 16 in flight** (mimic scalarlm) | **7.52** | 0.37  | ±0.32   | 7.08 – 8.10    |
+| **scalarlm `/v1/generate`** (same hardware, same prompts)         | **16.57**| 0.04  | ±0.03   | 16.53 – 16.62  |
+
+Bounding is **worse**, not better. Hypothesis refuted. The Semaphore acquire/release is small but non-zero overhead; without a compensating gain it's pure cost. So vLLM's scheduler is *not* O(pending_requests)-pessimal at this scale — at least not enough to manifest as throughput.
+
+**Where the 2× gap lives is now genuinely unclear from the code reading alone.** Both paths route through `OpenAIServingCompletion.create_completion(...)` with what look like equivalent CompletionRequest objects (model, prompt, max_tokens, temperature, no tools/no LoRA in this bench). Same engine, same continuous batching, same KV cache. Yet 2× difference.
+
+Hypotheses that haven't been tested yet:
+
+1. **`@with_cancellation` / `@load_aware_call` decorators**: the api_router.create_completion (which scalarlm uses) is wrapped by these; the direct serving call (which Phase 6 uses) isn't. Could change scheduling/yield behaviour. Easy A/B: have Phase 6 / Phase 8a route through `vllm.entrypoints.openai.completion.api_router.create_completion(...)` instead of the serving method directly. Test next.
+2. **Concurrency limiter holding the slot too long**: openai's request acquires `OpenAIConcurrencyLimiter` slot and holds it for the entire 1 000-prompt call (~120 s). scalarlm has no equivalent on the worker path. Probably not throughput-limiting at single-caller load (we're not contending), but worth verifying by setting `openai_queue_concurrency` very high and re-running.
+3. **Pydantic round-trip of CompletionRequest**: Phase 8a does `request.model_copy(update={"prompt": p})` 1 000 times — Pydantic v2 model copies aren't free. scalarlm builds its CompletionRequest fresh per request from a dict. A/B by switching scatter to construct fresh CompletionRequest instances rather than copying.
+4. **`raw_request` recycling**: Phase 8a passes the same `raw_request` to all 1 000 sub-`create_completion` calls. vLLM's serving may attach state to `raw_request.state`; sharing it across 1 000 concurrent calls could cause lock contention or unexpected behaviour. scalarlm builds a fresh fake `Request` per task. Easy fix.
+
+Each is a one-pod-restart A/B. Logging this as the next investigation queue rather than blocking on it.
 
 ### Phase 9 — Dynamic, KV-aware concurrency limiter
 

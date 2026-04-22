@@ -49,6 +49,16 @@ logger = logging.getLogger(__name__)
 # one layer up (asyncio.gather + N create_completion calls) is faster.
 _SCATTER_THRESHOLD = int(os.environ.get("SCALARLM_SCATTER_THRESHOLD", "0") or 0)
 
+# Phase 8a v2 — bounded scatter. The plain scatter (above) creates all N
+# tasks instantly. scalarlm's worker instead pulls batch_size requests,
+# fans them out, waits for them to drain, pulls the next batch. The
+# hypothesis is that vLLM's scheduler does O(pending_requests) work per
+# iteration and gets slower when 1000 are pending vs 16 (max_num_seqs).
+# SCALARLM_SCATTER_MAX_INFLIGHT bounds the number of sub-requests in
+# flight at once via a Semaphore — set to max_num_seqs to mimic scalarlm.
+# 0 / unset = no in-flight cap (pure asyncio.gather, the v1 behaviour).
+_SCATTER_MAX_INFLIGHT = int(os.environ.get("SCALARLM_SCATTER_MAX_INFLIGHT", "0") or 0)
+
 openai_v1_router = APIRouter()
 
 # Tail-window for sniffing the upstream payload for `usage`. The terminal
@@ -364,10 +374,20 @@ async def _scatter_gather_completions(
     prompts = request.prompt
     sub_requests = [request.model_copy(update={"prompt": p}) for p in prompts]
 
-    sub_results = await asyncio.gather(*[
-        servings.openai_serving_completion.create_completion(r, raw_request)
-        for r in sub_requests
-    ])
+    if _SCATTER_MAX_INFLIGHT > 0:
+        # Bounded fan-out — only K sub-requests in flight at once. Mimics
+        # scalarlm's queue-driven batch_size pull pattern. Tests whether
+        # vLLM scheduler scales poorly with many pending requests.
+        sem = asyncio.Semaphore(_SCATTER_MAX_INFLIGHT)
+        async def _bounded(r):
+            async with sem:
+                return await servings.openai_serving_completion.create_completion(r, raw_request)
+        sub_results = await asyncio.gather(*[_bounded(r) for r in sub_requests])
+    else:
+        sub_results = await asyncio.gather(*[
+            servings.openai_serving_completion.create_completion(r, raw_request)
+            for r in sub_requests
+        ])
 
     # Per-sub error short-circuits the whole call (matches array-prompt
     # behaviour today — vLLM aborts the batch if any one prompt errors).
