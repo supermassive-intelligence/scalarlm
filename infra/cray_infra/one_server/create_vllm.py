@@ -2,6 +2,7 @@
 import os
 import torch
 
+from cray_infra.one_server.vllm_registry import set_vllm_servings
 from cray_infra.util.get_config import get_config
 from cray_infra.huggingface.get_hf_token import get_hf_token
 
@@ -146,6 +147,11 @@ async def run_server_worker(server_status, listen_address,
         server_status.set_app(app)
 
         await init_app_state(engine_client, app.state, args, supported_tasks)
+
+        # Phase 6: publish vLLM's servings to the shared registry so the
+        # scalarlm openai proxy can call them in-process and skip the
+        # localhost-HTTP hop to vLLM's own FastAPI server.
+        set_vllm_servings(app.state)
 
         logger.info("Starting vLLM API server %d on %s", server_index,
                     listen_address)

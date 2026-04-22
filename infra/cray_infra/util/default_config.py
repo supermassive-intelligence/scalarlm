@@ -56,6 +56,14 @@ class Config(BaseModel):
     # inference layer. Left off in production; flip via config or env.
     bench_endpoints_enabled: bool = False
 
+    # Phase 6. When true (default), the openai proxy calls vLLM's
+    # OpenAIServingCompletion / OpenAIServingChat Python APIs in-process
+    # via the vllm_registry, skipping the localhost-HTTP hop to vLLM's
+    # own FastAPI server on vllm_api_url. Fall back to the HTTP proxy by
+    # setting this to false — useful when the scalarlm server talks to
+    # a vLLM in a separate process / host.
+    openai_inprocess_enabled: bool = True
+
     inference_work_queue_path: str = "/app/cray/inference_work_queue.sqlite"
     upload_base_path: str = "/app/cray/inference_requests"
 

@@ -25,6 +25,7 @@ from cray_infra.api.fastapi.routers.openai_queue import (
 )
 from cray_infra.generate.flop_count import compute_flops_per_token
 from cray_infra.generate.metrics import get_metrics
+from cray_infra.one_server.vllm_registry import get_vllm_servings
 from cray_infra.training.vllm_model_manager import get_vllm_model_manager
 from cray_infra.util.get_config import get_config
 
@@ -117,11 +118,12 @@ async def create_completions(request: CompletionRequest, raw_request: Request):
         count_prompts(params.get("prompt")),
         bool(params.get("stream")),
     )
-    return _proxy_streaming(
-        upstream_url=config["vllm_api_url"] + "/v1/completions",
+    return await _dispatch(
+        endpoint="completions",
+        request=request,
+        raw_request=raw_request,
         params=params,
-        endpoint_label="completions",
-        base_model_name=config["model"],
+        config=config,
         queue_slot=slot,
     )
 
@@ -135,11 +137,12 @@ async def create_chat_completions(request: ChatCompletionRequest, raw_request: R
     await _ensure_model_available(params.get("model"), config)
     slot = await _acquire_queue_slot(config["model"])
     logger.info("Received chat completions request: %s", params)
-    return _proxy_streaming(
-        upstream_url=config["vllm_api_url"] + "/v1/chat/completions",
+    return await _dispatch(
+        endpoint="chat",
+        request=request,
+        raw_request=raw_request,
         params=params,
-        endpoint_label="chat completions",
-        base_model_name=config["model"],
+        config=config,
         queue_slot=slot,
     )
 
@@ -201,6 +204,113 @@ def _ensure_usage_reported(params: dict) -> None:
     opts = dict(params.get("stream_options") or {})
     opts.setdefault("include_usage", True)
     params["stream_options"] = opts
+
+
+async def _dispatch(
+    *,
+    endpoint: str,  # "completions" or "chat"
+    request,
+    raw_request: Request,
+    params: dict,
+    config: dict,
+    queue_slot,
+):
+    """Route a prepared request to the in-process or HTTP-proxy backend.
+
+    Phase 6. The in-process path is preferred when:
+      (a) vLLM has registered its servings with `vllm_registry` (i.e. this
+          process is running the `one_server` bundle, not a remote vLLM),
+      (b) ``openai_inprocess_enabled`` is true in config (the default).
+
+    Falls back to the HTTP proxy otherwise — identical observable behaviour,
+    the only difference is the transport to vLLM.
+    """
+    servings = get_vllm_servings()
+    if servings is not None and config.get("openai_inprocess_enabled", True):
+        return await _call_inprocess(
+            endpoint=endpoint,
+            request=request,
+            raw_request=raw_request,
+            servings=servings,
+            base_model_name=config["model"],
+            queue_slot=queue_slot,
+        )
+    path = "/v1/chat/completions" if endpoint == "chat" else "/v1/completions"
+    label = "chat completions" if endpoint == "chat" else "completions"
+    return _proxy_streaming(
+        upstream_url=config["vllm_api_url"] + path,
+        params=params,
+        endpoint_label=label,
+        base_model_name=config["model"],
+        queue_slot=queue_slot,
+    )
+
+
+async def _call_inprocess(
+    *,
+    endpoint: str,
+    request,
+    raw_request: Request,
+    servings,
+    base_model_name: Optional[str],
+    queue_slot,
+):
+    """Direct Python-API call into vLLM's OpenAI serving classes.
+
+    Skips the localhost-HTTP hop to vLLM's FastAPI on ``vllm_api_url``.
+    vLLM's ``create_completion`` / ``create_chat_completion`` return one of:
+    an async-iterator for SSE streaming, a Pydantic response model for
+    non-streaming, or an ``ErrorResponse`` for failures. Each is wrapped
+    so the Phase 3d queue slot gets released exactly once and the FLOP/
+    token metrics fire the same way they did on the HTTP path.
+    """
+    if endpoint == "chat":
+        result = await servings.openai_serving_chat.create_chat_completion(
+            request, raw_request
+        )
+    else:
+        result = await servings.openai_serving_completion.create_completion(
+            request, raw_request
+        )
+
+    # ErrorResponse from vLLM: release slot, forward status + body.
+    if hasattr(result, "error") and hasattr(result.error, "code"):
+        status_code = getattr(result.error, "code", 500)
+        body = result.model_dump() if hasattr(result, "model_dump") else {"error": str(result)}
+        if queue_slot is not None:
+            await queue_slot.release()
+        return JSONResponse(content=body, status_code=status_code)
+
+    # Streaming — async iterator of str/bytes chunks
+    if hasattr(result, "__aiter__"):
+        return StreamingResponse(
+            content=_wrap_with_metrics(
+                result, base_model_name=base_model_name, queue_slot=queue_slot,
+            ),
+            media_type="text/event-stream",
+        )
+
+    # Non-streaming pydantic response. Record metrics synchronously from the
+    # usage block so dashboards stay in sync with the streaming path.
+    body = result.model_dump() if hasattr(result, "model_dump") else result
+    token_count = 0
+    if isinstance(body, dict):
+        usage = body.get("usage") or {}
+        token_count = usage.get("total_tokens") or 0
+    flop_count: Optional[int] = None
+    if token_count and base_model_name:
+        per_token = compute_flops_per_token(base_model_name)
+        if per_token:
+            flop_count = per_token * token_count
+    metrics = get_metrics()
+    metrics.record_new_request()
+    metrics.record_completed_request(token_count=token_count, flop_count=flop_count)
+    if queue_slot is not None:
+        try:
+            await queue_slot.release()
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to release OpenAI proxy queue slot")
+    return JSONResponse(content=body)
 
 
 def _proxy_streaming(
