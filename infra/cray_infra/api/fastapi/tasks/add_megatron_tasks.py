@@ -29,18 +29,21 @@ async def add_megatron_tasks(app):
     config = get_config()
 
     megatron_refresh_period = config["megatron_refresh_period"]
+    inference_only = config.get("inference_only", False)
 
-    # Check if SLURM is available - skip training tasks if not
+    # Check if SLURM is available
     slurm_available = is_slurm_available()
-    if not slurm_available:
+    
+    if inference_only:
+        logger.info("Running in inference-only mode - skipping training-related background tasks")
+    elif not slurm_available:
         logger.info("SLURM not available - skipping training-related background tasks")
-        logger.info("Running in inference-only mode (MLX or non-SLURM environment)")
 
     @repeat_every(seconds=megatron_refresh_period)
     async def run_megatron_tasks():
         try:
-            # Only run SLURM-dependent tasks if SLURM is available
-            if slurm_available:
+            # Only run SLURM-dependent tasks if SLURM is available and NOT in inference-only mode
+            if slurm_available and not inference_only:
                 await register_megatron_models()
                 await restart_megatron_jobs()
                 await register_megatron_workers()
