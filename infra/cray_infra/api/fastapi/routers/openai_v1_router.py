@@ -85,6 +85,100 @@ _YIELD_CHUNK = int(os.environ.get("SCALARLM_YIELD_CHUNK", "0") or 0)
 # lazily on first scatter call (avoids editing the lifespan). 0/unset =
 # off (Phase 8a v5 behaviour).
 _USE_DISPATCHER = bool(int(os.environ.get("SCALARLM_USE_DISPATCHER", "0") or 0))
+
+# Phase 11 MVP — move create_completion execution off the main event
+# loop to a secondary asyncio loop running on a background thread.
+# Direct per-call time evidence (openai 37ms vs scalarlm 17ms for the
+# same vLLM function) + CPU-scaling evidence (ceiling tracks CPU speed,
+# not GPU) says the bottleneck is Python/main-thread CPU contention.
+# Moving the 1000 concurrent create_completion coroutines to a
+# different thread's event loop frees the main loop to run output_handler
+# + HTTP serving without contention. Risk: vLLM's AsyncStream between
+# output_handler (main loop) and create_completion (secondary loop) may
+# not be cross-loop-safe; if it errors, the error tells us the fix
+# requires moving output_handler too (bigger change).
+_USE_SIDE_LOOP = bool(int(os.environ.get("SCALARLM_USE_SIDE_LOOP", "0") or 0))
+_SIDE_LOOP: Optional["asyncio.AbstractEventLoop"] = None
+_SIDE_THREAD: Optional["threading.Thread"] = None
+
+# Phase 18 — loop-lag diagnostic. Background coroutine measures how
+# often the main loop runs vs expected. If lag consistently exceeds
+# e.g. 50 ms, the main loop is CPU-saturated (not just busy with I/O).
+# SCALARLM_LOOP_LAG_MS = target interval in ms; unset/0 = off.
+_LOOP_LAG_MS = int(os.environ.get("SCALARLM_LOOP_LAG_MS", "0") or 0)
+_LOOP_LAG_TASK: Optional["asyncio.Task"] = None
+_LOOP_LAG_SAMPLES: list = []
+
+
+def _ensure_loop_lag_monitor():
+    """Start a simple loop-lag measurement coroutine.
+
+    Sleeps for _LOOP_LAG_MS and measures actual elapsed. Deviation from
+    the expected interval is the main loop's response lag — direct
+    evidence of whether the loop is saturated. Samples accumulate in
+    a list (bounded via rotation) so the /v1/bench/loop-lag endpoint
+    can return a histogram.
+    """
+    global _LOOP_LAG_TASK
+    if _LOOP_LAG_TASK is not None and not _LOOP_LAG_TASK.done():
+        return
+    if _LOOP_LAG_MS <= 0:
+        return
+
+    interval = _LOOP_LAG_MS / 1000.0
+
+    async def _monitor():
+        import time as _t
+        count = 0
+        window = []
+        while True:
+            start = _t.perf_counter()
+            try:
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                return
+            elapsed = _t.perf_counter() - start
+            lag_ms = max(0.0, (elapsed - interval) * 1000.0)
+            _LOOP_LAG_SAMPLES.append(lag_ms)
+            window.append(lag_ms)
+            count += 1
+            # Log p50/p95/p99/max every 100 samples (~1 s at 10ms interval).
+            if count % 100 == 0:
+                s = sorted(window)
+                n = len(s)
+                p50 = s[n // 2]
+                p95 = s[int(n * 0.95)]
+                p99 = s[min(int(n * 0.99), n - 1)]
+                mx = s[-1]
+                logger.info(
+                    "LOOP_LAG window=%d p50=%.1fms p95=%.1fms p99=%.1fms max=%.1fms",
+                    n, p50, p95, p99, mx,
+                )
+                window.clear()
+            # Keep long-term samples bounded.
+            if len(_LOOP_LAG_SAMPLES) > 10000:
+                del _LOOP_LAG_SAMPLES[:5000]
+
+    _LOOP_LAG_TASK = asyncio.create_task(_monitor())
+    logger.info("Phase 18 loop-lag monitor started (interval=%dms)", _LOOP_LAG_MS)
+
+
+def _ensure_side_loop() -> "asyncio.AbstractEventLoop":
+    """Start a background thread running its own asyncio event loop on
+    first call. Returns that loop; subsequent calls reuse it.
+    """
+    global _SIDE_LOOP, _SIDE_THREAD
+    if _SIDE_LOOP is not None and _SIDE_THREAD is not None and _SIDE_THREAD.is_alive():
+        return _SIDE_LOOP
+    import threading as _t
+    _SIDE_LOOP = asyncio.new_event_loop()
+    def _run():
+        asyncio.set_event_loop(_SIDE_LOOP)
+        _SIDE_LOOP.run_forever()
+    _SIDE_THREAD = _t.Thread(target=_run, name="phase11-side-loop", daemon=True)
+    _SIDE_THREAD.start()
+    logger.info("Phase 11 side loop started on daemon thread")
+    return _SIDE_LOOP
 _DISPATCHER_QUEUE: Optional["asyncio.Queue"] = None
 _DISPATCHER_TASK: Optional["asyncio.Task"] = None
 
@@ -321,6 +415,11 @@ async def _dispatch(
     Falls back to the HTTP proxy otherwise — identical observable behaviour,
     the only difference is the transport to vLLM.
     """
+    # Phase 18: kick off loop-lag monitor on first request (needs an
+    # active event loop, which we have here).
+    if _LOOP_LAG_MS > 0:
+        _ensure_loop_lag_monitor()
+
     servings = get_vllm_servings()
     if servings is not None and config.get("openai_inprocess_enabled", True):
         # Phase 8a A/B: if scatter threshold is set and the request is an
@@ -518,7 +617,38 @@ async def _scatter_gather_completions(
             rr = _fresh_raw_request()
             return await servings.openai_serving_completion.create_completion(r, rr)
 
-    if _USE_DISPATCHER:
+    if _USE_SIDE_LOOP:
+        # Phase 11 MVP: offload each create_completion to a background
+        # thread's asyncio loop via run_coroutine_threadsafe. The main
+        # loop is free to run output_handler + HTTP serving without
+        # contention from 1000 concurrent sub-call coroutines. Await
+        # the resulting concurrent.futures.Future via asyncio.wrap_future.
+        side_loop = _ensure_side_loop()
+
+        def _schedule_on_side_loop(sub_req):
+            # Build raw_request on the MAIN loop (needs main-loop asyncio
+            # primitives for receive/send), but run create_completion on
+            # the side loop. If this errors with "loop is closed" or
+            # similar cross-loop issues, we know the AsyncStream
+            # back-channel from output_handler is the problem.
+            rr = _fresh_raw_request()
+            coro = _call_one_side(sub_req, rr)
+            cf = asyncio.run_coroutine_threadsafe(coro, side_loop)
+            return asyncio.wrap_future(cf)
+
+        async def _call_one_side(sub_req, rr):
+            if _SCATTER_VIA_API_ROUTER:
+                from vllm.entrypoints.openai.completion.api_router import (
+                    create_completion as _api_router_create_completion,
+                )
+                response = await _api_router_create_completion(sub_req, raw_request=rr)
+                if hasattr(response, "body"):
+                    return json.loads(response.body.decode("utf-8"))
+                return response
+            return await servings.openai_serving_completion.create_completion(sub_req, rr)
+
+        sub_results = await asyncio.gather(*[_schedule_on_side_loop(r) for r in sub_requests])
+    elif _USE_DISPATCHER:
         # Phase 10: push (sub_request, raw_request, future) to the
         # dispatcher queue, await a single gather over the futures. The
         # 1 000 create_completion calls happen inside the long-lived

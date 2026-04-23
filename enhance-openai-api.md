@@ -1070,7 +1070,37 @@ The openai ceiling tracks **CPU speed** (Blackwell x86 > Spark ARM), while scala
 
 If the bottleneck were GPU or engine capacity, both paths would plateau together. They don't. The openai path's serialising work is Python on the main event loop — this is the specific, measurable cost the Phase 11 architectural split aims to eliminate.
 
-### Phase 11 — move create_completion execution off the main event loop (architectural)
+### Phase 18 — loop-lag diagnostic (Gemini's proposal, RUN: refutes main-loop-saturation hypothesis)
+
+Added `SCALARLM_LOOP_LAG_MS=10` and a background coroutine that sleeps for 10 ms and measures actual elapsed. Lag = actual − expected. If the main loop is CPU-bound, other work holds the loop and the monitor's sleep doesn't wake on time. Ran during an openai N=1 000 + scalarlm N=1 000 bench back-to-back on Blackwell.
+
+**Loop-lag during benches (rolling windows of 100 samples):**
+
+| Phase | p50 | p95 | p99 | max |
+|---|---:|---:|---:|---:|
+| Pod startup (first window) | 0.3 ms | 305 ms | 318 ms | 318 ms |
+| During benches (steady state) | **0.4 ms** | **1–2 ms** | **2–15 ms** | **15 ms** |
+
+If the main loop were CPU-saturated, p99 should be > 100 ms. It's not — it's 2–15 ms. **The hypothesis "main loop is CPU-blocked by 1000 concurrent sub-calls" is refuted.** The loop yields often and picks up tasks promptly throughout the bench.
+
+### Revised mechanism (reconciling loop-lag + CPU-scaling evidence)
+
+Both observations stand:
+- Loop lag is small → no single chunk of work blocks the loop for long
+- Ceiling tracks CPU speed across Blackwell (x86) and Spark (ARM) → some kind of CPU-bound limit
+
+Reconciliation: each `create_completion` does ~37 ms of Python CPU work **total, distributed across many small yields**. Individual chunks are < 15 ms (explains loop lag). Cumulative work across 1000 concurrent calls is CPU-bound (explains CPU-scaling). scalarlm's calls only do ~17 ms of Python each, so scalarlm's ceiling is GPU-limited (16.6 p/s) not CPU-limited.
+
+**The actual lever to find:** where does each openai `create_completion` call do ~20 ms more Python work than scalarlm's? Both call the same vLLM function — the difference must be in the *arguments* (what the function processes differently) or in *what happens around the call* (the openai proxy's extra work per sub-request).
+
+This rules out several earlier plan items:
+- **uvloop (Phase 13)** — would help if loop overhead were the bottleneck; it's not.
+- **Phase 11 MVP side-loop** — null result is consistent with this revised mechanism (moving orchestration doesn't reduce total CPU work).
+- **Process-pool worker (previous Phase 11)** — same reason; unless workers have their own engine instance (complex), the compute still lands on the one engine's main thread.
+
+New investigation path: **instrument per-call Python time**. Add `time.perf_counter()` around the `create_completion` call in our scatter path AND around sub-steps inside vLLM's create_completion (tokenization, request submission, response building). Run the bench, collect per-call timings, find the 20 ms. That specific hot sub-step is the lever.
+
+### Phase 11 — move create_completion execution off the main event loop (architectural — DEPRIORITISED)
 
 If the mechanism is GIL contention on the main event loop, **moving the 1 000 concurrent create_completion tasks off the main loop** should lift the ceiling. Options:
 
