@@ -1055,9 +1055,9 @@ Same methodology as Blackwell — paired on same container, Phase 10 flags on (`
 | 1 | 0.608 ± 0.024 | 0.550 ± 0.031 | **openai +11 %** |
 | 10 | 2.907 ± 0.134 | 2.755 ± 0.081 | **openai +6 %** |
 | 100 | **4.096 ± 0.134** | 4.160 ± 0.119 | tied (within noise) |
-| 1 000 | (retry pending) | **16.615 ± 0.012** | scalarlm wins |
+| 1 000 | **3.208 ± 1.849** | **16.615 ± 0.012** | scalarlm **+418 %** |
 
-**openai hits its Spark ceiling at ~4.1 p/s at N=100** — same pattern as Blackwell but at a lower absolute throughput. scalarlm keeps scaling: 4.16 at N=100 → 16.62 at N=1 000 (4× lift). First N=1 000 openai run hit httpx ReadTimeout (600 s); retrying with a longer timeout, but given the N=100 ceiling at 4.1 p/s and the persistent-ceiling pattern from Blackwell, we expect openai N=1 000 on Spark to also sit around 4 p/s (≈ 250 s wall), while scalarlm finishes in 60 s.
+**openai hits its Spark ceiling at ~4.1 p/s at N=100** — and actually *drops slightly* at N=1 000 (3.21 p/s mean with huge variance — one run hit 1.07 p/s). scalarlm climbs from 4.16 → 16.62 (4× lift). **Same plateau pattern as Blackwell, 3–4× worse in absolute terms because Spark's Grace ARM CPU is slower than Blackwell's x86.** scalarlm on Spark reaches the same 16.6 p/s GPU ceiling the model has on both platforms — hardware-independent on the GPU side, but openai can't approach it on either.
 
 **Combined Blackwell + Spark picture confirms a hardware-scaling ceiling:**
 
