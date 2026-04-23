@@ -969,16 +969,88 @@ If pursued: `OpenAIConcurrencyLimiter` consults `engine_client.get_current_kv_ca
 4. Phase 8a's mechanistic rationale was "avoid `merge_async_iterators`" (13.4 % in-stack at N=1 000). All three Phase 8a variants tested (including the proxy-level scatter that bypasses `merge_async_iterators` entirely) land in the same 8 p/s band. So `merge_async_iterators` *appears* in the profile but isn't the bottleneck — analogous to the Phase 6.5 result. Profile-vs-A/B mismatch is a recurring theme on this codebase; treat py-spy as a hypothesis generator, not a diagnostic.
 5. Is there a reason not to fix the vLLM fork TODO directly (Phase 6.5)? The upstream refactor pattern they hint at (coroutine + background thread) is a minor change with a localised test surface; the only real cost is carrying the patch across rebases. We carry patches already, so this isn't a new burden — even though the throughput payoff is null on the workloads tested so far.
 
-### Remaining work — concrete next steps
+### Phases 8c–11 — plan to close the remaining 38 % N=1 000 distinct-prompts gap
 
-In ROI order (updated after v4 / v5 landed):
+Merged with Gemini's parallel proposal ([gemini-enhance-openai.md](gemini-enhance-openai.md)). Gemini independently identified the yield-starvation hypothesis and proposed a specific profile technique (8e) and a pragmatic parity target (< 15 %) that this plan adopts. Architectural fallbacks (10, 11) are added for the case that the yield/isolation phases don't close the gap.
 
-1. **Comparative py-spy of scalarlm-worker vs Phase 8a v5 at N=1 000 distinct.** Both paths live in the same process. Start `py-spy record` against the APIServer PID, kick off a scalarlm `/v1/generate` bench (5 × 1 000 distinct), then a Phase 8a v5 `/v1/completions` bench (5 × 1 000 distinct). Diff the flamegraphs for main-thread frames that differ in weight. ~30 min; biggest expected signal source.
-2. **v4 isolation** — is the +19 % from decorators or from JSONResponse wrapping? Two separate changes on the direct-serving path: (a) decorate, (b) wrap in JSONResponse. Each is a one-pod A/B. Informs whether shipping v4 permanently is the right default for `_call_inprocess` or whether there's a simpler isolated change.
-3. **Ship v4/v5 as default.** Once comparative profile narrows the residual cost *and* isolation confirms the mechanism, promote the `SCALARLM_SCATTER_THRESHOLD` default from 0 → 2 (or whatever threshold the curve favours) and `SCALARLM_SCATTER_VIA_API_ROUTER` from 0 → 1. Phase 8b is now on the table again after v4's non-null result.
-4. **Phase 6.5 follow-up #1 — paired Blackwell N=1 000 A/B (patched vs unpatched on same pod)**. The N=100 A/B came back null but the patch's predicted effect should grow with engine iterations per request. ~25 min.
-5. **Phase 6.5 follow-up #2 — Spark plateau check**. Spark sat at 4.5 p/s flat across N=100/1 000 in the first-pass measurements; the metrics-tax theory predicts the plateau breaks under the patch. ~30 min including Spark pod setup.
-6. **If Phase 6.5 follow-ups are also null — revert the patch.** Correct but unjustified dark code.
-7. **Phase 4 telemetry-gated deprecation** — gate is "Phase 7 cleared **and** the N=1 000 distinct-prompts parity argument resolved". Phase 7 is in the bag; argument advances with every item above.
+**Parity target (pragmatic):** openai `/v1/completions` at N=1 000 distinct prompts within **15 %** of scalarlm (≥ 14 p/s on Blackwell). The OpenAI wire format carries unavoidable overhead vs scalarlm's internal format; "close enough" is the realistic bar.
 
-What's *not* on this list: Phase 9 (dynamic concurrency limiter) — still deferred; no workload has surfaced where it would help, and v5 showed the limiter is currently a no-op for bulk callers anyway.
+**Deprecation gate:** scalarlm is deprecable when **either** (a) the 15 % parity target is cleared, **or** (b) we conclude from 8e/10 that closing further requires emulating scalarlm's suboptimal logging/polling pattern (in which case we document the trade-off and deprecate on capability-plus-good-enough-perf grounds).
+
+#### Phase 8c — yield injection (cheap, high-ROI)
+
+Inject `await asyncio.sleep(0)` at strategic spots in the openai path to mimic the yield frequency scalarlm achieves via its logging/polling pattern:
+
+1. Inside `_scatter_gather_completions`, after every K sub-request submissions (K=16 = `max_num_seqs`), yield before submitting the next batch.
+2. In `_call_inprocess` for non-scatter array prompts, wrap the `create_completion` call with a yield before and after.
+3. In `_merge_completion_responses`, yield between every K sub-responses during the merge.
+
+Flag behind `SCALARLM_YIELD_INJECT` env var for clean A/B. Paired N=1/10/100/1 000 distinct, same pod, 10 runs each. **Half a day.**
+
+Expected outcome: if the yield-starvation theory holds (from the comparative profile), this alone could close most of the gap. If the number doesn't move, starvation wasn't the mechanism and we go to 8d/8e.
+
+#### Phase 8d — v4 isolation (which half of +19 % was the lever?)
+
+Phase 8a v4 was confounded: routing through `api_router.create_completion` simultaneously changed (A) the decorator chain (`@with_cancellation`, `@load_aware_call`) and (B) the response shape (`JSONResponse` wrapping a dict vs direct Pydantic `CompletionResponse` return). Two dedicated A/Bs:
+
+- **Test A**: direct `servings.openai_serving_completion.create_completion` + manual `@with_cancellation` wrapping. Keep Pydantic return. Does the decorator alone recover the +19 %?
+- **Test B**: direct call, no decorator, but wrap the Pydantic result in `JSONResponse(content=result.model_dump())` before returning. Does the response-shape alone recover it?
+
+Each test is one pod cycle (~25 min). Informs which half to keep when productionising. **Half a day.**
+
+#### Phase 8e — comparative yield profiling (Gemini's proposal)
+
+The comparative py-spy we have shows *where* time is spent on the stack but not *how often* the event loop yields to `output_handler`. Profile specifically the run-frequency and duration of `output_handler` execution blocks in each path:
+
+- Instrument `output_handler` with a per-iteration timestamp log (or use a lightweight perf-counter inside the existing Phase 6.5 patcher — it can add a timing counter next to the metrics-queue push).
+- Run both benches, export the per-iteration timestamps, plot the inter-iteration intervals as a histogram.
+- **Diagnostic**: if openai's inter-iteration intervals skew much larger than scalarlm's, the loop is holding the engine off. If they match, starvation is ruled out and the gap is somewhere else (scheduling, prefix-cache handling, etc.).
+
+**One day** to instrument + run + analyse.
+
+#### Phase 9 — engine namespace alignment (Gemini's Phase 10, renumbered)
+
+scalarlm's worker passes a content-hashed request_id (sha256); Phase 6/8a lets vLLM auto-generate UUID-style IDs. vLLM's scheduler and its prefix-cache store use request_id as a dictionary key — if the hash distribution or id length changes dispatch/cache behaviour measurably, this is a hidden lever.
+
+Long shot but nearly free to test:
+
+- Add `request_id=hashlib.sha256(prompt.encode()).hexdigest()` to each sub-`CompletionRequest` construction in `_scatter_gather_completions`.
+- Rerun the paired N=1 000 distinct bench.
+
+**One afternoon.** If the number moves, interesting; if not, hypothesis killed.
+
+#### Phase 10 — dedicated dispatcher coroutine (if 8c–9 fail to close the gap)
+
+Replicate scalarlm's queue-worker *shape* while keeping OpenAI wire format:
+
+- New coroutine `openai_dispatcher` starts at app boot (symmetric to scalarlm's queue worker).
+- `/v1/completions` handler pushes N sub-requests onto an `asyncio.Queue` and awaits N per-sub `asyncio.Future` results.
+- Dispatcher pulls items in chunks sized by `max_num_seqs`, calls `create_completion` for each, resolves the matching future.
+- Natural yields at queue put/get boundaries — the proxy coroutine returns control between chunks rather than holding it across 1 000 concurrent tasks. This is what Phase 8c is trying to fake; Phase 10 does it structurally.
+- Response construction (1 000-choice merge) moves to the dispatcher context.
+
+**2–3 days.** Risk: medium. Requires correctness tests for future/exception propagation, cancellation, and coexistence with the Phase 3d `OpenAIConcurrencyLimiter` (two queues — consolidate or document the hand-off).
+
+#### Phase 11 — vLLM offline `LLM.generate` path (speculative, high-risk / high-reward)
+
+vLLM ships a synchronous `LLM.generate(prompts, sampling_params)` API optimised for bulk offline workloads. Published vLLM benchmarks show 2–3× throughput on offline mode vs async serving for distinct-prompt bulk — matching our gap size, which is suggestive.
+
+- Thread-run `LLM.generate` from the async server for bulk requests past a threshold (N ≥ 100 maybe).
+- Requires sharing engine state between the async server and the threaded batch path — non-trivial; vLLM may not support it cleanly.
+
+**Gate**: only pursue if Phase 8c–10 all fail to close to 15 % AND we read vLLM's source carefully enough to know the engine-sharing story. **1–2 weeks** if undertaken.
+
+### Parallel / non-gating work
+
+- **Phase 6.5 follow-ups** — Blackwell N=1 000 paired A/B + Spark plateau check. These decide keep-or-revert on the metrics-offload patch regardless of Phase 10 progress.
+- **Fresh-pod re-verification** of any Phase 8c/8d/10 win. This session's late benches were contaminated by hot-patch state; any parity claim worth citing needs one clean replication.
+- **Phase 7 deprecation story** — Phase 7 cleared its gate; the Batch API is the documented bulk replacement for `/v1/generate`. That work lands regardless of Phase 10 outcome.
+
+### What's deferred
+
+- **Phase 8b** (promote scatter to default): no longer automatic — depends on Phase 8c result. If 8c makes the non-scatter path fastest, 8b is unnecessary.
+- **Phase 9 dynamic concurrency limiter** (old numbering): still deferred. v5 showed the limiter is a no-op for bulk callers; no workload has surfaced where dynamic scaling would help.
+
+### My ordering
+
+Phase 8c first (half day, could close the gap alone). If null, Phase 8d + 8e in parallel (both ~half day each). Phase 9 opportunistically if any pod is up. Phase 10 only if 8c–9 combined leave > 15 % gap. Phase 11 only if Phase 10 leaves > 15 % and reading vLLM source confirms feasibility.
