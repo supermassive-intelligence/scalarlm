@@ -10,7 +10,7 @@ Phases 0–7 implemented; measurement summary:
 - **Phase 8a**: shipped behind `SCALARLM_SCATTER_THRESHOLD` env var. **Failed its 10 % gate** — paired A/B at N=1 000 distinct prompts shows scatter ON (8.43) ≈ scatter OFF (8.35), Δ +0.9 % well within both CIs. **Phase 8b not shipped.**
 - **Phase 9**: deferred per analysis above.
 
-**Updated parity picture (N=1 000 distinct prompts on Blackwell, properly paired):** openai is **40 %** behind scalarlm (10.02 vs 16.57 p/s) after Phase 8a v4 closed 9 percentage points by routing through `api_router.create_completion` (which gets the `@with_cancellation` + `@load_aware_call` decorators that the direct serving call bypassed). Five Phase 8a variants tested: v1 unbounded (8.43), v2 bounded-to-16 (7.52, worse), v3 fresh raw + fresh request (8.97), **v4 via api_router (10.02 — first non-null)**, v5 high-concurrency-limit pending. Hypotheses refuted: scheduler pressure, raw_request sharing, model_copy cost. v4 is confounded (decorators OR JSONResponse wrapping) — isolation A/B pending. Detail in Phase 8 section below.
+**Updated parity picture (N=1 000 distinct prompts on Blackwell, properly paired):** openai is **38 %** behind scalarlm (10.33 vs 16.57 p/s) after five Phase 8a variants. Phase 8a v4 (route through `api_router.create_completion`, getting `@with_cancellation` + `@load_aware_call` decorators) closed 9 pp — the first non-null Phase 8 result. v5 (+ queue limiter effectively off) marginal +3 % on mean with halved stdev. Hypotheses refuted: scheduler pressure, raw_request sharing, model_copy cost, limiter slot duration. v4 is confounded (decorators OR JSONResponse wrapping) — isolation A/B still pending. The remaining 38 % gap is the right target for a comparative py-spy profile of scalarlm-worker vs Phase 8a v5 at N=1 000 distinct. Detail in Phase 8 section below.
 
 ## Why this work exists
 
@@ -897,11 +897,24 @@ scalarlm worker imports `create_completion` from `vllm.entrypoints.openai.comple
 
 Note: v4 is a confounded change — switching to `api_router.create_completion` brings BOTH the `@with_cancellation` + `@load_aware_call` decorators AND the `JSONResponse` wrapping path (vs the direct serving's Pydantic-model return). Either or both could be the lever. To isolate: either re-add decorators to the direct serving path (keep Pydantic return), or use direct serving but wrap in JSONResponse manually. Phase 8a v4-isolation experiment if the v4 result holds at 10-run sample.
 
-### Open hypotheses for the remaining 40 % gap
+### Phase 8a v5 — high `openai_queue_concurrency` (null on mean, tighter CI)
 
-1. **`OpenAIConcurrencyLimiter` slot held for full 120 s call duration**. scalarlm's worker has no equivalent on its path. We're a single caller in the bench so contention shouldn't matter, but worth confirming by setting `openai_queue_concurrency=999` and re-running. Queued as Phase 8a v5.
+v4 stays on; additionally `SCALARLM_OPENAI_QUEUE_CONCURRENCY=999` and `SCALARLM_OPENAI_QUEUE_MAX_DEPTH=1024` to effectively disable the limiter. Result:
+
+| Variant | Mean p/s | Stdev | 95 % CI | Gap to scalarlm |
+|---|---|---|---|---|
+| v4 (api_router only) | 10.02 | 0.85 | ±0.74 | −40 % |
+| **v5 (v4 + queue unbounded)** | **10.33** | **0.46** | **±0.41** | **−38 %** |
+
+Marginal +3 % on the mean, well within overlapping CIs — null on mean. But stdev halved (0.46 vs 0.85), so the limiter's acquire/release adds per-call jitter without adding throughput. Not a lever, but confirms the Phase 3d limiter is currently a no-op for a single bulk caller.
+
+### Open hypotheses for the remaining 38 % gap
+
+All the "easy" levers have been tested. Remaining candidates, in order:
+
+1. **Comparative py-spy profile of scalarlm vs Phase 8a v5 at N=1 000 distinct.** Previous profile was on openai alone; the missing comparison is scalarlm-only on the same pod. Whatever's different in the main-thread stack between them is the residual cost. This is the right next step — the code-reading attempts above have exhausted their value and we're in territory where the profile is the best diagnostic. Caveat from this session's learning: profile-vs-A/B often diverge (Phase 6.5 and Phase 8a v1–v3 all had profile hits that didn't move throughput), so treat findings as hypotheses, not conclusions.
 2. **Engine-internal request_id namespace**. scalarlm passes its own request_id (sha256-hash distribution); Phase 6 lets vLLM auto-generate (UUID distribution). Long shot — request_id is just a hash key — but cheap to test.
-3. **Comparative py-spy profile of scalarlm vs Phase 8a v4 at N=1 000 distinct.** We have py-spy data on the openai path; the missing comparison is scalarlm-only. Whatever's different in the API-server stack between them is the residual cost. The fallback after (1) and (2).
+3. **`@with_cancellation` / `@load_aware_call` isolation.** v4 was confounded: it brought BOTH the decorators AND the JSONResponse wrapping path. To isolate: (a) decorate the direct serving call (keep Pydantic return), or (b) keep direct serving but wrap in JSONResponse manually. If either half of v4 recovers the +19 %, we know which. Deferred until after comparative profile narrows the mechanism.
 
 ### Phase 9 — Dynamic, KV-aware concurrency limiter
 
@@ -926,14 +939,14 @@ If pursued: `OpenAIConcurrencyLimiter` consults `engine_client.get_current_kv_ca
 
 ### Remaining work — concrete next steps
 
-In ROI order:
+In ROI order (updated after v4 / v5 landed):
 
-1. **Phase 8a v4 — route through `vllm.entrypoints.openai.completion.api_router.create_completion`** (gets `@with_cancellation` + `@load_aware_call` decorators). Most-likely remaining lever per Phase 8a v3 result. ~12 min pod cycle for the A/B.
-2. **Phase 8a v5 — bench with `openai_queue_concurrency=999`** (slot effectively unbounded). Long-shot but cheap — same code, just env override; ~12 min pod cycle.
-3. **If 1 and 2 are both null: comparative py-spy of scalarlm-vs-openai at N=1 000 distinct.** We have py-spy on the openai path; what's missing is the scalarlm-only profile to diff against. ~30 min including pod/setup. Whatever's different in the API-server stack between them is the residual cost.
-4. **Phase 6.5 follow-up #1 — paired Blackwell N=1 000 A/B (patched vs unpatched on same pod)**. The N=100 A/B came back null but the patch's predicted effect should grow with engine iterations per request, so N=1 000 might surface what N=100 hid. ~25 min (two pod cycles + benches).
-5. **Phase 6.5 follow-up #2 — Spark plateau check**. Spark sat at 4.5 p/s flat across N=100/1 000 in the first-pass measurements; the metrics-tax theory predicts the plateau breaks under the patch. Needs a Spark pod with the patcher applied. ~30 min including ssh/pod setup.
-6. **If Phase 6.5 follow-ups are also null — revert the patch.** It's correct but does no measurable work; carrying it through fork rebases is unjustified.
-7. **Phase 4 telemetry-gated deprecation** — gate is "Phase 7 cleared **and** the N=1 000 distinct-prompts parity argument resolved one way or the other". Phase 7 is in the bag; the parity argument needs (1)–(3) to land or fail.
+1. **Comparative py-spy of scalarlm-worker vs Phase 8a v5 at N=1 000 distinct.** Both paths live in the same process. Start `py-spy record` against the APIServer PID, kick off a scalarlm `/v1/generate` bench (5 × 1 000 distinct), then a Phase 8a v5 `/v1/completions` bench (5 × 1 000 distinct). Diff the flamegraphs for main-thread frames that differ in weight. ~30 min; biggest expected signal source.
+2. **v4 isolation** — is the +19 % from decorators or from JSONResponse wrapping? Two separate changes on the direct-serving path: (a) decorate, (b) wrap in JSONResponse. Each is a one-pod A/B. Informs whether shipping v4 permanently is the right default for `_call_inprocess` or whether there's a simpler isolated change.
+3. **Ship v4/v5 as default.** Once comparative profile narrows the residual cost *and* isolation confirms the mechanism, promote the `SCALARLM_SCATTER_THRESHOLD` default from 0 → 2 (or whatever threshold the curve favours) and `SCALARLM_SCATTER_VIA_API_ROUTER` from 0 → 1. Phase 8b is now on the table again after v4's non-null result.
+4. **Phase 6.5 follow-up #1 — paired Blackwell N=1 000 A/B (patched vs unpatched on same pod)**. The N=100 A/B came back null but the patch's predicted effect should grow with engine iterations per request. ~25 min.
+5. **Phase 6.5 follow-up #2 — Spark plateau check**. Spark sat at 4.5 p/s flat across N=100/1 000 in the first-pass measurements; the metrics-tax theory predicts the plateau breaks under the patch. ~30 min including Spark pod setup.
+6. **If Phase 6.5 follow-ups are also null — revert the patch.** Correct but unjustified dark code.
+7. **Phase 4 telemetry-gated deprecation** — gate is "Phase 7 cleared **and** the N=1 000 distinct-prompts parity argument resolved". Phase 7 is in the bag; argument advances with every item above.
 
-What's *not* on this list: Phase 8b (scatter-gather as productionised feature), Phase 9 (dynamic concurrency limiter). Both are deferred per the data above — Phase 8b because v1/v2/v3 all failed the gate, Phase 9 because no workload has surfaced where it would help.
+What's *not* on this list: Phase 9 (dynamic concurrency limiter) — still deferred; no workload has surfaced where it would help, and v5 showed the limiter is currently a no-op for bulk callers anyway.
