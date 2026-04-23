@@ -189,6 +189,10 @@ export function useDeleteJob() {
 export interface LogLine {
   line: string;
   line_number: number;
+  /** Start of this line in the file; set by the service-logs endpoint. */
+  byte_offset?: number;
+  /** Resume token: pass as `starting_byte_offset` on the next connect. */
+  next_offset?: number;
 }
 
 export interface TailOptions {

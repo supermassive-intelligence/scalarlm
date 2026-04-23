@@ -1,19 +1,15 @@
 /**
- * Service-log tailer. Hits GET /v1/health/logs/{service_name}, which
- * serves newline-delimited JSON lines of the shape
+ * Service-log tailer + scrollback fetcher.
  *
- *     {"line": "...", "line_number": N}\n
+ * Wire protocol: see service_logs_generator.py. The server reads the log
+ * file by byte offset; each record carries its own `byte_offset` and
+ * `next_offset`. The client tracks the last-seen `next_offset` and uses
+ * it as the resume token on reconnect, which makes tail/resume O(new
+ * lines) rather than O(total lines).
  *
- * The generator finishes at EOF rather than tailing forever, so we
- * reconnect from `line_number + 1` after a short delay.
- *
- * Large log files (100k+ lines): the initial connect passes `tail=N`
- * so the server seeks to the last N lines instead of dumping the full
- * history. After the first response the client resumes from
- * `starting_line_number=<last+1>` as usual.
- *
- * Mirrors tailTrainingLogs in api/training.ts; both share
- * streamNdjsonLogOnce for the actual parse work.
+ *  - First connect:        ?tail=N                     — jump to end fast.
+ *  - Subsequent reconnects ?starting_byte_offset=<last.next_offset>
+ *  - Scrollback (one-shot) ?before_byte_offset=B&before_count=C
  */
 
 import { getApiConfig } from "./config";
@@ -35,10 +31,8 @@ export interface ServiceLogTailOptions {
   /** Delay between reconnects once the generator hits EOF. Default 2 s. */
   tailReopenDelayMs?: number;
   /**
-   * Number of trailing lines the first connect requests via `tail=N`.
-   * Subsequent reconnects resume from `starting_line_number=<last+1>`.
-   * Default 5000, which covers the recent history operators care about
-   * without downloading megabytes of old output.
+   * Trailing lines the first connect requests via `tail=N`. Subsequent
+   * reconnects resume from the last record's `next_offset`.
    */
   initialTail?: number;
 }
@@ -51,30 +45,40 @@ export async function tailServiceLogs({
   tailReopenDelayMs = 2_000,
   initialTail = 5_000,
 }: ServiceLogTailOptions): Promise<void> {
-  let lineNumber = 0;
+  // Resume state. `nextOffset` is authoritative once we've received at
+  // least one record; `lineLabel` is the monotonic label the UI shows
+  // in the gutter — we carry it across reconnects so the count keeps
+  // growing instead of restarting at 0 on every reopen.
+  let nextOffset: number | null = null;
+  let lineLabel = 0;
   let firstPass = true;
 
   while (!signal.aborted) {
     onStatus?.(firstPass ? "connecting" : "reconnecting");
     try {
-      const { api_base } = getApiConfig();
       const params = new URLSearchParams();
       if (firstPass && initialTail > 0) {
         params.set("tail", String(initialTail));
-      } else {
-        params.set("starting_line_number", String(lineNumber));
+      } else if (nextOffset !== null) {
+        params.set("starting_byte_offset", String(nextOffset));
       }
-      const url = `${api_base}/health/logs/${encodeURIComponent(service)}?${params}`;
-      lineNumber = await streamNdjsonLogOnce(url, lineNumber, signal, (ln) => {
+      params.set("starting_line_number", String(lineLabel));
+
+      const url = buildLogsUrl(service, params);
+      await streamNdjsonLogOnce(url, lineLabel, signal, (ln) => {
         onStatus?.("streaming");
+        if (typeof ln.next_offset === "number") {
+          nextOffset = ln.next_offset;
+        }
+        if (typeof ln.line_number === "number") {
+          lineLabel = ln.line_number + 1;
+        }
         onLine(ln);
       });
       firstPass = false;
     } catch (err) {
       if (signal.aborted || (err as { name?: string }).name === "AbortError")
         break;
-      // Fall through to the reconnect delay; service logs tail forever,
-      // so transient server failures just retry.
     }
 
     onStatus?.("reconnecting");
@@ -85,30 +89,35 @@ export async function tailServiceLogs({
 }
 
 /**
- * One-shot fetch of a fixed slice of a log file — the scrollback path.
- * Requests `limit` lines starting at `startingLineNumber` and returns
- * the parsed array in order. Does not follow the tail.
+ * One-shot backfill. Returns the `count` lines immediately before
+ * `beforeByteOffset` (typically an earlier record's byte_offset), in
+ * ascending order. Used when the user scrolls near the top of the
+ * loaded buffer.
  */
 export async function fetchServiceLogRange(
   service: ServiceName,
-  startingLineNumber: number,
-  limit: number,
+  beforeByteOffset: number,
+  count: number,
   signal?: AbortSignal,
 ): Promise<LogLine[]> {
-  const { api_base } = getApiConfig();
   const params = new URLSearchParams({
-    starting_line_number: String(Math.max(0, startingLineNumber)),
-    limit: String(limit),
+    before_byte_offset: String(Math.max(0, beforeByteOffset)),
+    before_count: String(count),
   });
-  const url = `${api_base}/health/logs/${encodeURIComponent(service)}?${params}`;
+  const url = buildLogsUrl(service, params);
   const out: LogLine[] = [];
   await streamNdjsonLogOnce(
     url,
-    startingLineNumber,
+    0,
     signal ?? new AbortController().signal,
     (ln) => out.push(ln),
   );
   return out;
+}
+
+function buildLogsUrl(service: ServiceName, params: URLSearchParams): string {
+  const { api_base } = getApiConfig();
+  return `${api_base}/health/logs/${encodeURIComponent(service)}?${params}`;
 }
 
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
