@@ -973,9 +973,26 @@ If pursued: `OpenAIConcurrencyLimiter` consults `engine_client.get_current_kv_ca
 
 Merged with Gemini's parallel proposal ([gemini-enhance-openai.md](gemini-enhance-openai.md)). Gemini independently identified the yield-starvation hypothesis and proposed a specific profile technique (8e) and a pragmatic parity target (< 15 %) that this plan adopts. Architectural fallbacks (10, 11) are added for the case that the yield/isolation phases don't close the gap.
 
-**Parity target (pragmatic):** openai `/v1/completions` at N=1 000 distinct prompts within **15 %** of scalarlm (≥ 14 p/s on Blackwell). The OpenAI wire format carries unavoidable overhead vs scalarlm's internal format; "close enough" is the realistic bar.
+**Revised parity target (strict):** **either** openai `/v1/completions` at N=1 000 distinct prompts matches scalarlm on Blackwell (ideally uniformly faster across N), **or** we develop a mechanistic understanding of *exactly* where the engine idle time is coming from on the openai path that isn't on scalarlm's. "Close enough" (≤ 15 %) is no longer the bar — openai is the documented long-term path, and shipping a path that's uniformly slower than the one it replaces at the main offline-bulk workload is not acceptable. If parity can't be reached, the understanding must be clear enough to justify the deprecation with the trade-off spelled out.
 
-**Deprecation gate:** scalarlm is deprecable when **either** (a) the 15 % parity target is cleared, **or** (b) we conclude from 8e/10 that closing further requires emulating scalarlm's suboptimal logging/polling pattern (in which case we document the trade-off and deprecate on capability-plus-good-enough-perf grounds).
+**Problem shape** (prompts/sec on Blackwell, paired on same pod where possible):
+
+| N | Prompt shape | openai | scalarlm | openai advantage |
+|---|---|---:|---:|---:|
+| 1 | identical | 2.94 | 2.14 | **+38 %** |
+| 10 | identical | 10.05 | 6.62 | **+52 %** |
+| 100 | identical | 14.54 | 11.04 | **+32 %** |
+| 1 000 | identical | 12.06 | 16.57 | **−27 %** |
+| 1 000 | distinct | 10.33 | 16.58 | **−38 %** |
+
+openai is **faster up to N=100** and **loses at N=1 000**. The loss widens when the prefix cache can't help (distinct prompts). So we know:
+- The shape means it's **not** per-call overhead in the openai path (that would penalise small N too).
+- It's **not** model/kernel/GPU (same engine, same model, same hardware).
+- It **IS** something about how the two paths interact with the engine's throughput at high sustained batch depth.
+
+The mechanism most consistent with the shape: at small N the engine is underutilised and per-call orchestration differences dominate (openai's direct path wins). At large N the engine is saturated and throughput is determined by how consistently the openai coroutines feed/drain the engine. scalarlm's architecture somehow sustains saturation better.
+
+**Deprecation gate (revised):** either (a) openai at N=1 000 distinct ≥ scalarlm (true parity, no weasel words), or (b) we document the exact mechanism of the residual gap and the team makes an explicit product call to deprecate anyway.
 
 #### Phase 8c — yield injection (TESTED: null)
 
