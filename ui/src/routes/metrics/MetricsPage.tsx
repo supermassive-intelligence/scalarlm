@@ -5,6 +5,7 @@ import { PageHeader } from "@/components/PageHeader";
 import { CapacityCard } from "./CapacityCard";
 import { HealthCard } from "./HealthCard";
 import { QueueCard } from "./QueueCard";
+import { ServiceLogsCard } from "./ServiceLogsCard";
 import { ThroughputCard } from "./ThroughputCard";
 
 /**
@@ -34,6 +35,7 @@ export function MetricsPage() {
         <QueueCard />
         <CapacityCard />
         <HealthCard />
+        <ServiceLogsCard />
       </div>
     </>
   );

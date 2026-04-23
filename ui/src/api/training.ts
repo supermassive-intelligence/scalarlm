@@ -243,7 +243,20 @@ async function streamOnce(
   const url =
     `${api_base}/megatron/train/logs/${encodeURIComponent(modelName)}` +
     `?starting_line_number=${startingLine}`;
+  return streamNdjsonLogOnce(url, startingLine, signal, onLine);
+}
 
+/**
+ * Generic NDJSON log tailer. Both /megatron/train/logs/{model} and
+ * /health/logs/{service} emit newline-delimited JSON of the same
+ * {line, line_number} shape and finish at EOF.
+ */
+export async function streamNdjsonLogOnce(
+  url: string,
+  startingLine: number,
+  signal: AbortSignal,
+  onLine: (line: LogLine) => void,
+): Promise<number> {
   const resp = await fetch(url, { signal });
   if (!resp.ok || !resp.body) {
     throw new Error(`Log stream HTTP ${resp.status}`);
