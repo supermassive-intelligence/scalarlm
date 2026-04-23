@@ -28,10 +28,18 @@ async def list_models():
 
     registered_models = set(get_vllm_model_manager().get_registered_models())
 
-    model_names = os.listdir(config["training_job_directory"])
+    # Filter to entries that look like training job directories. The jobs
+    # folder is often a mount point whose filesystem injects artifacts
+    # (lost+found on ext*, .Trash-* on some NAS setups); `launch_training_job`
+    # writes config.yaml at creation time, so use that as the ground truth.
+    base = config["training_job_directory"]
+    model_names = [
+        name for name in os.listdir(base)
+        if os.path.isfile(os.path.join(base, name, "config.yaml"))
+    ]
 
     model_names.sort(
-        key=lambda x: get_start_time(os.path.join(config["training_job_directory"], x)),
+        key=lambda x: get_start_time(os.path.join(base, x)),
         reverse=True,
     )
 
