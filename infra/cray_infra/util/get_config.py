@@ -1,4 +1,4 @@
-from .default_config import Config
+from .default_config import Config, _ROOT
 
 import os
 import yaml
@@ -14,10 +14,9 @@ def get_config():
     # SCALARLM_CONFIG_PATH is the documented escape hatch for pointing the
     # loader at a different YAML — used by the unit test suite so each test
     # can run against its own tmp_path without contending on the default
-    # `/app/cray/cray-config.yaml` that the running server is already using.
-    config_path = os.environ.get(
-        "SCALARLM_CONFIG_PATH", "/app/cray/cray-config.yaml"
-    )
+    # config file that the running server is already using.
+    default_config_path = os.path.join(_ROOT, "cray-config.yaml")
+    config_path = os.environ.get("SCALARLM_CONFIG_PATH", default_config_path)
 
     if os.path.exists(config_path):
         with open(config_path, "r") as stream:
