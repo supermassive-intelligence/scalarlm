@@ -25,11 +25,6 @@ logger = logging.getLogger(__name__)
 
 async def create_vllm(server_status, port):
 
-    print(f"DEBUG: BEFORE CONFIG - Environment variables:")
-    print(f"  VLLM_TARGET_DEVICE: {os.environ.get('VLLM_TARGET_DEVICE', 'NOT SET')}")
-    print(f"  CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'NOT SET')}")
-    print(f"  torch.cuda.is_available(): {torch.cuda.is_available()}")
-
     os.environ["HUGGING_FACE_HUB_TOKEN"] = get_hf_token()
 
     config = get_config()
@@ -86,13 +81,6 @@ async def create_vllm(server_status, port):
 
         args.extend(extra_args_list)
         print(f"DEBUG: Added extra args from SCALARLM_VLLM_ARGS: {extra_args_list}")
-
-    print(f"DEBUG: About to parse args: {args}")
-    print(f"DEBUG: Environment variables:")
-    print(f"  SCALARLM_VLLM_ARGS: {os.environ.get('SCALARLM_VLLM_ARGS', 'NOT SET')}")
-    print(f"  VLLM_TARGET_DEVICE: {os.environ.get('VLLM_TARGET_DEVICE', 'NOT SET')}")
-    print(f"  CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'NOT SET')}")
-    print(f"  torch.cuda.is_available(): {torch.cuda.is_available()}")
 
     args = parser.parse_args(args=args)
 
@@ -173,4 +161,5 @@ async def run_server_worker(server_status, listen_address,
     try:
         await shutdown_task
     finally:
-        sock.close()
+        if sock is not None:
+            sock.close()
