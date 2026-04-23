@@ -13,7 +13,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
 
-import { tailServiceLogs, type LogStreamStatus, type ServiceName } from "@/api/logs";
+import {
+  fetchServiceLogRange,
+  tailServiceLogs,
+  type LogStreamStatus,
+  type ServiceName,
+} from "@/api/logs";
 import type { LogLine } from "@/api/training";
 
 const SERVICES: { name: ServiceName; label: string; hint: string }[] = [
@@ -22,7 +27,15 @@ const SERVICES: { name: ServiceName; label: string; hint: string }[] = [
   { name: "megatron", label: "Megatron", hint: "Training + slurmd" },
 ];
 
-const MAX_LINES = 10_000;
+// Max lines held in memory before we start dropping the oldest. 20k lines
+// ≈ a few MB for typical log widths; keeps the DOM responsive without
+// needing a virtualized list.
+const MAX_LINES = 20_000;
+const INITIAL_TAIL = 5_000;
+// How many lines to pull each time the user scrolls near the top.
+const BACKFILL_CHUNK = 2_000;
+// px from the top below which we trigger a backfill request.
+const TOP_TRIGGER_PX = 120;
 const ERROR_REGEX = /\berror\b|traceback|cuda error|oom|killed/i;
 
 export function ServiceLogsCard() {
@@ -137,17 +150,31 @@ function ServiceLogTail({ service, expanded }: ServiceLogTailProps) {
   const [autoScroll, setAutoScroll] = useState(true);
   const [query, setQuery] = useState("");
   const [useRegex, setUseRegex] = useState(false);
+  const [backfilling, setBackfilling] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  // `backfillInFlight` prevents overlapping scrollback fetches; `noMoreAbove`
+  // short-circuits once we've reached line 0 so we stop hammering the server.
+  const backfillInFlight = useRef(false);
+  const noMoreAbove = useRef(false);
 
   useEffect(() => {
     const controller = new AbortController();
     setLines([]);
     setStatus("connecting");
+    setAutoScroll(true);
+    noMoreAbove.current = false;
+    backfillInFlight.current = false;
+
     tailServiceLogs({
       service,
       signal: controller.signal,
+      initialTail: INITIAL_TAIL,
       onLine: (line) =>
         setLines((prev) => {
+          // Cap the buffer from the *front* so that scrolling back doesn't
+          // immediately trim the rows the user is looking at. Live appends
+          // drop the oldest rows; backfilled prepends are guarded below.
           const next =
             prev.length >= MAX_LINES
               ? prev.slice(prev.length - MAX_LINES + 1)
@@ -166,6 +193,87 @@ function ServiceLogTail({ service, expanded }: ServiceLogTailProps) {
     if (!el) return;
     el.scrollTop = el.scrollHeight;
   }, [lines, autoScroll]);
+
+  // Jump to end once the first tail batch arrives, regardless of autoScroll
+  // state — we want to land at the tail on initial load of each tab.
+  useEffect(() => {
+    if (lines.length === 0) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    if (el.scrollHeight <= el.clientHeight) return;
+    // Only snap on the *first* non-empty render per service.
+    if (el.dataset.snapped === "yes") return;
+    el.scrollTop = el.scrollHeight;
+    el.dataset.snapped = "yes";
+  }, [lines]);
+
+  // Reset the snap flag when we switch services.
+  useEffect(() => {
+    if (scrollRef.current) delete scrollRef.current.dataset.snapped;
+  }, [service]);
+
+  const jumpToEnd = () => {
+    setAutoScroll(true);
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  };
+
+  // Scrollback: when the user scrolls near the top, pull the previous
+  // BACKFILL_CHUNK lines and prepend them, compensating scrollTop so the
+  // viewport stays anchored on the row the user is looking at.
+  const maybeBackfill = async () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    if (backfillInFlight.current || noMoreAbove.current) return;
+    if (el.scrollTop > TOP_TRIGGER_PX) return;
+    if (lines.length === 0) return;
+
+    const earliest = lines[0].line_number;
+    if (earliest === 0) {
+      noMoreAbove.current = true;
+      return;
+    }
+
+    backfillInFlight.current = true;
+    setBackfilling(true);
+    const requestedStart = Math.max(0, earliest - BACKFILL_CHUNK);
+    const requestedLimit = earliest - requestedStart;
+    const anchorHeight = el.scrollHeight;
+
+    try {
+      const older = await fetchServiceLogRange(
+        service,
+        requestedStart,
+        requestedLimit,
+      );
+      if (older.length === 0) {
+        noMoreAbove.current = true;
+        return;
+      }
+      setLines((prev) => {
+        // Guard against races / duplicate fetches: drop any overlap with
+        // the current buffer's first row.
+        const current = prev;
+        const firstExisting = current[0]?.line_number ?? Infinity;
+        const fresh = older.filter((l) => l.line_number < firstExisting);
+        return fresh.concat(current);
+      });
+      // Preserve scroll anchor: the prepended rows added scrollHeight,
+      // so shift scrollTop by the delta.
+      requestAnimationFrame(() => {
+        const el2 = scrollRef.current;
+        if (!el2) return;
+        const delta = el2.scrollHeight - anchorHeight;
+        if (delta > 0) el2.scrollTop = el2.scrollTop + delta;
+      });
+      if (requestedStart === 0) noMoreAbove.current = true;
+    } catch {
+      // Swallow — next scroll event will retry.
+    } finally {
+      backfillInFlight.current = false;
+      setBackfilling(false);
+    }
+  };
 
   const filter = useMemo(() => {
     if (!query) return null;
@@ -235,6 +343,8 @@ function ServiceLogTail({ service, expanded }: ServiceLogTailProps) {
         <span className="text-[10px] text-fg-subtle">
           {filtered.length.toLocaleString()}
           {query ? ` / ${lines.length.toLocaleString()}` : ""} lines
+          {lines.length > 0 && ` (from #${lines[0].line_number.toLocaleString()})`}
+          {backfilling && " · loading older…"}
         </span>
         <div className="ml-auto flex items-center gap-1">
           <button
@@ -244,6 +354,16 @@ function ServiceLogTail({ service, expanded }: ServiceLogTailProps) {
           >
             Jump to last error
           </button>
+          {!autoScroll && (
+            <button
+              type="button"
+              onClick={jumpToEnd}
+              className="rounded-md border border-accent/40 bg-accent/10 px-2 py-1 text-xs text-accent hover:bg-accent/20"
+              title="Scroll to the live tail and resume auto-scroll"
+            >
+              Jump to end
+            </button>
+          )}
           <button
             type="button"
             onClick={() => setAutoScroll((v) => !v)}
@@ -272,6 +392,10 @@ function ServiceLogTail({ service, expanded }: ServiceLogTailProps) {
           const nearBottom =
             el.scrollHeight - el.scrollTop - el.clientHeight < 20;
           if (autoScroll && !nearBottom) setAutoScroll(false);
+          if (el.scrollTop <= TOP_TRIGGER_PX) {
+            // Fire-and-forget; maybeBackfill guards its own concurrency.
+            void maybeBackfill();
+          }
         }}
         className={clsx(
           "min-h-[240px] overflow-auto px-2 py-1 font-mono text-[11px] leading-relaxed",

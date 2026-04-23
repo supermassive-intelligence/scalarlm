@@ -27,10 +27,20 @@ async def health():
 
 
 @health_router.get("/logs/{service_name}")
-async def get_service_logs(service_name: str, starting_line_number: int = 0):
+async def get_service_logs(
+    service_name: str,
+    starting_line_number: int = 0,
+    tail: int | None = None,
+    limit: int | None = None,
+):
     try:
         return StreamingResponse(
-            content=service_logs_generator(service_name, starting_line_number),
+            content=service_logs_generator(
+                service_name,
+                starting_line_number=starting_line_number,
+                tail=tail,
+                limit=limit,
+            ),
             media_type="text/event-stream",
         )
     except Exception as e:
