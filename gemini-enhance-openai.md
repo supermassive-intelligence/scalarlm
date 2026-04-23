@@ -62,6 +62,18 @@ Comparative profiling suggests a paradoxical result: the `openai` path is signif
 - **Action**: Implement an `asyncio` loop-lag monitor and export to Prometheus. Capture a `py-spy --idle` wall-clock profile on Spark during the N=1000 plateau.
 - **Rationale**: Confirm that the 4.1 p/s ceiling on Spark is a Python-thread saturation event. If loop lag exceeds 50ms, the proxy is fundamentally unable to handle N=1000 concurrency on that CPU architecture.
 
+### Phase 19: Surgical Sub-Step Profiling
+- **Action**: Instrument the individual sub-steps of `create_completion` (Tokenization, Request Submission, Response Building) using `time.perf_counter()`.
+- **Rationale**: If total wall-clock per call matches but throughput differs, we need to find which sub-step is consuming the ~20ms "extra" Python work that isn't helping the engine.
+
+### Phase 20: Replicating ScalarLM's Batch Pipelining
+- **Action**: Test `SCALARLM_YIELD_CHUNK` values aligned with ScalarLM's natural batch sizes (128, 256) rather than tiny chunks (16).
+- **Rationale**: ScalarLM's worker naturally pipelines engine-side scheduling with Python coordination by waiting for a batch to finish before submitting the next. All-at-once submission might be causing O(N) overhead in vLLM's waiting-queue management or AsyncStream fan-out.
+
+### Phase 21: AsyncStream Management Audit
+- **Action**: Investigate the overhead of 1,000 concurrent `AsyncStream` objects vs. 100.
+- **Rationale**: vLLM's `output_handler` must iterate over all active streams to distribute tokens. Scaling to 1,000 might reach a threshold where the per-iteration distribution cost becomes a primary CPU consumer.
+
 ---
 
 ## Revised Parity & Deprecation Gates

@@ -1092,7 +1092,39 @@ Hypotheses for *why batched submission is faster*:
 2. **Backpressure pipelining** — scalarlm's worker can't submit the *next* batch until the *previous* batch's gather completes. This means engine-side overhead is naturally pipelined with Python-side coordination. With openai's all-at-once, Python has nothing to do after submission, so any slowdown in engine scheduling pushes directly into wall clock.
 3. **AsyncStream management cost** — vLLM maintains an AsyncStream per request, with the output_handler fanning results out. At 1 000 concurrent streams vs (say) 100, the per-iteration output distribution might be more expensive.
 
-All three point to the same fix: **submit to the engine in batches matching scalarlm's** `batch_size`. Phase 8c v2 tested `YIELD_CHUNK=16` (worse than unbounded) — but that was far smaller than scalarlm's actual batch_size. Need to test `YIELD_CHUNK=128` or `256`.
+All three point to the same fix: **submit to the engine in batches matching scalarlm's** `batch_size`. Phase 8c v2 tested `YIELD_CHUNK=16` (worse than unbounded).
+
+### Phase 20 — `YIELD_CHUNK=128` batched-submission sweet spot (TESTED: also null)
+
+| Condition | Mean p/s | Stdev | vs unbounded |
+|---|---:|---:|---:|
+| Phase 8a v5 (unbounded gather) | 10.33 | 0.46 | baseline |
+| Phase 8c `YIELD_CHUNK=16` | 9.90 | 0.51 | −4 % |
+| **Phase 20 `YIELD_CHUNK=128`** | **10.16** | 0.53 | **−2 %** |
+
+Null. Chunked submission from 16 to 128 all sit in the same ~10 p/s band. The "scalarlm's batched pulls are the lever" hypothesis is weakly refuted.
+
+### What's left to explain
+
+After 20 phases and 25+ A/B experiments, we have a tight but surprising picture:
+
+- Per-call wall-time is IDENTICAL (~55 ms, Phase 19)
+- Total concurrency is likely identical (both paths do `asyncio.gather(1000)`; Phase 20 shows chunking doesn't matter)
+- Main loop isn't saturated (Phase 18, p99 lag < 15 ms)
+- Per-machine ceiling tracks CPU speed (Blackwell 10.4 vs Spark 4.1, same ratio as CPU rate)
+- Yet wall-clock is 97 s (openai) vs 60 s (scalarlm) at N=1 000 distinct
+
+**The only remaining observable difference is engine utilisation over time** — the fraction of wall-clock during which the engine has enough in-flight work to be compute-bound. scalarlm keeps the engine continuously saturated at `max_num_seqs=16`; openai somehow doesn't. This isn't visible in per-call timing because each call's own wall-time looks normal; it's visible only in the *gaps between calls' productive time*.
+
+### Phase 22 — sample `vllm:num_requests_running` during both benches
+
+Scrape `/v1/metrics` at 10 Hz during an openai bench and a scalarlm bench back-to-back. Plot `num_requests_running` over time for each. If the openai plot dips below `max_num_seqs=16` for meaningful fractions while scalarlm stays pegged at 16, we have **direct observational evidence** that the engine goes idle during openai's execution — and the fix has to be "keep feeding the engine even while response-processing happens."
+
+This is concrete, cheap, and purely black-box (no vLLM patching). A small side coroutine that `curl`s `/metrics` every 100 ms and records values. Next work item.
+
+### Phase 21 (Gemini) — AsyncStream management audit — DEFERRED
+
+Gemini proposes investigating whether 1 000 concurrent AsyncStream objects cost more than 100 for vLLM's output_handler fanout. Plausible but requires patching vLLM's internals to time the fanout loop. Lower priority than Phase 22 (engine-utilisation sampling) which is purely black-box.
 
 ### Phase 18 — loop-lag diagnostic (Gemini's proposal, RUN: refutes main-loop-saturation hypothesis)
 
@@ -1214,3 +1246,13 @@ vLLM ships a synchronous `LLM.generate(prompts, sampling_params)` API optimised 
 ### My ordering
 
 Phase 8c first (half day, could close the gap alone). If null, Phase 8d + 8e in parallel (both ~half day each). Phase 9 opportunistically if any pod is up. Phase 10 only if 8c–9 combined leave > 15 % gap. Phase 11 only if Phase 10 leaves > 15 % and reading vLLM source confirms feasibility.
+
+## Gemini Feedback & Additional Optimization Ideas
+
+Based on the refutation of the loop-lag hypothesis (Phase 18) and the matching per-call timing (Phase 19), the bottleneck is clearly cumulative Python overhead rather than single-block blocking. I propose the following targeted optimizations:
+
+1. **Switch to `orjson` or `msgspec` for Serialization:** The 38% gap tracks CPU speed across architectures. While Pydantic is low on the stack, the final serialization of a 1,000-choice JSONResponse is a massive CPU consumer. Replacing FastAPI's default encoder with `orjson` can provide a "free" lift to the ceiling.
+2. **Offload Response Merging to Threads:** Use `asyncio.to_thread` for `_merge_completion_responses`. Even if loop lag is low for small chunks, the final assembly of 1,000 objects is a synchronous CPU spike that can be moved off the main event loop to keep the engine's `output_handler` unhindered.
+3. **Zero-Copy Internal Handoff:** Currently, the "scatter" path creates 1,000 Pydantic objects which are then attribute-accessed and copied into a final object. Bypassing Pydantic for internal sub-requests and using raw dictionaries until the final response boundary will significantly reduce object allocation overhead and GIL pressure.
+4. **Adaptive "Waker" Coroutine:** If ScalarLM's "noise" (logging) is indeed the lever, we can simulate it more cleanly with a high-frequency (5ms) background task that simply calls `await asyncio.sleep(0)`. This forces the event loop to cycle through the engine's ZMQ receiver more aggressively during the 1,000-task scatter.
+5. **AsyncStream Fan-out Audit:** Investigate if vLLM's `output_handler` scales linearly with the number of active `AsyncStream` objects. At N=1,000, the per-iteration cost of distributing tokens to 1,000 futures might be hitting a threshold that ScalarLM's batched trickle (e.g., 128 at a time) avoids.
