@@ -1116,11 +1116,62 @@ After 20 phases and 25+ A/B experiments, we have a tight but surprising picture:
 
 **The only remaining observable difference is engine utilisation over time** — the fraction of wall-clock during which the engine has enough in-flight work to be compute-bound. scalarlm keeps the engine continuously saturated at `max_num_seqs=16`; openai somehow doesn't. This isn't visible in per-call timing because each call's own wall-time looks normal; it's visible only in the *gaps between calls' productive time*.
 
-### Phase 22 — sample `vllm:num_requests_running` during both benches
+### Phase 22 — sample `vllm:num_requests_running` during both benches (TESTED)
 
-Scrape `/v1/metrics` at 10 Hz during an openai bench and a scalarlm bench back-to-back. Plot `num_requests_running` over time for each. If the openai plot dips below `max_num_seqs=16` for meaningful fractions while scalarlm stays pegged at 16, we have **direct observational evidence** that the engine goes idle during openai's execution — and the fix has to be "keep feeding the engine even while response-processing happens."
+Scraper at 10 Hz, separate process `curl`ing `/v1/metrics` during each bench. Collected num_requests_running values and frequency of scraper response.
 
-This is concrete, cheap, and purely black-box (no vLLM patching). A small side coroutine that `curl`s `/metrics` every 100 ms and records values. Next work item.
+**num_requests_running distribution (same N=1 000 distinct on Blackwell):**
+
+| | openai | scalarlm |
+|---|---:|---:|
+| Scrape rate achieved | 8.3 Hz (787 samples / 95 s) | 2.5 Hz (152 samples / 60 s) |
+| num_requests_running median | 16 | 16 |
+| num_requests_running mean | 15.27 | 14.59 |
+| Samples at 16 (saturated) | 88 % | 80 % |
+| Samples at 0 (idle) | **2.4 %** | **3.3 %** |
+
+**Refutes the engine-starvation hypothesis.** Both paths keep the engine saturated at `max_num_seqs=16` for the overwhelming majority of wall-clock. scalarlm has slightly MORE idle engine time (3.3 % vs 2.4 %). The engine is not under-utilised on openai.
+
+**The scraper-rate difference is the actually-interesting signal.** openai's main thread responded to `/metrics` scrapes 3× more often than scalarlm's — meaning openai's main thread had 3× more *idle cycles* to serve the scraper. Yet openai achieves LESS throughput. This refutes every "main-thread / CPU is the bottleneck" hypothesis: openai's main thread has spare capacity.
+
+### What Phase 22 definitively rules out, and what remains
+
+Refuted by the data now on record:
+- ❌ Main-thread CPU saturation (Phase 18 loop-lag + Phase 22 scraper-rate agree — openai's main thread has MORE idle time than scalarlm's)
+- ❌ Per-call `create_completion` duration (Phase 19 — identical)
+- ❌ Engine-starvation-from-batch-submission-pattern (Phase 22 — engine is equally saturated)
+- ❌ Concurrency pattern at the scatter layer (Phase 8c, 20 — chunking 16 to 128 all null)
+- ❌ Request_id namespace (Phase 9 — code-reading showed no actual diff)
+- ❌ Dispatcher architecture (Phase 10 — null)
+- ❌ Secondary thread execution (Phase 11 — null)
+- ❌ Concurrency limiter duration (Phase 8a v5 — null on mean)
+
+**Confirmed / strengthened:**
+- ✅ api_router decorator routing (Phase 8a v4 — real +19 %)
+- ✅ Phase 7 Batch-API parallelisation (cleared its gate)
+
+The residual 38 % gap at N=1 000 distinct lives in **vLLM-internal behaviour that is not observable from the proxy layer** and not explainable by any black-box measurement we've run. Most plausible remaining candidates (all would require vLLM-source instrumentation):
+
+1. **Output delivery ordering** — output_handler dequeues outputs from the engine's ZMQ socket; maybe the delivery order favours scalarlm's submission pattern
+2. **Engine scheduler under N=1 000 pending** — vLLM's admission controller may spend O(N) time on each cycle, visible only if we instrument inside the engine process
+3. **KV-cache allocation pattern** — distinct prompts with 1 000 pending may cause different cache allocation dynamics than 100 pending at a time
+
+### Honest disposition
+
+After 22 phases and ~30 A/B experiments, we have:
+
+**The understanding the user asked for:**
+- **Not** a per-call overhead problem (same ~55 ms per call)
+- **Not** a main-thread CPU problem (scraper rate shows openai has MORE idle CPU than scalarlm)
+- **Not** engine under-utilisation (both saturated at 16 concurrent)
+- **Is** something inside vLLM that responds differently to 1 000-at-once submission vs scalarlm's queue-driven submission. Not observable from the proxy.
+
+**Uniform-faster-than-scalarlm is not achievable without changing vLLM's behaviour.** We can match scalarlm at small N (already do), beat scalarlm at N=10 (+65 %) and N=100 (+18 %), and close ~19 % of the N=1 000 gap via Phase 8a v4 decorator routing. The remaining ~38 % gap at N=1 000 distinct is the floor of what black-box proxy changes can achieve with the current vLLM fork.
+
+**To close the last 38 %** would require one of:
+- Patching vLLM's engine scheduler (or understanding its O(N) cost at 1 000 pending)
+- Moving to vLLM's offline `LLM.generate` batch API (may outperform the async serving path for this exact workload; requires architectural work to share engine state)
+- Accepting the residual and deprecating scalarlm on the capability-parity argument + Phase 7 Batch-API being at parity for the bulk workload
 
 ### Phase 21 (Gemini) — AsyncStream management audit — DEFERRED
 
