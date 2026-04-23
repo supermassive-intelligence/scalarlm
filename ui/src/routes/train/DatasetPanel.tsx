@@ -2,6 +2,10 @@
  * DatasetPanel — paginated, searchable view of a training job's
  * dataset.jsonlines. Fetches GET /v1/megatron/train/{hash}/dataset.
  *
+ * Collapsed by default; the underlying query only fires when expanded,
+ * so opening the train-detail page costs zero dataset bytes until the
+ * user asks for them.
+ *
  * See ui/docs/dataset-viewer.md for the design.
  */
 
@@ -21,6 +25,7 @@ interface DatasetPanelProps {
 }
 
 export function DatasetPanel({ jobHash }: DatasetPanelProps) {
+  const [open, setOpen] = useState(false);
   const [searchInput, setSearchInput] = useState("");
   const [q, setQ] = useState("");
   const [offset, setOffset] = useState(0);
@@ -37,8 +42,9 @@ export function DatasetPanel({ jobHash }: DatasetPanelProps) {
     return () => clearTimeout(handle);
   }, [searchInput, q]);
 
+  // Gate the network call on `open` — passing undefined disables the hook.
   const { data, error, isPending, isFetching, refetch } = useTrainingDataset(
-    jobHash,
+    open ? jobHash : undefined,
     { offset, limit: PAGE_SIZE, q },
   );
 
@@ -65,22 +71,26 @@ export function DatasetPanel({ jobHash }: DatasetPanelProps) {
     <Card
       title="Dataset"
       subtitle={
-        q
+        !open
+          ? "Collapsed — click to load"
+          : q
           ? `${matched.toLocaleString()} matches of ${total.toLocaleString()} rows`
           : `${total.toLocaleString()} rows`
       }
       action={
         <div className="flex items-center gap-2">
-          <input
-            type="search"
-            role="searchbox"
-            aria-controls="dataset-panel-list"
-            placeholder="Search…"
-            value={searchInput}
-            onChange={(e) => setSearchInput(e.target.value)}
-            className="w-64 rounded-md border border-border-subtle bg-bg px-3 py-1 text-sm text-fg placeholder:text-fg-subtle focus:border-accent focus:outline-none"
-          />
-          {isFetching && !isPending && (
+          {open && (
+            <input
+              type="search"
+              role="searchbox"
+              aria-controls="dataset-panel-list"
+              placeholder="Search…"
+              value={searchInput}
+              onChange={(e) => setSearchInput(e.target.value)}
+              className="w-64 rounded-md border border-border-subtle bg-bg px-3 py-1 text-sm text-fg placeholder:text-fg-subtle focus:border-accent focus:outline-none"
+            />
+          )}
+          {open && isFetching && !isPending && (
             <span
               className="text-xs text-fg-subtle"
               aria-live="polite"
@@ -88,10 +98,24 @@ export function DatasetPanel({ jobHash }: DatasetPanelProps) {
               …
             </span>
           )}
+          <button
+            type="button"
+            onClick={() => setOpen((v) => !v)}
+            aria-expanded={open}
+            className="rounded-md border border-border-subtle bg-bg-card px-3 py-1 text-xs text-fg hover:border-border hover:bg-bg-hover"
+          >
+            {open ? "Hide" : "Show"}
+          </button>
         </div>
       }
     >
-      {isPending ? (
+      {!open ? (
+        <p className="text-xs text-fg-muted">
+          The dataset panel is collapsed to avoid fetching bytes you don't
+          need. Click <span className="font-semibold">Show</span> to load
+          the first page and enable search.
+        </p>
+      ) : isPending ? (
         <DatasetSkeleton />
       ) : is404 ? (
         <EmptyNotice
