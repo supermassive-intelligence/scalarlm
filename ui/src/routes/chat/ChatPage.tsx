@@ -64,8 +64,20 @@ export function ChatPage() {
   }, [conversationId, search]);
 
   const handleNew = useCallback(() => {
+    // Replace `active` with a fresh draft BEFORE navigating. Without this,
+    // when you click "+ New chat" from /chat/:id, there's a render where
+    // `conversationId` is undefined but `active` still points at the old
+    // conversation — and the persist-draft effect below then fires
+    // navigate(`/chat/${active.id}`, {replace: true}), bouncing the URL
+    // back. Setting active first means the subsequent effect finds an
+    // active.id that isn't in the conversations list (a new draft), so
+    // it stays quiet.
+    const modelFromQuery = search.get("model");
+    const { default_model } = getApiConfig();
+    setActive(buildDraft(modelFromQuery ?? default_model));
+    setLoadError(null);
     navigate("/chat");
-  }, [navigate]);
+  }, [navigate, search]);
 
   const handleFirstTurn = useCallback(
     async (id: string) => {
