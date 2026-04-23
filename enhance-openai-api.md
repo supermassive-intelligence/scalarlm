@@ -1249,6 +1249,42 @@ The residual 38 % N=1 000 distinct gap on Blackwell — and the amplified 290 % 
 
 Given that the black-box experiments are converging without further signal, **option 3 is the pragmatic close** unless there's appetite for committing to option 1's architectural work (several days, uncertain outcome — vLLM offline mode may or may not share engine state safely with the async server).
 
+### Phase 23c — EngineCore py-spy `--idle` (includes waiting time)
+
+The `--gil` profile only captures threads holding the GIL. The 31 % sps difference I attributed to "engine does more Python work" could alternatively have been "scalarlm's engine holds GIL more often for a given amount of wall-clock." Re-profiling with `--idle` captures ALL thread samples including waits.
+
+**EngineCore subprocess, 5-thread profile, N=1 000 distinct paired on Blackwell:**
+
+| Thread | openai top leaves | scalarlm top leaves |
+|---|---|---|
+| **MainThread** | wait 55 %, sched_yield 25 %, timeout_ms 8 %, memory_fence 6 %, acquire_read 5 % | wait 60 %, sched_yield 23 %, acquire_read 6 %, timeout_ms 6 %, memory_fence 4 % |
+| MultiprocWorkerMonitor | 100 % select | 100 % select |
+| process_input_sockets | 100 % poll | 100 % poll |
+| process_output_sockets | 100 % wait | 100 % wait |
+| signal-callback | 100 % wait | 100 % wait |
+
+**Every thread in EngineCore shows identical distributions.** The EngineCore is a pure coordinator — it waits on shared-memory ring buffers, monitors worker subprocesses, polls/sends via ZMQ. There's no measurable asymmetry between openai and scalarlm workloads at this level.
+
+**The actual GPU work happens in `Worker_TP0` and `Worker_TP1` SUBPROCESSES**, not threads of EngineCore. Those are where the real compute lives. Profiling those requires finding their PIDs (py-spy on each). From the `--gil` profile's 31 % sps difference, we know scalarlm gets more engine-Python-work done per second — but that "work" is all in the worker subprocesses' Python code that we haven't yet profiled.
+
+### Definitive close (pending final Worker-subprocess profile or product decision)
+
+The investigation has now reached the limit of black-box profiling:
+
+- ✅ Proxy layer (APIServer process): fully characterized, all levers tested
+- ✅ EngineCore subprocess main thread: identical between workloads (this profile)
+- ✅ EngineCore subprocess other threads: identical (pure I/O coordination)
+- ❓ Worker_TP0 / Worker_TP1 subprocesses: **not profiled** — where GPU work actually happens
+
+One final investigation before full closure: profile one of the Worker_TP subprocesses during paired benches. If those reveal the asymmetry, we've found the last breadcrumb. If those also look identical, the difference is in GPU scheduling/kernel dispatch patterns that are sub-Python (CUDA / tensor library) and essentially unprofilable without native tooling.
+
+**Shipping stance regardless of further investigation:**
+1. Phase 8a v4 (decorator routing via `api_router.create_completion`) as `_dispatch` default — **+19 % real gain at N=1 000**, makes openai faster than scalarlm up to N=100 on both platforms
+2. Phase 7 parallel BatchRunner — already shipped, at parity with array completions for bulk
+3. Document the residual with the mechanism understanding we have
+
+The capability-parity deprecation argument holds regardless of whether the last 38 % closes.
+
 ### Phase 21 (Gemini) — AsyncStream management audit — DEFERRED
 
 Gemini proposes investigating whether 1 000 concurrent AsyncStream objects cost more than 100 for vLLM's output_handler fanout. Plausible but requires patching vLLM's internals to time the fanout loop. Lower priority than Phase 22 (engine-utilisation sampling) which is purely black-box.
