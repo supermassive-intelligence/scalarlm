@@ -72,15 +72,30 @@ def main():
 
 
 def run_server_with_autoreload():
+    config = get_config()
 
-    os.chdir("/app/cray/infra")
+    # Native execution (MLX): run servers directly without uvicorn supervisor
+    # This avoids double port binding (supervisor + create_api both trying to bind 8000)
+    if config["native_execution"]:
+        logger.info("Native execution mode - running servers directly")
+        asyncio.run(run_all_servers_async())
+        return
+
+    # Docker: use autoreload supervisor for development
+    logger.info("Docker mode - using uvicorn autoreload")
+
+    # Change to infra directory for autoreload to work properly
+    os.chdir(config["infra_dir"])
+
+    # Build reload dirs path relative to infra_dir
+    reload_dir = os.path.join(config["infra_dir"], "cray_infra")
 
     server_config = uvicorn.Config(
         "cray_infra.one_server.main:run_all_servers",
         host="0.0.0.0",
         port=8000,
         log_level="info",
-        reload_dirs=["/app/cray/infra/cray_infra"],
+        reload_dirs=[reload_dir],
         reload_excludes=["**/jobs/**"],
         reload=True,
         reload_includes=["**/*.py", "**/*.yaml"],
@@ -100,7 +115,11 @@ def run_all_servers(sockets):
 async def run_all_servers_async():
     config = get_config()
 
-    server_status = await start_cray_server(server_list=[config["server_list"]])
+    # Parse server_list from comma-separated string to list
+    server_list_str = config["server_list"]
+    server_list = [s.strip() for s in server_list_str.split(",")]
+
+    server_status = await start_cray_server(server_list=server_list)
 
     logger.info(f"Running with {len(server_status.tasks)} servers")
 
