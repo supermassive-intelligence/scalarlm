@@ -994,7 +994,69 @@ The mechanism most consistent with the shape: at small N the engine is underutil
 
 **Deprecation gate (revised):** either (a) openai at N=1 000 distinct ≥ scalarlm (true parity, no weasel words), or (b) we document the exact mechanism of the residual gap and the team makes an explicit product call to deprecate anyway.
 
-#### Phase 8c — yield injection (TESTED: null)
+### Blackwell distinct-prompts sweep (Phase 10 enabled)
+
+Paired A/B on the same pod, Phase 10 active (`SCALARLM_USE_DISPATCHER=1`, `SCALARLM_SCATTER_VIA_API_ROUTER=1`). scalarlm unaffected by these flags — uses its own `/v1/generate` path and queue worker.
+
+| N | openai Phase 10 | scalarlm | Winner |
+|---|---:|---:|---|
+| 10 | 6.58 ± 0.29 | ~4.0 (runs 3-5 after warmup) | **openai +65 %** |
+| 100 | **10.43 ± 0.05** (CV 0.4 %) | 8.84 ± 0.66 | **openai +18 %** |
+| 1 000 | ~10.0 | **16.58 ± 0.04** | **scalarlm +66 %** |
+
+**Crucial shape observation:** openai has a hard ceiling around **10.4 p/s** — N=100 and N=1 000 land within noise of each other despite 10× more work. scalarlm keeps scaling up to 16.58 at N=1 000. This is the same qualitative shape as first-pass Spark (openai ceiling at ~4.5 p/s while scalarlm climbs). Hardware-independent plateau pattern.
+
+Phase 10 at N=100 went from ~8.4 (pre-Phase-10 measurements) to 10.43 — **+25 % lift at N=100**. So Phase 10 *does* help at mid N, it just can't push past the ~10.4 p/s ceiling. I missed this earlier because I was only measuring at N=1 000.
+
+### Phase 10 profile vs Phase 8a v5 profile (same pod, same code otherwise)
+
+Both profiled at N=1 000 distinct, 5 min py-spy `--gil --rate 50`. ~2× different sample counts (v5: 18 847, Phase 10: 7 195 — fewer samples because Phase 10 ran with py-spy in same window but included warmup).
+
+Per-call time inside `create_completion`, derived from wall × stack-fraction / 1 000 calls:
+
+| Path | Wall (s) | `create_completion` stack % | ms / call |
+|---|---:|---:|---:|
+| openai v5 | 97 | 39.1 % | **37.8 ms** |
+| openai Phase 10 | 138 | 26.6 % | **37.3 ms** |
+| scalarlm | 60 | 28.0 % | **16.8 ms** |
+
+**Two openai variants (v5 and Phase 10) converge on 37 ms/call inside `create_completion`. scalarlm gets 16.8 ms/call — 2.3× faster.** Both paths call the same vLLM function with equivalent arguments. The architectural dispatcher split (Phase 10) did NOT move the per-call cost.
+
+Phase 10 shifts where non-`create_completion` time goes:
+
+- `app` / `__call__` (FastAPI app entry): 47 %/45 % (v5) → 97 %/95 % (P10). Phase 10 routes every sub-call through the full api_router handler via a fresh Request, nearly every sample has the handler chain on the stack.
+- `output_handler`: 18 % → 33 %. The engine's output loop gets twice as much stack presence — consistent with the dispatcher's fire-and-forget pattern giving output_handler more yield windows.
+- Prometheus `record`: 14 % → 28 %. Same — more output_handler runs = more metric emissions.
+
+But wall-clock is the same. The extra output_handler / framework cycling doesn't translate to throughput.
+
+### Mechanistic conclusion — **this is almost certainly GIL contention during engine awaits**
+
+Both openai variants land at ~37 ms/call. scalarlm lands at ~17 ms/call. The function body is identical. What differs is the **event-loop environment** each call is running in.
+
+Each `create_completion` does synchronous Python work, then awaits the engine's output stream (ZMQ from the EngineCore subprocess), then more sync Python to build the response. The await duration is NOT just "engine compute time" — it's "engine compute time + time until our coroutine's turn to run after the output arrives."
+
+When 1 000 openai sub-calls are all concurrent, the main thread is hot with their sync phases (parse, validate, build response). The engine keeps pushing outputs via ZMQ, but the Python receiver (`process_outputs_socket` / `output_handler`) only runs when the main thread yields. When output_handler does run, it delivers outputs to ALL 1 000 awaiting coroutines' futures, which then race to complete their sync phases — maximum GIL contention.
+
+scalarlm's pattern keeps the main thread less hot overall (heavy logging forces natural yields AND the logging IS non-blocking Python work that's quickly interrupted by I/O). output_handler runs more often, each delivery cycle is smaller, coroutines get their outputs sooner after they're generated. Result: each create_completion's await phase is shorter.
+
+**This would explain every observation:**
+- Same `create_completion` function, different observed per-call time → same sync work, different await time
+- Ceiling at ~10.4 p/s = 1 / (37 ms/call) × parallelism factor for main thread
+- Phase 10's architectural change doesn't help — it still puts the dispatcher + 1000 tasks on the same event loop
+- scalarlm's "wasteful" logging *is* the lever — interrupts work forcing output delivery
+
+### Phase 11 — move create_completion execution off the main event loop (architectural)
+
+If the mechanism is GIL contention on the main event loop, **moving the 1 000 concurrent create_completion tasks off the main loop** should lift the ceiling. Options:
+
+1. **Process-pool worker(s)**: spawn a separate Python process whose job is to run `create_completion`. Main thread's API handler pushes work via `multiprocessing.Queue` / ZMQ / shared memory, awaits result. Engine stays in its own process (already separate). Python serialization of requests/responses adds overhead but *only that* — the engine-await GIL contention is gone because the sub-process has its own event loop.
+2. **Dedicated asyncio loop on a thread**: one background thread running its own asyncio loop. Main thread's handler pushes work to it via a thread-safe queue. Tasks run on the secondary loop with no competition from HTTP handler or scalarlm's worker. Thread-level GIL still exists but contention pattern is different.
+3. **vLLM offline `LLM.generate`** (previously Phase 11): published 2–3× throughput on this exact workload because it doesn't have the async serving layer. The question is how to share the engine with a live serving API.
+
+Option (1) is cleanest architecturally. ~3-5 days. The engine subprocess is already split; adding a second worker subprocess is a known pattern.
+
+### Phase 8c — yield injection (TESTED: null)
 
 Implemented as `SCALARLM_YIELD_CHUNK=K` env var: when set, `_scatter_gather_completions` dispatches in chunks of K (one full `asyncio.gather` per chunk, `await asyncio.sleep(0)` between chunks). Stronger than Phase 8a v2's bounded-semaphore pattern because only K sub-requests *exist* concurrently, not 1000 waiting behind a semaphore.
 

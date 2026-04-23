@@ -77,6 +77,63 @@ _SCATTER_VIA_API_ROUTER = bool(int(os.environ.get("SCALARLM_SCATTER_VIA_API_ROUT
 # SCALARLM_YIELD_CHUNK = K, 0/unset = no yield injection.
 _YIELD_CHUNK = int(os.environ.get("SCALARLM_YIELD_CHUNK", "0") or 0)
 
+# Phase 10 — dedicated dispatcher coroutine. Mimics scalarlm's
+# handler+worker architectural split structurally rather than faking it
+# with sleep(0). A long-lived coroutine pulls (CompletionRequest, Future)
+# items from a module-level asyncio.Queue; the /v1/completions handler
+# pushes N items and awaits a single `asyncio.gather(*futures)`. Starts
+# lazily on first scatter call (avoids editing the lifespan). 0/unset =
+# off (Phase 8a v5 behaviour).
+_USE_DISPATCHER = bool(int(os.environ.get("SCALARLM_USE_DISPATCHER", "0") or 0))
+_DISPATCHER_QUEUE: Optional["asyncio.Queue"] = None
+_DISPATCHER_TASK: Optional["asyncio.Task"] = None
+
+
+def _ensure_dispatcher(servings) -> "asyncio.Queue":
+    """Lazily start the dispatcher coroutine on first use and return its
+    input queue. Safe to call many times — only the first call spawns.
+    """
+    global _DISPATCHER_QUEUE, _DISPATCHER_TASK
+    if _DISPATCHER_QUEUE is not None and _DISPATCHER_TASK is not None and not _DISPATCHER_TASK.done():
+        return _DISPATCHER_QUEUE
+
+    _DISPATCHER_QUEUE = asyncio.Queue()
+
+    async def _one_sub_call(sub_request, raw_request, future):
+        try:
+            result = await servings.openai_serving_completion.create_completion(
+                sub_request, raw_request
+            )
+            if not future.done():
+                future.set_result(result)
+        except Exception as exc:  # noqa: BLE001
+            if not future.done():
+                future.set_exception(exc)
+
+    _pending_tasks: set = set()
+
+    async def _dispatcher_loop():
+        logger.info("Phase 10 dispatcher started")
+        while True:
+            try:
+                item = await _DISPATCHER_QUEUE.get()
+            except asyncio.CancelledError:
+                return
+            if item is None:  # sentinel
+                return
+            sub_request, raw_request, future = item
+            # Fire-and-forget: create a task so the dispatcher returns to
+            # its queue-get immediately. Multiple create_completion calls
+            # end up in flight concurrently — same effective parallelism
+            # as scalarlm's asyncio.gather(*N tasks).
+            task = asyncio.create_task(_one_sub_call(sub_request, raw_request, future))
+            # Hold a ref so the task doesn't get GC'd mid-flight.
+            _pending_tasks.add(task)
+            task.add_done_callback(_pending_tasks.discard)
+
+    _DISPATCHER_TASK = asyncio.create_task(_dispatcher_loop())
+    return _DISPATCHER_QUEUE
+
 openai_v1_router = APIRouter()
 
 # Tail-window for sniffing the upstream payload for `usage`. The terminal
@@ -461,7 +518,18 @@ async def _scatter_gather_completions(
             rr = _fresh_raw_request()
             return await servings.openai_serving_completion.create_completion(r, rr)
 
-    if _YIELD_CHUNK > 0:
+    if _USE_DISPATCHER:
+        # Phase 10: push (sub_request, raw_request, future) to the
+        # dispatcher queue, await a single gather over the futures. The
+        # 1 000 create_completion calls happen inside the long-lived
+        # dispatcher coroutine — structurally separated from this handler
+        # the way scalarlm's worker is separated from /v1/generate.
+        queue = _ensure_dispatcher(servings)
+        futures = [asyncio.get_event_loop().create_future() for _ in sub_requests]
+        for sub_req, fut in zip(sub_requests, futures):
+            queue.put_nowait((sub_req, _fresh_raw_request(), fut))
+        sub_results = await asyncio.gather(*futures)
+    elif _YIELD_CHUNK > 0:
         # Phase 8c: dispatch in chunks of _YIELD_CHUNK, yielding between
         # chunks. Mimics scalarlm's queue-driven pull pattern where the
         # worker completes a batch, yields naturally (queue poll), then
