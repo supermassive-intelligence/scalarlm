@@ -22,6 +22,7 @@ import { setAlias } from "@/stores/aliases";
 import { useAlias } from "@/stores/useAliases";
 
 import { ConfigPanel } from "./ConfigPanel";
+import { DatasetPanel } from "./DatasetPanel";
 import { LogPane } from "./LogPane";
 
 export function TrainDetail() {
@@ -224,6 +225,8 @@ export function TrainDetail() {
             <Card title="Loss">
               <LossChart history={history} maxSteps={maxSteps} />
             </Card>
+
+            <DatasetPanel jobHash={jobHash} />
 
             <LogPane jobHash={jobHash} status={status} />
 

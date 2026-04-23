@@ -14,6 +14,7 @@ from cray_infra.training.launch_training_job import launch_training_job
 from cray_infra.training.upload_training_data import upload_training_data
 from cray_infra.training.training_logs_generator import training_logs_generator
 from cray_infra.training.get_training_job_info import get_training_job_info
+from cray_infra.training.get_dataset_slice import get_dataset_slice
 from cray_infra.training.list_models import list_models
 from cray_infra.training.squeue import squeue
 from cray_infra.training.cancel import cancel
@@ -57,6 +58,16 @@ async def train(request: Request):
 @megatron_router.get("/train/{job_hash}")
 async def job_info(job_hash: str):
     return await get_training_job_info(job_hash)
+
+
+@megatron_router.get("/train/{job_hash}/dataset")
+async def job_dataset(
+    job_hash: str,
+    offset: int = 0,
+    limit: int = 50,
+    q: str | None = None,
+):
+    return get_dataset_slice(job_hash, offset=offset, limit=limit, q=q)
 
 
 @megatron_router.get("/train/logs/{model_name}")

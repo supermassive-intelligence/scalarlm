@@ -1,4 +1,5 @@
 import {
+  keepPreviousData,
   useMutation,
   useQuery,
   useQueryClient,
@@ -92,6 +93,61 @@ export function useTrainingJob(jobHash: string | undefined) {
       return 30_000;
     },
     staleTime: 0,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Dataset viewer
+//
+// GET /v1/megatron/train/{job_hash}/dataset returns a windowed view of the
+// job's dataset.jsonlines — see ui/docs/dataset-viewer.md for the contract.
+// We keep previous data while paging / typing in the search box so the list
+// doesn't blank between requests.
+// ---------------------------------------------------------------------------
+
+export interface DatasetExample {
+  index: number;
+  input?: string;
+  output?: string;
+  raw: Record<string, unknown>;
+  /** Dotted paths of fields the server clipped to MAX_FIELD_BYTES (4 KiB). */
+  truncated_fields?: string[];
+}
+
+export interface DatasetSlice {
+  total: number;
+  offset: number;
+  limit: number;
+  matched: number;
+  truncated: boolean;
+  examples: DatasetExample[];
+}
+
+export interface DatasetQuery {
+  offset: number;
+  limit: number;
+  q: string;
+}
+
+export function useTrainingDataset(
+  jobHash: string | undefined,
+  { offset, limit, q }: DatasetQuery,
+) {
+  return useQuery<DatasetSlice>({
+    queryKey: ["training-dataset", jobHash, offset, limit, q],
+    enabled: Boolean(jobHash),
+    queryFn: () => {
+      const params = new URLSearchParams({
+        offset: String(offset),
+        limit: String(limit),
+      });
+      if (q) params.set("q", q);
+      return apiFetch<DatasetSlice>(
+        `/megatron/train/${jobHash}/dataset?${params.toString()}`,
+      );
+    },
+    placeholderData: keepPreviousData,
+    staleTime: 30_000,
   });
 }
 
