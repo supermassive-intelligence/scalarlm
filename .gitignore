@@ -35,3 +35,4 @@ Thumbs.db
 
 # Local vLLM clone for development
 vllm/***
+nfs/logs/
