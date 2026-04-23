@@ -1222,6 +1222,33 @@ sub_results = await asyncio.gather(*[_worker(r) for r in sub_requests])
 
 Note: this *is* a semaphore pattern, which we tested in Phase 8a v2 with K=16 (worse than unbounded). Phase 24 differs by K=64 or 128 — enough concurrency to saturate max_num_seqs=16 with headroom, but far below 1 000 to keep pending small. If Phase 24 lifts throughput meaningfully, the "pending queue size matters" hypothesis is confirmed.
 
+### Phase 24 — sliding-window dispatcher K=32 (TESTED: null)
+
+| Configuration | Mean p/s | Stdev | CV |
+|---|---:|---:|---:|
+| Unbounded gather (Phase 8a v5) | 10.33 | 0.46 | 4.5 % |
+| K=16 bounded (Phase 8a v2) | 7.52 | 0.37 | 4.9 % |
+| **K=32 sliding-window (Phase 24)** | **10.28** | **0.19** | **1.9 %** |
+
+K=32 matches unbounded throughput with notably tighter CI. The "pending queue size matters" hypothesis is refuted — at K=32 vLLM's pending queue never exceeds 16, yet throughput is identical to the 1000-pending case. If admission cost scaled with pending-queue size, this should have been faster.
+
+**The entire concurrency-control axis is now exhausted.** Every K, every chunk pattern, every yield frequency lands at ~10.3 p/s on Blackwell. scalarlm's 16.6 p/s is unreachable from proxy-side tuning.
+
+### Conclusion (after 24 phases, 35+ A/B experiments)
+
+The Phase 23 EngineCore profile evidence (31 % more engine iterations/sec on scalarlm) is real but it's a *symptom* — an outcome — not a proximal cause we can attack from outside vLLM. Every proxy-side lever we've tried since has hit the same ~10.3 p/s ceiling:
+
+- Code paths tested: direct serving, api_router decorators, JSONResponse wrapping, fresh raw_request, model_copy vs construct, request_id namespace, dispatcher coroutine, side-loop thread, yield injection, chunked gather, sliding-window semaphore
+- Control parameters swept: concurrency limit (1–∞), yield chunk (4–1000), queue max depth, engine concurrency limiter
+
+The residual 38 % N=1 000 distinct gap on Blackwell — and the amplified 290 % gap on Spark — lives *inside vLLM's engine iteration timing*, specifically how the scheduler/admission/decode loop responds to request submission patterns. Closing it further would require one of:
+
+1. **Phase 25 (Gemini's)**: bridge vLLM's offline `LLM.generate` API for bulk calls — bypass the async serving layer
+2. **Directly patch vLLM's scheduler** to profile where engine iterations spend time under different pending-queue states
+3. **Live with it**: ship Phase 8a v4 as default (+19 % real gain), accept the residual, deprecate scalarlm on capability-parity + Phase 7 Batch-API parity for bulk
+
+Given that the black-box experiments are converging without further signal, **option 3 is the pragmatic close** unless there's appetite for committing to option 1's architectural work (several days, uncertain outcome — vLLM offline mode may or may not share engine state safely with the async server).
+
 ### Phase 21 (Gemini) — AsyncStream management audit — DEFERRED
 
 Gemini proposes investigating whether 1 000 concurrent AsyncStream objects cost more than 100 for vLLM's output_handler fanout. Plausible but requires patching vLLM's internals to time the fanout loop. Lower priority than Phase 22 (engine-utilisation sampling) which is purely black-box.
