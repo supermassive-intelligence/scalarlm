@@ -977,17 +977,20 @@ Merged with Gemini's parallel proposal ([gemini-enhance-openai.md](gemini-enhanc
 
 **Deprecation gate:** scalarlm is deprecable when **either** (a) the 15 % parity target is cleared, **or** (b) we conclude from 8e/10 that closing further requires emulating scalarlm's suboptimal logging/polling pattern (in which case we document the trade-off and deprecate on capability-plus-good-enough-perf grounds).
 
-#### Phase 8c — yield injection (cheap, high-ROI)
+#### Phase 8c — yield injection (TESTED: null)
 
-Inject `await asyncio.sleep(0)` at strategic spots in the openai path to mimic the yield frequency scalarlm achieves via its logging/polling pattern:
+Implemented as `SCALARLM_YIELD_CHUNK=K` env var: when set, `_scatter_gather_completions` dispatches in chunks of K (one full `asyncio.gather` per chunk, `await asyncio.sleep(0)` between chunks). Stronger than Phase 8a v2's bounded-semaphore pattern because only K sub-requests *exist* concurrently, not 1000 waiting behind a semaphore.
 
-1. Inside `_scatter_gather_completions`, after every K sub-request submissions (K=16 = `max_num_seqs`), yield before submitting the next batch.
-2. In `_call_inprocess` for non-scatter array prompts, wrap the `create_completion` call with a yield before and after.
-3. In `_merge_completion_responses`, yield between every K sub-responses during the merge.
+Result, N=1 000 distinct, 5 runs, same pod as v5, YIELD_CHUNK=16:
 
-Flag behind `SCALARLM_YIELD_INJECT` env var for clean A/B. Paired N=1/10/100/1 000 distinct, same pod, 10 runs each. **Half a day.**
+| Variant | Mean p/s | Stdev | Gap to scalarlm |
+|---|---:|---:|---:|
+| Phase 8a v5 (no yield) | 10.33 | 0.46 | −38 % |
+| **Phase 8c (YIELD_CHUNK=16)** | **9.90** | **0.51** | **−40 %** |
 
-Expected outcome: if the yield-starvation theory holds (from the comparative profile), this alone could close most of the gap. If the number doesn't move, starvation wasn't the mechanism and we go to 8d/8e.
+**Null.** Means within one stdev, stdev barely changed. The yield-starvation hypothesis from the comparative profile is weakly refuted — if yields were the lever, a K=16 chunked-with-yield-between dispatch should have moved the number noticeably and tightened the CI. Neither happened.
+
+Caveat: Phase 8c conflates two changes — reducing concurrent tasks 1000→16 AND inserting explicit yields. Either the reduced parallelism *hurt* (gating by slowest of 16 per chunk), or the yields *didn't help* because the loop already yielded enough, or both. A cleaner isolation (explicit yields with unbounded gather, tested separately from chunking) is one more env var away but not obviously worth the pod cycle given the null signal here.
 
 #### Phase 8d — v4 isolation (which half of +19 % was the lever?)
 

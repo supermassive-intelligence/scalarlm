@@ -1,43 +1,39 @@
-# Refined Critique and Deep-Dive Plan: The 49% Gap
+# Targeted Plan: Closing the 38% "Efficiency Gap"
 
 ## Status
-Revised Analysis and Pivot Plan. Incorporates the refutation of Phase 6.5 and 8a and the discovery of the 49% "Real-World" performance gap at $N=1000$ (distinct prompts).
+Revised Analysis and Optimization Plan. Following the success of Phase 8a v4 (Decorator Routing) and the reframing of the bottleneck via comparative profiling.
 
-## The "Real-World" Parity Picture
-Previous measurements were optimistic due to prefix-cache help on identical prompts. Properly paired A/B testing with **distinct prompts** on Blackwell reveals a much larger gap:
-- **ScalarLM Path**: 16.57 p/s (Stable, CV 0.2%)
-- **OpenAI Path**: 8.35 p/s
-- **Disadvantage**: **-49%** (Nearly 2x slower)
+## Current State: The 38% Paradox
+As of Phase 8a v5, the `openai` path has closed the gap from -49% to **-38%** at $N=1000$ distinct prompts (10.33 p/s vs 16.57 p/s). 
 
-## Refutation of Previous Hypotheses
-The following "architectural suspects" have been empirically cleared (null results in paired A/B):
-1.  **Synchronous Metrics Tax (Phase 6.5)**: Offloading metrics to a background task did not improve Blackwell N=100 throughput. The asyncio loop was likely already overlapping this work.
-2.  **vLLM Scatter-Merge Overhead (Phase 8a v1)**: Proxy-side scatter-gather (bypassing `merge_async_iterators`) yielded only +0.9% gain.
-3.  **Scheduler Pressure (Phase 8a v2)**: Bounding in-flight requests to 16 actually *decreased* performance.
-4.  **Object/Request Sharing (Phase 8a v3)**: Fresh `raw_request` and `CompletionRequest` objects per sub-call were also null.
+### Key Finding: The "Efficiency Trap"
+Comparative profiling suggests a paradoxical result: the `openai` path is significantly "lighter" (less CPU time spent on logs/polling), but this lack of "noise" results in fewer event-loop yield points. The `scalarlm` path's heavy synchronous logging may actually be helping it by forcing the event loop to switch to the engine's `output_handler` more frequently, keeping the GPU better fed.
 
-## Pivot Plan: Investigating the "Hidden" Delta
+## Optimization & Exploration Plan (Phases 8c – 10)
 
-The gap lives in the delta between the ScalarLM worker and the OpenAI proxy's execution context.
+### Phase 8c: "Yield Injection" Experiment (High ROI)
+- **Goal**: Simulate the engine-feeding behavior of the ScalarLM path.
+- **Action**: Insert `await asyncio.sleep(0)` (or a tiny sleep) inside the `_scatter_gather_completions` loop.
+- **Rationale**: If the bottleneck is coroutine starvation, forcing yields will allow the engine's I/O tasks to run more often during the massive fanning-out of 1,000 requests.
 
-### Phase 8a v4: The Decorator Hypothesis (Priority 1)
-- **Difference**: The ScalarLM worker calls `vllm.entrypoints.openai.completion.api_router.create_completion`, which is wrapped in `@with_cancellation` and `@load_aware_call`. The OpenAI proxy calls the underlying serving class directly.
-- **Test**: Route the OpenAI proxy through the decorated `api_router` function.
-- **Rationale**: These decorators may be performing critical engine-level orchestration or yielding that the direct serving call lacks.
+### Phase 8d: Decorator & Response-Wrap Isolation
+- **Goal**: Isolate the +19% gain from Phase 8a v4.
+- **Test A**: Direct serving + manual `@with_cancellation` decorator.
+- **Test B**: Direct serving + manual `JSONResponse` wrapping (vs. direct Pydantic return).
+- **Rationale**: Identify exactly which part of the FastAPI handler stack provides the boost to ensure the productionized version (Phase 8b) is optimized.
 
-### Phase 8a v5: Comparative py-spy Profiling (Priority 2)
-If v4 is null, we must capture a "ScalarLM-only" profile to compare against the OpenAI profile.
-- **Search for**: Differences in ZMQ IPC latency, engine yield points, or main-thread "bubbles" where the OpenAI path is waiting and the ScalarLM path is working.
+### Phase 8e: Comparative Yield Profiling
+- **Action**: Use `py-spy` to specifically measure the frequency and duration of `output_handler` execution blocks during both paths.
+- **Search for**: "Main thread bubbles" where the engine is idle because the API coroutines are holding the GIL too long.
 
-### Phase 6.5 Follow-up & Resolution
-- **Spark Plateau**: Test if the Spark 4.5 p/s ceiling is lifted by the metrics patch.
-- **Blackwell N=1000**: Test if the tax accumulates enough to be visible at higher engine iteration counts.
-- **Decision**: Revert the vLLM fork patch if both are null. It is correct but "dark code" (no measurable ROI).
+### Phase 10: Engine Namespace Alignment
+- **Action**: Align the `openai` path's `request_id` generation with ScalarLM's content-hashing scheme.
+- **Rationale**: Rule out engine-internal scheduling or caching differences that might favor the stable hashing of Path A.
 
 ---
 
-## Revised Decision Thresholds
+## Revised Parity & Deprecation Gates
 
-1.  **Parity Target**: The 49% gap must be closed to **$<10\%$** at $N=1000$ distinct prompts before marking Path A for deprecation.
-2.  **Batch API Success**: Phase 7 is considered **Complete** (13.14 p/s). It is now the primary migration target for bulk offline users.
-3.  **Deprecation Gate**: Path A stays live until the "Decorator vs. Serving" delta (v4) is resolved.
+1.  **Parity Target**: Close the $N=1000$ gap to **<15%** (approx. 14+ p/s). Given the inherent overhead of the OpenAI protocol, this is the realistic "good enough" threshold.
+2.  **Production Defaults**: Promote `SCALARLM_SCATTER_THRESHOLD` and the optimized v4/v5 routing logic to defaults once isolation (8d) is complete.
+3.  **Deprecation Gate**: Path A is marked for deprecation once the 15% threshold is reached OR the "Yield Injection" results prove that further gains require emulating Path A's suboptimal logging/polling patterns.

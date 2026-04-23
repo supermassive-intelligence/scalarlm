@@ -67,6 +67,16 @@ _SCATTER_MAX_INFLIGHT = int(os.environ.get("SCALARLM_SCATTER_MAX_INFLIGHT", "0")
 # the 49 % distinct-prompts gap to scalarlm.
 _SCATTER_VIA_API_ROUTER = bool(int(os.environ.get("SCALARLM_SCATTER_VIA_API_ROUTER", "0") or 0))
 
+# Phase 8c — yield injection. The comparative profile (scalarlm vs Phase 8a
+# v5 at N=1000) suggested the openai path's 38 % residual gap is because
+# scalarlm's heavy logging/polling creates frequent event-loop yield
+# points that let vLLM's output_handler run often enough to keep the
+# engine fed. This flag inserts `await asyncio.sleep(0)` at the scatter
+# chunk boundaries (every K sub-requests) so the loop has natural yield
+# points, mimicking scalarlm's effect without its logging overhead.
+# SCALARLM_YIELD_CHUNK = K, 0/unset = no yield injection.
+_YIELD_CHUNK = int(os.environ.get("SCALARLM_YIELD_CHUNK", "0") or 0)
+
 openai_v1_router = APIRouter()
 
 # Tail-window for sniffing the upstream payload for `usage`. The terminal
@@ -451,7 +461,22 @@ async def _scatter_gather_completions(
             rr = _fresh_raw_request()
             return await servings.openai_serving_completion.create_completion(r, rr)
 
-    if _SCATTER_MAX_INFLIGHT > 0:
+    if _YIELD_CHUNK > 0:
+        # Phase 8c: dispatch in chunks of _YIELD_CHUNK, yielding between
+        # chunks. Mimics scalarlm's queue-driven pull pattern where the
+        # worker completes a batch, yields naturally (queue poll), then
+        # pulls the next. Crucially, each chunk's gather completes
+        # (sub-requests done) before the next chunk is dispatched — this
+        # gives output_handler a guaranteed window to drain engine outputs.
+        sub_results = []
+        for i in range(0, len(sub_requests), _YIELD_CHUNK):
+            chunk = sub_requests[i:i + _YIELD_CHUNK]
+            chunk_results = await asyncio.gather(*[_call_one(r) for r in chunk])
+            sub_results.extend(chunk_results)
+            # Explicit yield after each chunk to let output_handler and
+            # any other coroutines run before dispatching the next chunk.
+            await asyncio.sleep(0)
+    elif _SCATTER_MAX_INFLIGHT > 0:
         sem = asyncio.Semaphore(_SCATTER_MAX_INFLIGHT)
         async def _bounded(r):
             async with sem:
