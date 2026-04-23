@@ -3,13 +3,12 @@
 ## Status
 Revised Analysis and Optimization Plan. Following the success of Phase 8a v4 (Decorator Routing) and the reframing of the bottleneck via comparative profiling.
 
-## Current State: The 38% Paradox
-As of Phase 8a v5, the `openai` path has closed the gap from -49% to **-38%** at $N=1000$ distinct prompts (10.33 p/s vs 16.57 p/s). 
+## Current State: The "Idle Thread" Paradox
+As of Phase 22, we have a breakthrough: the `openai` path's main thread is **3x more idle** than the `scalarlm` thread during $N=1000$ runs (as measured by scraper response rates), yet it produces significantly less throughput.
+- **The Finding**: The bottleneck has moved out of the APIServer. We are no longer limited by Python overhead or loop efficiency; we are waiting on the **vLLM EngineCore** or the **ZMQ inter-process transport**.
+- **Gap Status**: -38% behind Path A at $N=1000$ distinct prompts (10.33 p/s vs 16.57 p/s).
 
-### Key Finding: The "Efficiency Trap"
-Comparative profiling suggests a paradoxical result: the `openai` path is significantly "lighter" (less CPU time spent on logs/polling), but this lack of "noise" results in fewer event-loop yield points. The `scalarlm` path's heavy synchronous logging may actually be helping it by forcing the event loop to switch to the engine's `output_handler` more frequently, keeping the GPU better fed.
-
-## Optimization & Exploration Plan (Phases 8c – 10)
+## Optimization & Exploration Plan (Phases 8c – 25)
 
 ### Phase 8c: "Yield Injection" Experiment (High ROI)
 - **Goal**: Simulate the engine-feeding behavior of the ScalarLM path.
@@ -73,6 +72,22 @@ Comparative profiling suggests a paradoxical result: the `openai` path is signif
 ### Phase 21: AsyncStream Management Audit
 - **Action**: Investigate the overhead of 1,000 concurrent `AsyncStream` objects vs. 100.
 - **Rationale**: vLLM's `output_handler` must iterate over all active streams to distribute tokens. Scaling to 1,000 might reach a threshold where the per-iteration distribution cost becomes a primary CPU consumer.
+
+### Phase 22: EngineCore O(N) Admission Profiling
+- **Action**: Profile the `EngineCore` process (not APIServer) during the OpenAI N=1000 run using `py-spy`.
+- **Rationale**: If 1,000 requests are pending in the engine, vLLM's admission controller might be performing O(N) scans to check KV-cache availability. Path A's "batch trickle" naturally keeps this scan small.
+
+### Phase 23: ZMQ Backpressure Investigation
+- **Action**: Experiment with ZMQ High-Water Mark (HWM) settings and internal buffer sizes in the vLLM fork.
+- **Rationale**: High-concurrency `AsyncStream` fan-out might be hitting process-boundary I/O limits or context-switch thrashing at the ZMQ layer.
+
+### Phase 24: Reactive "Sliding Window" Dispatcher
+- **Action**: Modify the OpenAI "scatter" logic to submit new requests **only as old ones finish**, maintaining a constant "engine depth" (e.g., 64).
+- **Rationale**: Mimics the exact temporal pattern of Path A's queue worker, potentially smoothing out engine scheduling.
+
+### Phase 25: Offline LLM.generate Bridge
+- **Action**: Investigate bridging the synchronous `LLM.generate` API for large array-completions, potentially bypassing the async overhead entirely for bulk.
+- **Rationale**: vLLM's offline mode is known to be 2-3x faster than async serving; this bridge addresses the fundamental "Sync vs Async" performance floor.
 
 ---
 

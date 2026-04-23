@@ -1173,6 +1173,55 @@ After 22 phases and ~30 A/B experiments, we have:
 - Moving to vLLM's offline `LLM.generate` batch API (may outperform the async serving path for this exact workload; requires architectural work to share engine state)
 - Accepting the residual and deprecating scalarlm on the capability-parity argument + Phase 7 Batch-API being at parity for the bulk workload
 
+### Phase 23 — py-spy EngineCore subprocess + output_handler iteration timing (RUN)
+
+Gemini's Phase 22 proposal: profile the `EngineCore` subprocess (not the APIServer) directly with py-spy. This is the first profile of the vLLM engine process during paired openai vs scalarlm benches.
+
+**Black-box output_handler iteration timing (from my instrumentation):**
+
+| | mean ms | p50 ms | p95 ms | mean outs/iter |
+|---|---:|---:|---:|---:|
+| scalarlm iterations | — | 100 | 385 | 15.0 |
+
+(openai iterations didn't make it to kubectl logs — log volume truncated the earlier window.)
+
+**EngineCore subprocess profile, paired N=1 000 distinct on Blackwell (120 s py-spy --gil each):**
+
+| | openai | scalarlm |
+|---|---:|---:|
+| EngineCore MainThread samples | 2 402 | 3 145 |
+| **Samples per second (engine GIL-busy fraction)** | **20 sps** | **26 sps** |
+| `schedule` (in-stack %) | 48.6 % | 52.1 % |
+| `allocate_slots` | 33.9 % | 36.3 % |
+| `get_num_blocks_to_allocate` | 37.4 % | 39.7 % |
+| `collective_rpc` | 14.0 % | 12.0 % |
+
+**Scalarlm's EngineCore runs 31 % more Python per second than openai's.** This matches the throughput ratio (16.6 / 12.9 = 1.28 ≈ 28 %). Top frames are *essentially identical* — the difference is volume of iterations, not what each iteration does.
+
+**Refined mechanism:** both paths run the same vLLM engine code, same scheduling logic, same KV allocation. But scalarlm's engine completes more iterations per second. This points at one of:
+
+1. **Variable per-iteration cost scaling with pending-queue size**: 1 000-pending (openai) may incur larger per-admission cost than 100-pending (scalarlm). My fixed-chunk YIELD_CHUNK tests didn't match scalarlm because chunked-gather is still bursty — the whole chunk lands in vLLM's pending queue at once, drains to empty, then the next chunk arrives. scalarlm's worker+queue pattern keeps submission continuous.
+2. **Engine idle between iterations**: even without GIL contention, something makes openai's engine *wait* between iterations more than scalarlm's. Could be ZMQ HWM or similar backpressure.
+3. **Something in how pending requests are stored** — Python `dict` or `list` with O(N) operations at 1 000 items.
+
+Testing candidate 1 with Phase 24 — sliding-window dispatcher — next.
+
+### Phase 24 (Gemini) — sliding-window dispatcher
+
+Maintain constant engine depth (e.g. 64 in-flight) by starting a new sub-request AS SOON AS any active one finishes. Mimics scalarlm's temporal submission pattern (never a burst of 1000 pending) without the fixed-batch straggler-gating that killed Phase 8c / Phase 20.
+
+Sketch:
+```python
+from asyncio import Semaphore
+sem = Semaphore(64)
+async def _worker(sub_req):
+    async with sem:
+        return await _call_one(sub_req)
+sub_results = await asyncio.gather(*[_worker(r) for r in sub_requests])
+```
+
+Note: this *is* a semaphore pattern, which we tested in Phase 8a v2 with K=16 (worse than unbounded). Phase 24 differs by K=64 or 128 — enough concurrency to saturate max_num_seqs=16 with headroom, but far below 1 000 to keep pending small. If Phase 24 lifts throughput meaningfully, the "pending queue size matters" hypothesis is confirmed.
+
 ### Phase 21 (Gemini) — AsyncStream management audit — DEFERRED
 
 Gemini proposes investigating whether 1 000 concurrent AsyncStream objects cost more than 100 for vLLM's output_handler fanout. Plausible but requires patching vLLM's internals to time the fanout loop. Lower priority than Phase 22 (engine-utilisation sampling) which is purely black-box.
