@@ -1,5 +1,7 @@
 import { Link } from "react-router-dom";
 
+import { BlackHoleCanvas } from "@/components/BlackHoleCanvas";
+
 const cards = [
   {
     to: "/chat",
@@ -47,6 +49,18 @@ export function HomePage() {
           </Link>
         ))}
       </div>
+
+      <figure className="mt-10 overflow-hidden rounded-lg border border-border-subtle bg-black">
+        <div className="relative h-[520px] w-full">
+          <BlackHoleCanvas className="absolute inset-0" />
+          <figcaption className="pointer-events-none absolute left-3 top-3 font-mono text-[10px] uppercase tracking-[0.2em] text-white/40">
+            drag · scroll to zoom
+          </figcaption>
+          <figcaption className="pointer-events-none absolute bottom-3 right-3 font-mono text-[10px] uppercase tracking-[0.25em] text-amber-200/40">
+            gargantua · raymarched
+          </figcaption>
+        </div>
+      </figure>
     </div>
   );
 }
