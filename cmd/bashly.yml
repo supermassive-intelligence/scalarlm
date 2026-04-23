@@ -14,9 +14,10 @@ commands:
       arm    - (stub) reserved for cross-built arm64 CPU image.
       amd    - AMD ROCm image for MI300-class GPUs (x86_64).
       spark  - NVIDIA DGX Spark: aarch64 Grace CPU + Blackwell GPU (sm_arch=12.0).
+      mlx    - Apple Silicon (native).
   args:
     - name: target
-      allowed: ["cpu", "nvidia", "arm", "amd", "spark"]
+      allowed: ["cpu", "nvidia", "arm", "amd", "spark", "mlx"]
       default: "cpu"
     - name: sm_arch
       help: GPU streaming multiprocessor architecture, e.g. 7.5, 8.0, 8.6, 12.0, auto
@@ -30,9 +31,10 @@ commands:
       nvidia - NVIDIA CUDA on x86_64.
       amd    - AMD ROCm on x86_64.
       spark  - NVIDIA DGX Spark (aarch64 Grace + Blackwell, sm_arch=12.0).
+      mlx    - Apple Silicon (native).
   args:
     - name: target
-      allowed: ["cpu", "nvidia", "amd", "spark"]
+      allowed: ["cpu", "nvidia", "amd", "spark", "mlx"]
       default: "cpu"
     - name: sm_arch
       allowed: ["7.5", "8.6", "12.0", "auto"]
