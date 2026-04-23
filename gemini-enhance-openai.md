@@ -1,57 +1,43 @@
-# Enhanced Critique and Optimized Plan: Path to OpenAI Parity
+# Refined Critique and Deep-Dive Plan: The 49% Gap
 
 ## Status
-Revised Analysis and Optimized Plan. Incorporates Phase 6 measurement data and py-spy profiling results.
+Revised Analysis and Pivot Plan. Incorporates the refutation of Phase 6.5 and 8a and the discovery of the 49% "Real-World" performance gap at $N=1000$ (distinct prompts).
 
-## Revised Critique of Phase 6 Results
+## The "Real-World" Parity Picture
+Previous measurements were optimistic due to prefix-cache help on identical prompts. Properly paired A/B testing with **distinct prompts** on Blackwell reveals a much larger gap:
+- **ScalarLM Path**: 16.57 p/s (Stable, CV 0.2%)
+- **OpenAI Path**: 8.35 p/s
+- **Disadvantage**: **-49%** (Nearly 2x slower)
 
-The Phase 6 implementation (In-Process Transport) has provided deep insight into the remaining bottlenecks. While it closed the transport gap at $N=1000$ on Blackwell (shifting from -27% to -22% relative to ScalarLM), it introduced regressions at small $N$ and hit a hard throughput plateau on Spark.
+## Refutation of Previous Hypotheses
+The following "architectural suspects" have been empirically cleared (null results in paired A/B):
+1.  **Synchronous Metrics Tax (Phase 6.5)**: Offloading metrics to a background task did not improve Blackwell N=100 throughput. The asyncio loop was likely already overlapping this work.
+2.  **vLLM Scatter-Merge Overhead (Phase 8a v1)**: Proxy-side scatter-gather (bypassing `merge_async_iterators`) yielded only +0.9% gain.
+3.  **Scheduler Pressure (Phase 8a v2)**: Bounding in-flight requests to 16 actually *decreased* performance.
+4.  **Object/Request Sharing (Phase 8a v3)**: Fresh `raw_request` and `CompletionRequest` objects per sub-call were also null.
 
-### 1. The "Fixed Per-Iteration Tax" (Empirically Verified)
-The py-spy profile reveals that **20.3% of the main-thread time** is spent in synchronous Prometheus metric calls within vLLM's `output_handler`. This is a constant tax paid on every engine iteration. 
-- **Impact**: This explains the small-$N$ regressions on Blackwell. By removing the HTTP hop, the useful-work denominator shrank, making this synchronous metrics tax the dominant overhead.
-- **Spark Plateau**: On Spark, the system plateaus at ~4.5 p/s regardless of $N$. This confirms the bottleneck is purely CPU-bound at the Python/Serving layer, driven by this iteration tax.
+## Pivot Plan: Investigating the "Hidden" Delta
 
-### 2. Monolithic vs. Distributed Overhead
-The ScalarLM path wins at $N=1000$ because it distributes the cost of response serialization across 1,000 parallel `asyncio` tasks. The OpenAI path's attempt to build and serialize a single 1,000-choice Pydantic object creates a massive burst of GIL-holding work that blocks the event loop.
+The gap lives in the delta between the ScalarLM worker and the OpenAI proxy's execution context.
 
-### 3. Sequential Batch Bottleneck
-The Batch API remains an order of magnitude slower (~3 p/s) because it awaits line items serially. This is a purely architectural gap that prevents it from replacing the ScalarLM `upload/download` path.
+### Phase 8a v4: The Decorator Hypothesis (Priority 1)
+- **Difference**: The ScalarLM worker calls `vllm.entrypoints.openai.completion.api_router.create_completion`, which is wrapped in `@with_cancellation` and `@load_aware_call`. The OpenAI proxy calls the underlying serving class directly.
+- **Test**: Route the OpenAI proxy through the decorated `api_router` function.
+- **Rationale**: These decorators may be performing critical engine-level orchestration or yielding that the direct serving call lacks.
 
----
+### Phase 8a v5: Comparative py-spy Profiling (Priority 2)
+If v4 is null, we must capture a "ScalarLM-only" profile to compare against the OpenAI profile.
+- **Search for**: Differences in ZMQ IPC latency, engine yield points, or main-thread "bubbles" where the OpenAI path is waiting and the ScalarLM path is working.
 
-## Optimized Plan (Phases 6.5 – 9)
-
-The plan is re-ordered to prioritize the highest-ROI fixes and establish a clean baseline for final parity.
-
-### Phase 6.5: Offload Engine Metrics (The "vLLM TODO" Patch)
-Address the 20% overhead found in the profile by productionizing the fix for vLLM's `output_handler`.
-- **Implementation**: Patch the vLLM fork to move synchronous `.record()` calls in `async_llm.py` to a background producer/consumer queue.
-- **Goal**: Regain the 10–15% throughput loss observed in the pilot and eliminate the Spark plateau.
-- **Requirement**: This must be done *before* final parity sweeps to ensure the "engine noise" is removed.
-
-### Phase 7: Parallelize Batch API Execution
-- **Implementation**: Modify `BatchRunner.run()` to use `asyncio.gather` with a semaphore.
-- **Ordering**: Ensure output JSONL preserves `custom_id` mapping.
-- **Concurrency**: Target parity with ScalarLM's `upload/download` by allowing up to 64–128 concurrent lines per batch (configurable).
-
-### Phase 8: Proxy-side Scatter-Gather (Experimental & Conditional)
-Execute the experiment to determine if fanning out array prompts at the proxy closes the final N=1000 gap.
-- **Scatter Logic**: If $N > \text{threshold}$, split the array prompt into $N$ sub-requests.
-- **Slot Management**: **Critical**: The sub-requests must share the *same* `queue_slot` or be treated as a single logical unit to avoid starving the `OpenAIConcurrencyLimiter`.
-- **Merge Logic**: Implement a lightweight merger for sub-responses (summing tokens, concatenating choices, taking the first `system_fingerprint`).
-- **Decision Gate**: Only ship Phase 8b if the Phase 8a experiment shows a $>10\%$ throughput win at $N=1000$.
-
-### Phase 9: Reactive Concurrency Limiting
-- **Implementation**: Link `OpenAIConcurrencyLimiter` to the `vllm_registry` to consult real-time KV cache headroom.
-- **Policy**: Dynamically scale the semaphore bound to match the "aggressive" behavior of the ScalarLM worker when resources allow.
+### Phase 6.5 Follow-up & Resolution
+- **Spark Plateau**: Test if the Spark 4.5 p/s ceiling is lifted by the metrics patch.
+- **Blackwell N=1000**: Test if the tax accumulates enough to be visible at higher engine iteration counts.
+- **Decision**: Revert the vLLM fork patch if both are null. It is correct but "dark code" (no measurable ROI).
 
 ---
 
 ## Revised Decision Thresholds
 
-1.  **Metric ROI**: Phase 6.5 should demonstrate a **$>10\%$ baseline improvement** across all $N$ on Blackwell.
-2.  **Batch Parity**: `/v1/batches` throughput $\ge 90\%$ of `scalarlm` `upload/download` at $N=1000$.
-3.  **Final Parity**: `openai` `/v1/completions` array at $N=1000$ within **5%** of `scalarlm` (or better).
-
-**Final Step**: Once Phase 6.5 and 7 are verified, and Phase 8 (if applicable) is landed, the ScalarLM path is obsolete. Proceed with Phase 4 (Telemetry-Gated Deprecation).
+1.  **Parity Target**: The 49% gap must be closed to **$<10\%$** at $N=1000$ distinct prompts before marking Path A for deprecation.
+2.  **Batch API Success**: Phase 7 is considered **Complete** (13.14 p/s). It is now the primary migration target for bulk offline users.
+3.  **Deprecation Gate**: Path A stays live until the "Decorator vs. Serving" delta (v4) is resolved.
