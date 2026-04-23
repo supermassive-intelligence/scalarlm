@@ -14,6 +14,14 @@ import {
   subscribeTheme,
   type ThemeMode,
 } from "@/stores/theme";
+import {
+  TEMPERATURE_DEFAULT,
+  TEMPERATURE_MAX,
+  TEMPERATURE_MIN,
+  getTemperature,
+  setTemperature,
+  subscribeTemperature,
+} from "@/stores/sampling";
 
 export function SettingsPage() {
   const api = getApiConfig();
@@ -110,6 +118,13 @@ export function SettingsPage() {
           <ThemeSetting />
         </Card>
 
+        <Card
+          title="Chat"
+          subtitle="Sampling defaults for streaming chat completions"
+        >
+          <TemperatureSetting />
+        </Card>
+
         <Card title="Local data" className="border-danger/30">
           <div className="flex flex-col gap-3 text-sm">
             <p className="text-fg-muted">
@@ -166,6 +181,68 @@ function sdkSnippet(apiUrl: string): string {
     `results = llm.generate(prompts=["hello"])`,
     `print(results)`,
   ].join("\n");
+}
+
+function TemperatureSetting() {
+  const value = useSyncExternalStore(
+    subscribeTemperature,
+    getTemperature,
+    getTemperature,
+  );
+  const isDefault = value === TEMPERATURE_DEFAULT;
+
+  return (
+    <div className="flex flex-col gap-3 text-sm">
+      <div>
+        <div className="flex items-center justify-between">
+          <div className="text-fg">Temperature</div>
+          <div className="flex items-center gap-2">
+            <input
+              type="number"
+              min={TEMPERATURE_MIN}
+              max={TEMPERATURE_MAX}
+              step={0.05}
+              value={value}
+              onChange={(e) => {
+                const parsed = Number(e.target.value);
+                if (Number.isFinite(parsed)) setTemperature(parsed);
+              }}
+              className="w-20 rounded-md border border-border-subtle bg-bg px-2 py-1 text-right font-mono text-xs focus:border-accent focus:outline-none"
+            />
+            {!isDefault && (
+              <button
+                type="button"
+                onClick={() => setTemperature(TEMPERATURE_DEFAULT)}
+                className="text-xs text-fg-subtle hover:text-fg"
+                title={`Reset to ${TEMPERATURE_DEFAULT}`}
+              >
+                reset
+              </button>
+            )}
+          </div>
+        </div>
+        <p className="mt-1 text-xs text-fg-muted">
+          0 is deterministic (greedy decoding). Higher values produce more
+          variation; 2 is the OpenAI-shape maximum. Applied to every new
+          chat completion.
+        </p>
+      </div>
+      <input
+        type="range"
+        min={TEMPERATURE_MIN}
+        max={TEMPERATURE_MAX}
+        step={0.05}
+        value={value}
+        onChange={(e) => setTemperature(Number(e.target.value))}
+        aria-label="Temperature"
+        className="w-full accent-accent"
+      />
+      <div className="flex justify-between font-mono text-[10px] text-fg-subtle">
+        <span>{TEMPERATURE_MIN}</span>
+        <span>{TEMPERATURE_MAX}</span>
+      </div>
+    </div>
+  );
 }
 
 const THEME_OPTIONS: { value: ThemeMode; label: string; hint: string }[] = [
