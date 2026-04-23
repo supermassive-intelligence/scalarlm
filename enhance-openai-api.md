@@ -908,13 +908,45 @@ v4 stays on; additionally `SCALARLM_OPENAI_QUEUE_CONCURRENCY=999` and `SCALARLM_
 
 Marginal +3 % on the mean, well within overlapping CIs — null on mean. But stdev halved (0.46 vs 0.85), so the limiter's acquire/release adds per-call jitter without adding throughput. Not a lever, but confirms the Phase 3d limiter is currently a no-op for a single bulk caller.
 
-### Open hypotheses for the remaining 38 % gap
+### Phase 8a comparative profile — scalarlm vs Phase 8a v5 at N=1 000 distinct
 
-All the "easy" levers have been tested. Remaining candidates, in order:
+Two sequential py-spy passes on the same pod (420 s each, `--rate 50 --gil`, APIServer main thread). Pod had been through many hot-patches and py-spy overhead dropped both paths below their clean-pod numbers (scalarlm 8–13 p/s during profile vs 16.57 clean; openai 2–8 p/s during profile vs 10.33 clean). Mean-throughput comparison from this run is **not** reliable, but the *flamegraph diff* is — both paths profiled under identical pod state.
 
-1. **Comparative py-spy profile of scalarlm vs Phase 8a v5 at N=1 000 distinct.** Previous profile was on openai alone; the missing comparison is scalarlm-only on the same pod. Whatever's different in the main-thread stack between them is the residual cost. This is the right next step — the code-reading attempts above have exhausted their value and we're in territory where the profile is the best diagnostic. Caveat from this session's learning: profile-vs-A/B often diverge (Phase 6.5 and Phase 8a v1–v3 all had profile hits that didn't move throughput), so treat findings as hypotheses, not conclusions.
-2. **Engine-internal request_id namespace**. scalarlm passes its own request_id (sha256-hash distribution); Phase 6 lets vLLM auto-generate (UUID distribution). Long shot — request_id is just a hash key — but cheap to test.
-3. **`@with_cancellation` / `@load_aware_call` isolation.** v4 was confounded: it brought BOTH the decorators AND the JSONResponse wrapping path. To isolate: (a) decorate the direct serving call (keep Pydantic return), or (b) keep direct serving but wrap in JSONResponse manually. If either half of v4 recovers the +19 %, we know which. Deferred until after comparative profile narrows the mechanism.
+**Frames heavier in openai (openai-unique overhead):**
+
+| Frame                                         | scalarlm | openai v5 | Δ       |
+|-----------------------------------------------|----------|-----------|---------|
+| `_scatter_gather_completions` + `_dispatch` + `create_completions` | 0 %  | **24 %** | +24 pp |
+| `create_completion` (vLLM serving)            | 28.0 %   | 39.1 %    | +11 pp  |
+| `output_handler`                              | 10.0 %   | 18.3 %    | +8 pp   |
+| `record` (Prometheus)                         | 7.4 %    | 13.7 %    | +6 pp   |
+| `wrapper` (decorators)                        | 16.4 %   | 22.4 %    | +6 pp   |
+| `process_outputs_socket`                      | 3.7 %    | 8.6 %     | +5 pp   |
+| `recv_multipart` (ZMQ IPC)                    | 2.9 %    | 6.1 %     | +3 pp   |
+| `merge_async_iterators`                       | 6.3 %    | 9.2 %     | +3 pp   |
+
+**Frames heavier in scalarlm (scalarlm-unique overhead that *doesn't* slow it):**
+
+| Frame                                         | scalarlm | openai v5 | Δ       |
+|-----------------------------------------------|----------|-----------|---------|
+| `app` / `__call__` (FastAPI handler entry)    | **128 %+** | 45–47 %  | −80 pp  |
+| `handle` (handler dispatch)                   | 95.8 %   | 53.2 %    | −43 pp  |
+| `poll_for_responses` (scalarlm's queue poller) | 25.3 %   | 0 %       | −25 pp  |
+| `get_results` + `group_request_id_to_response_path` | 47.4 %  | 0 %       | −47 pp  |
+| `get_config` (!)                              | 23.2 %   | 0.7 %     | −23 pp  |
+| `info` (log call) / `emit` / `_log`           | 109.4 %  | 60.3 %    | −49 pp  |
+
+(The >100 % rows mean the frame appears on the stack more than once per sample — scalarlm enters the FastAPI handler multiple times per sample via its `poll_for_responses` chain.)
+
+**Interpretation.** Scalarlm spends a huge chunk of its main-thread time on what looks like pure overhead: polling, logging, config reloads, handler nesting. **It still wins.** The scatter layer in openai (24 % main-thread) is unique overhead, but removing it (v1 off) was null, and the per-frame cost of vLLM primitives (`create_completion`, `output_handler`, `record`) is higher in openai too.
+
+**The most plausible remaining story** is that scalarlm's heavy logging/polling *keeps the event loop busy with yield points*, which lets `output_handler` run more often and keeps the engine continuously fed. The openai path has fewer natural yield points — the 1000 sub-create_completion coroutines share one event loop, and whichever currently holds the GIL blocks the others until it awaits. Scalarlm's per-request logging calls are all synchronous Python that forces frequent context switches. **Paradoxically, the openai path may be *too efficient* at per-call execution and starves the engine by not yielding enough.**
+
+Testable corollary: inserting `await asyncio.sleep(0)` yields inside the openai serving's hot path should help. Or, equivalently, batching many tiny logging calls (like scalarlm does) onto the same loop. The fix isn't obvious — it's architectural — and might not be worth closing the last 38 % if it means emulating scalarlm's polling/logging pattern.
+
+### Remaining work after this comparative profile
+
+Both `v4 isolation` (which half of the +19 % came from) and `request_id namespace` tests are still available and cheap. But the comparative profile's main finding reframes the question: **the residual gap may not be a single lever — it could be the cumulative effect of scalarlm's event-loop-interaction pattern**, which we'd need to emulate rather than fix. That is a bigger architectural change than the rest of Phase 8, and given Phase 7 already closed the Batch API gap and Phases 6 / 6.5 / 8a have established the capability parity, the case for a larger architectural rewrite to close the last 38 % at the bulk-completions endpoint is weak *if* the interactive and Batch API paths are good.
 
 ### Phase 9 — Dynamic, KV-aware concurrency limiter
 
