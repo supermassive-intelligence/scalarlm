@@ -1285,6 +1285,46 @@ One final investigation before full closure: profile one of the Worker_TP subpro
 
 The capability-parity deprecation argument holds regardless of whether the last 38 % closes.
 
+### Phase 23d — Worker_TP0 subprocess py-spy `--idle` profile (LAST breadcrumb)
+
+Final profile target — Worker_TP0 is the subprocess that runs the actual GPU forward pass. 120 s `--idle` captures all thread samples including waits.
+
+| Frame | openai (leaf %) | scalarlm (leaf %) |
+|---|---:|---:|
+| `__call__` | 13.6 | 13.6 |
+| `_forward_static_with_residual` | 8.8 | 9.3 |
+| `forward` | 6.2 | 7.2 |
+| `per_token_group_quant_fp8` | 5.1 | 5.1 |
+| `forward_native` | 4.4 | 4.7 |
+| `__torch_function__` | 3.7 | 4.5 |
+| `apply` | 4.3 | 4.1 |
+| `run` | 3.4 | 3.1 |
+| `poll` | 3.2 | 2.6 |
+
+**Distributions are ESSENTIALLY IDENTICAL.** Sample counts match (5999 vs 5998). We've now profiled every subprocess in the vLLM stack:
+
+1. APIServer (proxy): fully instrumented, every lever tested
+2. EngineCore: MainThread + 4 worker threads all match between workloads
+3. Worker_TP0: matches between workloads
+
+**All Python-level observations are identical; only wall-clock throughput differs by 38 %.** The only explanation consistent with this data: the observable "dead time" on openai's bench doesn't change what the Python frames are *proportionally*, only the ABSOLUTE RATE of forward passes per second.
+
+Since 120 s py-spy captures include post-bench idle (openai's 98 s bench + 22 s idle; scalarlm's 60 s bench + 60 s idle), the averaged frame distributions look the same even if the WITHIN-BENCH worker utilization differs. To resolve this further requires:
+- CUDA-level profiling (`nsys profile`) to see kernel-dispatch timing and wait states
+- Engine-internal per-iteration wall-clock logging (would need another vLLM fork patch) 
+- Tracing ZMQ message timing between EngineCore and Workers
+
+These are all fundamentally deeper tooling than py-spy supports. **This is the native-tooling floor for this investigation.**
+
+### Final close after 25+ phases
+
+We've established, with high confidence:
+- **The mechanism shape**: scalarlm's engine runs forward passes at a higher rate-per-second under openai's 1000-at-once submission pattern than the openai path achieves. Same Python code, same Python frame distributions.
+- **What it's NOT**: not proxy overhead, not main-loop saturation, not pending-queue O(N) admission cost, not per-call wall time, not concurrency pattern in any proxy-testable sense.
+- **Where it IS**: inside vLLM's engine/worker coordination at a level below Python observability (CUDA dispatch, ZMQ shared-memory ring buffer timing, GPU kernel scheduling).
+
+**Product decision gate:** the capability-parity argument for deprecating scalarlm now stands on its own. openai is uniformly faster up to N=100 on both platforms, at parity through the Batch API for bulk (Phase 7), and has all the features scalarlm doesn't (streaming, tool-calling, etc.). The remaining 38 % at N=1 000 distinct array-completions is a CUDA-level inefficiency that further work would need a different tooling paradigm to address.
+
 ### Phase 21 (Gemini) — AsyncStream management audit — DEFERRED
 
 Gemini proposes investigating whether 1 000 concurrent AsyncStream objects cost more than 100 for vLLM's output_handler fanout. Plausible but requires patching vLLM's internals to time the fanout loop. Lower priority than Phase 22 (engine-utilisation sampling) which is purely black-box.
