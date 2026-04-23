@@ -1,11 +1,14 @@
-from cray_infra.slurm.discovery.discover_clusters import load_all_nodes
+from cray_infra.training.slurm_capacity import count_slurm_gpus
+
 
 def get_gpu_count():
-    node_info = load_all_nodes()
+    """
+    Total GPUs scalarlm has for training.
 
-    gpu_count = 0
-
-    for node in node_info:
-        gpu_count = max(node["gpu_count"], gpu_count)
-
-    return gpu_count
+    Sums `Gres=gpu:N` across nodes registered with slurmctld, which is
+    exactly one entry per running megatron pod and reflects the
+    `max_gpus_per_node` cap applied in `write_node_config`. Falls back
+    to this host's CUDA device count when slurmctld isn't reachable
+    (local dev, early startup).
+    """
+    return count_slurm_gpus()

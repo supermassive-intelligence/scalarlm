@@ -1,15 +1,12 @@
-from cray_infra.slurm.discovery.discover_clusters import load_all_nodes
+from cray_infra.training.slurm_capacity import count_slurm_nodes
+
 
 def get_node_count():
-    node_info = load_all_nodes()
+    """
+    Number of MPI nodes scalarlm has for training.
 
-    gpu_node_count = 0
-
-    for node in node_info:
-        if node["gpu_count"] > 0:
-            gpu_node_count += 1
-
-    if gpu_node_count > 0:
-        return gpu_node_count
-
-    return len(node_info)
+    One entry per slurmd-registered node, which is one per running
+    scalarlm-megatron pod. Falls back to 1 (the current host) for
+    local dev / early startup, where slurmctld isn't up yet.
+    """
+    return count_slurm_nodes()

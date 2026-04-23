@@ -38,7 +38,10 @@ export function CapacityCard() {
   };
 
   return (
-    <Card title="Cluster capacity" subtitle="GPUs and nodes">
+    <Card
+      title="Cluster capacity"
+      subtitle="GPUs and MPI nodes available to SLURM"
+    >
       {isPending && !gpuCount && !nodeCount ? (
         <div className="flex gap-8">
           <Skeleton className="h-10 w-24" />
@@ -50,8 +53,16 @@ export function CapacityCard() {
       ) : (
         <div className="flex flex-col gap-5">
           <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
-            <Stat label="GPUs" value={gpuCount ?? "—"} />
-            <Stat label="Nodes" value={nodeCount ?? "—"} />
+            <Stat
+              label="Training GPUs"
+              value={gpuCount ?? "—"}
+              hint="Sum of Gres=gpu across slurmd-registered nodes"
+            />
+            <Stat
+              label="MPI nodes"
+              value={nodeCount ?? "—"}
+              hint="One per running megatron pod"
+            />
             <Stat
               label="Nodes busy"
               value={nodesBusy ?? "—"}
