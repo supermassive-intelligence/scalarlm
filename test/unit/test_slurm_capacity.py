@@ -53,22 +53,22 @@ def test_get_slurm_nodes_parses_multi_node_output():
     with patch("subprocess.run", return_value=_run_result(TWO_NODES_ONE_GPU_EACH)):
         nodes = slurm_capacity.get_slurm_nodes()
     assert nodes == [
-        {"name": "megatron-0", "gpus": 1},
-        {"name": "megatron-1", "gpus": 1},
+        {"name": "megatron-0", "gpus": 1, "state": "IDLE"},
+        {"name": "megatron-1", "gpus": 1, "state": "IDLE"},
     ]
 
 
 def test_get_slurm_nodes_returns_gres_value():
     with patch("subprocess.run", return_value=_run_result(ONE_NODE_FOUR_GPU)):
         nodes = slurm_capacity.get_slurm_nodes()
-    assert nodes == [{"name": "trainer-0", "gpus": 4}]
+    assert nodes == [{"name": "trainer-0", "gpus": 4, "state": "IDLE"}]
 
 
 def test_get_slurm_nodes_handles_no_gres_line():
     # CPU-only node — scontrol omits Gres=gpu.
     with patch("subprocess.run", return_value=_run_result("NodeName=cpu-0\n   State=IDLE\n")):
         nodes = slurm_capacity.get_slurm_nodes()
-    assert nodes == [{"name": "cpu-0", "gpus": 0}]
+    assert nodes == [{"name": "cpu-0", "gpus": 0, "state": "IDLE"}]
 
 
 def test_get_slurm_nodes_returns_empty_when_scontrol_missing():
@@ -137,3 +137,35 @@ def test_count_slurm_gpus_reports_slurm_value_not_raw_host():
     with patch("subprocess.run", return_value=_run_result("NodeName=n0\n   Gres=gpu:1\n")), \
         patch("torch.cuda.device_count", return_value=4):
         assert slurm_capacity.count_slurm_gpus() == 1
+
+
+# ---- is_healthy_state ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "state",
+    ["IDLE", "MIXED", "ALLOCATED", "COMPLETING", "RESERVED", "RESUMING"],
+)
+def test_is_healthy_state_accepts_running_states(state):
+    assert slurm_capacity.is_healthy_state(state) is True
+
+
+@pytest.mark.parametrize(
+    "state",
+    ["DOWN", "FAIL", "UNKNOWN", "DRAIN", "FUTURE", ""],
+)
+def test_is_healthy_state_rejects_non_running_states(state):
+    assert slurm_capacity.is_healthy_state(state) is False
+
+
+def test_is_healthy_state_rejects_drain_flag_on_running_state():
+    # `IDLE+DRAIN` — node is up but admin is draining it; shouldn't count
+    # as healthy from a training perspective.
+    assert slurm_capacity.is_healthy_state("IDLE+DRAIN") is False
+    assert slurm_capacity.is_healthy_state("MIXED+DOWN") is False
+
+
+def test_is_healthy_state_rejects_not_responding_suffix():
+    # Trailing `*` means slurmctld hasn't heard from the slurmd in a while.
+    assert slurm_capacity.is_healthy_state("IDLE*") is False
+    assert slurm_capacity.is_healthy_state("MIXED*") is False

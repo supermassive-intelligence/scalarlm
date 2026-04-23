@@ -27,12 +27,25 @@ logger = logging.getLogger(__name__)
 
 _GPU_RE = re.compile(r"Gres=gpu:(\d+)")
 _NODENAME_RE = re.compile(r"^NodeName=(\S+)")
+_STATE_RE = re.compile(r"\bState=(\S+)")
+
+# SLURM node states we treat as healthy. The primary state appears first
+# in the `State=` field, optionally followed by flags joined with `+`
+# (e.g. `IDLE+DRAIN`) and sometimes a `*` suffix meaning "not responding
+# recently." Any `+DRAIN`, `+DOWN`, or `*` is treated as unhealthy.
+_HEALTHY_PRIMARY_STATES = frozenset(
+    {"IDLE", "MIXED", "ALLOCATED", "COMPLETING", "RESERVED", "RESUMING"}
+)
+_UNHEALTHY_FLAGS = frozenset({"DOWN", "DRAIN", "FAIL", "NOT_RESPONDING", "INVALID"})
 
 
 def get_slurm_nodes() -> List[dict]:
     """
-    Return a list of {"name": str, "gpus": int} for each node slurmctld
-    currently has registered. Empty list when slurmctld is unreachable.
+    Return a list of {"name": str, "gpus": int, "state": str} for each
+    node slurmctld currently has registered. `state` is the raw
+    `scontrol` state string (e.g. "IDLE", "MIXED+DRAIN", "DOWN*");
+    callers use `is_healthy_state` to interpret it. Empty list when
+    slurmctld is unreachable.
     """
     try:
         result = subprocess.run(
@@ -61,16 +74,41 @@ def get_slurm_nodes() -> List[dict]:
         if m:
             if current is not None:
                 nodes.append(current)
-            current = {"name": m.group(1), "gpus": 0}
+            current = {"name": m.group(1), "gpus": 0, "state": ""}
         if current is None:
             continue
         gm = _GPU_RE.search(line)
         if gm:
             current["gpus"] = int(gm.group(1))
+        sm = _STATE_RE.search(line)
+        if sm and not current["state"]:
+            # First State= per node wins; later ones (if any) are partition
+            # membership or similar, not the node's own state.
+            current["state"] = sm.group(1)
     if current is not None:
         nodes.append(current)
 
     return nodes
+
+
+def is_healthy_state(state: str) -> bool:
+    """
+    A node is healthy when its primary state is in the running set AND
+    none of the flags mark it as down/drain/fail. `*` suffix on any
+    segment means "not responding" and counts as unhealthy.
+    """
+    if not state:
+        return False
+    if "*" in state:
+        return False
+    segments = state.split("+")
+    primary = segments[0]
+    if primary not in _HEALTHY_PRIMARY_STATES:
+        return False
+    for flag in segments[1:]:
+        if flag in _UNHEALTHY_FLAGS:
+            return False
+    return True
 
 
 def count_slurm_nodes() -> int:
