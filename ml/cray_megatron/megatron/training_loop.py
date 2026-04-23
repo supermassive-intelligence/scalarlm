@@ -278,6 +278,7 @@ class TrainingLoop:
             "step": self.training_state.current_step,
             "epoch": self.training_state.epoch,
             "nan_steps": self.training_state.nan_steps,
+            "metadata": build_adapter_metadata(),
         }
 
         checkpoint_name = f"checkpoint_{self.training_state.current_step}.pt"
@@ -468,6 +469,30 @@ def filter_checkpoint(model, state_dict):
             saved_params[name] = state_dict[name]
 
     return saved_params
+
+
+def build_adapter_metadata():
+    """
+    Build the `metadata` dict that goes into the saved `.pt` alongside
+    `model_state_dict`. Consumed by the inference-side adapter loader —
+    see vllm/docs/training/adapter_format.md for the contract.
+
+    For LoRA adapters we must emit `lora_alpha` explicitly. When it's
+    missing the loader defaults to `2 * rank`, which silently mis-scales
+    the delta by 2× whenever the trainer used `lora_alpha == rank`
+    (our default).
+    """
+    job_config = get_job_config()
+    metadata: dict = {}
+
+    if job_config.get("adapter_type") == "lora":
+        lora_config = job_config.get("lora_config") or {}
+        if "lora_alpha" in lora_config:
+            metadata["lora_alpha"] = int(lora_config["lora_alpha"])
+        if "use_rslora" in lora_config:
+            metadata["use_rslora"] = bool(lora_config["use_rslora"])
+
+    return metadata
 
 class _AllReduce(torch.autograd.Function):
     @staticmethod
