@@ -258,8 +258,11 @@ ARG VLLM_SOURCE=remote
 ARG VLLM_BRANCH=main
 ARG VLLM_REPO=https://github.com/supermassive-intelligence/vllm-fork.git
 
-# Handle vLLM source - support both local and remote modes
-COPY scripts/build-copy-vllm.sh ${INSTALL_ROOT}/build-copy-vllm.sh
+# Handle vLLM source - support both local and remote modes.
+# build-copy-vllm.sh and apply_patches.py are copied in a single COPY
+# step so the image stays under Docker's 127-layer overlay-fs stacking
+# cap. The script sources apply_patches.py from its own SCRIPT_DIR.
+COPY scripts/build-copy-vllm.sh scripts/vllm_patches/apply_patches.py ${INSTALL_ROOT}/
 
 # Handle vLLM source - single RUN command with conditional mount
 # For remote: clone from repository

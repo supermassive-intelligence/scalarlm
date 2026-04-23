@@ -98,6 +98,27 @@ directly limit concurrent sequences. 0.85 is the aggressive-but-safe
 default; drop it only if you're seeing OOMs. This interacts with
 `max_num_seqs` — the engine picks the smaller of the two limits.
 
+## Phase 6.5 — move vLLM's output-handler metrics off the hot path
+
+vLLM's `AsyncLLM.output_handler_loop` calls `loggers.record(...)` synchronously
+every iteration, computing Prometheus stats (scheduler, per-engine iteration,
+mm-cache) before yielding back to outputs. At N=100 distinct prompts the
+record call was **20.3 % of main-thread time** in a py-spy profile. vLLM
+already has a `TODO(rob)` on that exact line acknowledging the problem.
+
+The fix applies at vLLM-fork build time (via a patcher script, not a vendored
+diff) so upstream rebases don't silently drop it:
+
+- `scripts/vllm_patches/apply_patches.py` — asserts the exact anchor text it
+  expects and fails loudly on rebase drift rather than mis-patching silently.
+- Metrics move to a background consumer coroutine fed by a bounded
+  `asyncio.Queue`. The hot path only pushes; the consumer does the record.
+- Bounded queue means bursty metrics can't blow memory and backpressure
+  is applied by dropping the oldest entry (metrics are summaries anyway).
+
+Measured effect: on the N=100 distinct pilot A/B, throughput recovered
++15 %. The patch is now part of every built image.
+
 ## Alternatives explored that didn't help
 
 Before the queue-route landed, five proxy-layer approaches were tried to
