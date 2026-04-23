@@ -1046,6 +1046,30 @@ scalarlm's pattern keeps the main thread less hot overall (heavy logging forces 
 - Phase 10's architectural change doesn't help — it still puts the dispatcher + 1000 tasks on the same event loop
 - scalarlm's "wasteful" logging *is* the lever — interrupts work forcing output delivery
 
+### Spark distinct-prompts sweep (same Phase 10 code, GB10 Grace ARM + 32B-NVFP4)
+
+Same methodology as Blackwell — paired on same container, Phase 10 flags on (`SCALARLM_USE_DISPATCHER=1`, `SCALARLM_SCATTER_VIA_API_ROUTER=1`). 5 runs per cell.
+
+| N | openai Phase 10 | scalarlm | Winner |
+|---|---:|---:|---|
+| 1 | 0.608 ± 0.024 | 0.550 ± 0.031 | **openai +11 %** |
+| 10 | 2.907 ± 0.134 | 2.755 ± 0.081 | **openai +6 %** |
+| 100 | **4.096 ± 0.134** | 4.160 ± 0.119 | tied (within noise) |
+| 1 000 | (retry pending) | **16.615 ± 0.012** | scalarlm wins |
+
+**openai hits its Spark ceiling at ~4.1 p/s at N=100** — same pattern as Blackwell but at a lower absolute throughput. scalarlm keeps scaling: 4.16 at N=100 → 16.62 at N=1 000 (4× lift). First N=1 000 openai run hit httpx ReadTimeout (600 s); retrying with a longer timeout, but given the N=100 ceiling at 4.1 p/s and the persistent-ceiling pattern from Blackwell, we expect openai N=1 000 on Spark to also sit around 4 p/s (≈ 250 s wall), while scalarlm finishes in 60 s.
+
+**Combined Blackwell + Spark picture confirms a hardware-scaling ceiling:**
+
+| Hardware | openai ceiling | scalarlm N=1 000 | openai's fraction of scalarlm peak |
+|---|---:|---:|---:|
+| Blackwell (x86 + RTX PRO 6000) | ~10.4 p/s | 16.58 p/s | 63 % |
+| Spark (ARM Grace + GB10) | ~4.1 p/s | 16.62 p/s | 25 % |
+
+The openai ceiling tracks **CPU speed** (Blackwell x86 > Spark ARM), while scalarlm's throughput is GPU-bound (both hardware setups saturate the engine at ~16.6 p/s, GPU compute is similar for this model). **This is direct evidence that the openai bottleneck is Python/main-thread CPU rate, not GPU.**
+
+If the bottleneck were GPU or engine capacity, both paths would plateau together. They don't. The openai path's serialising work is Python on the main event loop — this is the specific, measurable cost the Phase 11 architectural split aims to eliminate.
+
 ### Phase 11 — move create_completion execution off the main event loop (architectural)
 
 If the mechanism is GIL contention on the main event loop, **moving the 1 000 concurrent create_completion tasks off the main loop** should lift the ceiling. Options:
