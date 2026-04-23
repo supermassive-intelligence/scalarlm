@@ -1,4 +1,5 @@
 from cray_infra.util.get_config import get_config
+from cray_infra.util.default_config import _ROOT
 
 import torch
 
@@ -14,14 +15,16 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-slurm_config_path = "/app/cray/infra/slurm_configs/slurm.conf"
-cluster_info_path = "/app/cray/infra/slurm_configs/cluster_info.json"
-cgroup_config_path = "/app/cray/infra/slurm_configs/cgroup.conf"
+# SLURM configuration paths (relative to base directory)
+slurm_config_path = os.path.join(_ROOT, "infra", "slurm_configs", "slurm.conf")
+cluster_info_path = os.path.join(_ROOT, "infra", "slurm_configs", "cluster_info.json")
+cgroup_config_path = os.path.join(_ROOT, "infra", "slurm_configs", "cgroup.conf")
 
-shared_slurm_config_path = "/app/cray/nfs/slurm.conf"
-shared_gres_config_path = "/app/cray/nfs/gres.conf"
-shared_cgroup_config_path = "/app/cray/nfs/cgroup.conf"
-shared_node_config_directory = "/app/cray/nfs/nodes"
+# Shared SLURM paths on NFS
+shared_slurm_config_path = os.path.join(_ROOT, "nfs", "slurm.conf")
+shared_gres_config_path = os.path.join(_ROOT, "nfs", "gres.conf")
+shared_cgroup_config_path = os.path.join(_ROOT, "nfs", "cgroup.conf")
+shared_node_config_directory = os.path.join(_ROOT, "nfs", "nodes")
 
 
 def main():
