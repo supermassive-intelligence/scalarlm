@@ -36,6 +36,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -106,6 +107,13 @@ _SIDE_THREAD: Optional["threading.Thread"] = None
 # e.g. 50 ms, the main loop is CPU-saturated (not just busy with I/O).
 # SCALARLM_LOOP_LAG_MS = target interval in ms; unset/0 = off.
 _LOOP_LAG_MS = int(os.environ.get("SCALARLM_LOOP_LAG_MS", "0") or 0)
+
+# Phase 19 — per-call timing instrumentation. Wraps each sub-call's
+# create_completion with time.perf_counter() and logs the distribution
+# after all N sub-calls finish. Directly measures the per-call time
+# that the comparative-profile analysis inferred (openai ~37ms vs
+# scalarlm ~17ms). SCALARLM_CALL_TIMING=1 to enable.
+_CALL_TIMING = bool(int(os.environ.get("SCALARLM_CALL_TIMING", "0") or 0))
 _LOOP_LAG_TASK: Optional["asyncio.Task"] = None
 _LOOP_LAG_SAMPLES: list = []
 
@@ -597,6 +605,10 @@ async def _scatter_gather_completions(
             receive=_pass_receive,
         )
 
+    # Phase 19: per-call timing. Collect per-sub-call durations here;
+    # logged as a histogram after the gather completes.
+    call_times_ms: list = []
+
     if _SCATTER_VIA_API_ROUTER:
         # Lazy import to avoid loading the api_router module on the hot
         # path when this flag is off.
@@ -606,7 +618,10 @@ async def _scatter_gather_completions(
 
         async def _call_one(r):
             rr = _fresh_raw_request()
+            t0 = time.perf_counter() if _CALL_TIMING else 0
             response = await _api_router_create_completion(r, raw_request=rr)
+            if _CALL_TIMING:
+                call_times_ms.append((time.perf_counter() - t0) * 1000.0)
             # api_router returns JSONResponse / StreamingResponse. For
             # non-streaming completions it's JSONResponse with body=bytes.
             if hasattr(response, "body"):
@@ -615,7 +630,11 @@ async def _scatter_gather_completions(
     else:
         async def _call_one(r):
             rr = _fresh_raw_request()
-            return await servings.openai_serving_completion.create_completion(r, rr)
+            t0 = time.perf_counter() if _CALL_TIMING else 0
+            result = await servings.openai_serving_completion.create_completion(r, rr)
+            if _CALL_TIMING:
+                call_times_ms.append((time.perf_counter() - t0) * 1000.0)
+            return result
 
     if _USE_SIDE_LOOP:
         # Phase 11 MVP: offload each create_completion to a background
@@ -682,6 +701,17 @@ async def _scatter_gather_completions(
         sub_results = await asyncio.gather(*[_bounded(r) for r in sub_requests])
     else:
         sub_results = await asyncio.gather(*[_call_one(r) for r in sub_requests])
+
+    # Phase 19: log per-call timing histogram if enabled.
+    if _CALL_TIMING and call_times_ms:
+        s = sorted(call_times_ms)
+        n = len(s)
+        total = sum(s)
+        logger.info(
+            "CALL_TIMING n=%d total=%.1fms mean=%.2fms p50=%.2fms p90=%.2fms p95=%.2fms p99=%.2fms max=%.2fms min=%.2fms",
+            n, total, total / n, s[n // 2], s[int(n * 0.9)],
+            s[int(n * 0.95)], s[min(int(n * 0.99), n - 1)], s[-1], s[0],
+        )
 
     # Per-sub error short-circuits the whole call (matches array-prompt
     # behaviour today — vLLM aborts the batch if any one prompt errors).

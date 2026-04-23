@@ -1070,6 +1070,30 @@ The openai ceiling tracks **CPU speed** (Blackwell x86 > Spark ARM), while scala
 
 If the bottleneck were GPU or engine capacity, both paths would plateau together. They don't. The openai path's serialising work is Python on the main event loop — this is the specific, measurable cost the Phase 11 architectural split aims to eliminate.
 
+### Phase 19 — per-call timing instrumentation (DIRECT MEASUREMENT refutes per-call hypothesis)
+
+Added `SCALARLM_CALL_TIMING=1` to wrap each `create_completion` call with `time.perf_counter()` and log per-call histograms on both paths. Ran paired N=1 000 distinct prompts on Blackwell.
+
+**Result:**
+
+| Path | n | mean | p50 | p90 | p95 | p99 | max | min |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| openai | 1 000 | **55.78 ms** | 56.28 | 97.07 | 101.93 | 105.40 | 107.36 | 3.29 |
+| scalarlm | 1 000 | **54.48 ms** | 52.96 | 100.95 | 105.49 | 108.48 | 108.76 | 2.93 |
+
+**Per-call times are essentially identical (within 2.4 %).** The earlier profile-derived "openai 37 ms vs scalarlm 17 ms per call" was misleading — "% in stack" × wall-clock / N isn't a valid estimator because it conflates task concurrency with per-call duration.
+
+**So if each call takes the same time and both paths run 1 000 calls, why is wall-clock 97 s (openai) vs 60 s (scalarlm)?**
+
+The only remaining explanation is **concurrency pattern over time**. scalarlm's worker pulls work in batches sized by `get_batch_size` (KV-cache-derived). openai fires all 1 000 at once via `asyncio.gather`. Even though per-call times match, the throughput differs — suggesting scalarlm's batched submission pattern interacts with vLLM's engine more favourably than openai's all-at-once submission.
+
+Hypotheses for *why batched submission is faster*:
+1. **Engine waiting-queue ordering** — with 1 000 pending requests, the engine might do O(N) work on each admission cycle (scanning for KV space). 100-batch trickles keep the queue small.
+2. **Backpressure pipelining** — scalarlm's worker can't submit the *next* batch until the *previous* batch's gather completes. This means engine-side overhead is naturally pipelined with Python-side coordination. With openai's all-at-once, Python has nothing to do after submission, so any slowdown in engine scheduling pushes directly into wall clock.
+3. **AsyncStream management cost** — vLLM maintains an AsyncStream per request, with the output_handler fanning results out. At 1 000 concurrent streams vs (say) 100, the per-iteration output distribution might be more expensive.
+
+All three point to the same fix: **submit to the engine in batches matching scalarlm's** `batch_size`. Phase 8c v2 tested `YIELD_CHUNK=16` (worse than unbounded) — but that was far smaller than scalarlm's actual batch_size. Need to test `YIELD_CHUNK=128` or `256`.
+
 ### Phase 18 — loop-lag diagnostic (Gemini's proposal, RUN: refutes main-loop-saturation hypothesis)
 
 Added `SCALARLM_LOOP_LAG_MS=10` and a background coroutine that sleeps for 10 ms and measures actual elapsed. Lag = actual − expected. If the main loop is CPU-bound, other work holds the loop and the monitor's sleep doesn't wake on time. Ran during an openai N=1 000 + scalarlm N=1 000 bench back-to-back on Blackwell.

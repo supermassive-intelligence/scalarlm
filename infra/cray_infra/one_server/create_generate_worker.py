@@ -278,9 +278,26 @@ async def process_requests_task(app, requests):
 
     logger.info("Got work: %s", truncate_fields({"requests": requests}))
 
+    # Phase 19: reset per-batch timings before gather starts.
+    import os as _os
+    _timing = bool(int(_os.environ.get("SCALARLM_CALL_TIMING", "0") or 0))
+    if _timing:
+        app.state._scalarlm_call_times = []
+
     completion_tasks = [async_generate_task(request, app) for request in requests]
 
     results = await asyncio.gather(*completion_tasks, return_exceptions=True)
+
+    if _timing and getattr(app.state, "_scalarlm_call_times", None):
+        ts = sorted(app.state._scalarlm_call_times)
+        n = len(ts)
+        total = sum(ts)
+        logger.info(
+            "SCALARLM_CALL_TIMING n=%d total=%.1fms mean=%.2fms p50=%.2fms p90=%.2fms p95=%.2fms p99=%.2fms max=%.2fms min=%.2fms",
+            n, total, total / n, ts[n // 2], ts[int(n * 0.9)],
+            ts[int(n * 0.95)], ts[min(int(n * 0.99), n - 1)], ts[-1], ts[0],
+        )
+        app.state._scalarlm_call_times = []
 
     # Handle exceptions
     for i, result in enumerate(results):
@@ -483,7 +500,17 @@ async def async_completion_task(request, app):
         receive=pass_receive,
     )
 
+    # Phase 19: per-call timing on scalarlm path for comparison with
+    # openai's timing. Enabled under SCALARLM_CALL_TIMING env.
+    import os as _os, time as _t
+    _timing = bool(int(_os.environ.get("SCALARLM_CALL_TIMING", "0") or 0))
+    _t0 = _t.perf_counter() if _timing else 0
     response = await create_completion(completion_request, raw_request=raw_request)
+    if _timing:
+        _elapsed_ms = (_t.perf_counter() - _t0) * 1000.0
+        if not hasattr(app.state, "_scalarlm_call_times"):
+            app.state._scalarlm_call_times = []
+        app.state._scalarlm_call_times.append(_elapsed_ms)
 
     response_data = json.loads(response.body.decode("utf-8"))
 
