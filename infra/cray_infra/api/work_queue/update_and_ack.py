@@ -23,8 +23,21 @@ async def update_and_ack(inference_work_queue, request_id, item):
     group_request_id = get_group_request_id(request_id)
     in_memory_results = await get_in_memory_results(group_request_id)
 
-    if in_memory_results["results"][request_id]["is_acked"]:
-        logger.warn(f"Request {id} is already acknowledged")
+    # Defensive: the group may have been finalized+cleared between the
+    # caller's get_unfinished_result and now. Also covers the case
+    # where the caller decided None was fine and we got here anyway
+    # (shouldn't happen today, but keeps the ack path crash-free).
+    if in_memory_results is None:
+        logger.warning(
+            "update_and_ack: group state missing for %s; dropping.", request_id
+        )
+        return
+
+    existing = in_memory_results["results"].get(request_id)
+    if existing is not None and existing.get("is_acked"):
+        # Was `{id}` (builtin), which logged the id() of the logger.warn
+        # method itself — fixed while we're here.
+        logger.warning(f"Request {request_id} is already acknowledged")
     else:
         in_memory_results["current_index"] += 1
 

@@ -20,6 +20,23 @@ async def finish_work(requests: FinishWorkRequests):
 
         result = await get_unfinished_result(request_id=request.request_id)
 
+        # The group may have been wiped out from in-memory state:
+        # uvicorn auto-reload between submit and finish_work, or the
+        # group was already finalized/cleared by a sibling request's
+        # finish_work call. Drop this completion cleanly — if the
+        # client was still waiting, their poll will either succeed
+        # against the already-written response file or time out. We
+        # must return 200 here so the worker doesn't retry and
+        # amplify load.
+        if result is None:
+            logger.warning(
+                "finish_work: no in-memory group state for %s "
+                "(likely process restart or already-finalized group); "
+                "dropping result.",
+                request.request_id,
+            )
+            continue
+
         if request.response is not None:
             result["response"] = request.response
 
