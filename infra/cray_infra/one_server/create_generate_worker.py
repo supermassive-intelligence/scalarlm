@@ -55,6 +55,18 @@ from cray_infra.util.get_config import get_config
 logger = logging.getLogger(__name__)
 
 
+class _InflightCounter:
+    """
+    Mutable holder for the number of requests the worker has dispatched
+    to vLLM but not yet seen finish_work for. A plain int doesn't work
+    because nested coroutines need a shared reference.
+    """
+    __slots__ = ("count",)
+
+    def __init__(self):
+        self.count = 0
+
+
 async def create_generate_worker(server_status):
     """
     Create a worker that processes generate requests from the queue.
@@ -76,11 +88,29 @@ async def create_generate_worker(server_status):
 
     loaded_adaptor_count = 0
 
+    # Bounded concurrency: vLLM's own scheduler doesn't apply admission
+    # backpressure and our get_batch_size KV-cache heuristic overestimates
+    # capacity (the cache peek doesn't reflect requests sitting in vLLM's
+    # waiting queue). Without this cap the loop flood-pulls from the
+    # SQLiteAckQueue in tight iterations. See default_config.py for the knob.
+    max_inflight = int(config.get("max_inflight_requests", config["generate_batch_size"]))
+    inflight = _InflightCounter()
+
     try:
         session = aiohttp.ClientSession()
 
         while True:
             clear_finished_tasks(tasks)
+
+            # Backpressure: don't pull more work than we have room to run.
+            headroom = max_inflight - inflight.count
+            if headroom <= 0:
+                logger.debug(
+                    "At max_inflight_requests (%d), waiting for drain",
+                    max_inflight,
+                )
+                await asyncio.sleep(0.1)
+                continue
 
             batch_size = await get_batch_size(app)
 
@@ -89,8 +119,12 @@ async def create_generate_worker(server_status):
                 await asyncio.sleep(0.1)
                 continue
 
+            batch_size = min(batch_size, headroom)
+
             logger.debug(
-                f"Checking for work with batch size: {batch_size}, loaded adaptors: {loaded_adaptor_count}..."
+                f"Checking for work with batch size: {batch_size} "
+                f"(inflight={inflight.count}/{max_inflight}, "
+                f"loaded adaptors: {loaded_adaptor_count})..."
             )
 
             try:
@@ -134,7 +168,7 @@ async def create_generate_worker(server_status):
                 await asyncio.sleep(1)
                 continue
 
-            new_task = await process_requests(app, requests)
+            new_task = await process_requests(app, requests, inflight)
 
             tasks.append(new_task)
 
@@ -261,48 +295,80 @@ async def load_lora_adapter(request: LoadLoRAAdapterRequest, raw_request: Reques
     return Response(status_code=200, content=response)
 
 
-async def process_requests(app, requests):
+async def process_requests(app, requests, inflight=None):
     """
     Process a batch of requests using the vLLM engine.
-    This function creates tasks for each request and returns them.
+
+    Each request in the batch runs independently through
+    `_run_and_finish_one`: as soon as one finishes, its result is posted
+    to `finish_work` and the matching SQLiteAckQueue row is acked. This
+    matters because the restart watchdog nacks any row that's been
+    unacked longer than `inference_work_queue_ack_timeout` — if we
+    waited for the whole batch to finish before acking any of them, a
+    single slow request would age every sibling past the timeout and
+    the watchdog would re-queue them, compounding vLLM load.
+
+    `inflight` is the counter the worker loop uses for admission
+    control; each sub-coroutine increments on entry and decrements in a
+    finally block, so the counter is balanced even on cancellation.
     """
-
-    # Create a task to process the requests
-    return asyncio.create_task(process_requests_task(app, requests))
+    return asyncio.create_task(process_requests_task(app, requests, inflight))
 
 
-async def process_requests_task(app, requests):
-    logger.info(f"Processing {len(requests)} requests ")
+async def process_requests_task(app, requests, inflight=None):
+    logger.info(f"Processing {len(requests)} requests")
+    logger.debug("Got work: %s", truncate_fields({"requests": requests}))
 
-    config = get_config()
+    per_request = [_run_and_finish_one(req, app, inflight) for req in requests]
+    # return_exceptions=True so one sub-coroutine failing doesn't abort
+    # its siblings; each one posts its own finish_work independently.
+    await asyncio.gather(*per_request, return_exceptions=True)
 
-    logger.info("Got work: %s", truncate_fields({"requests": requests}))
 
-    completion_tasks = [async_generate_task(request, app) for request in requests]
-
-    results = await asyncio.gather(*completion_tasks, return_exceptions=True)
-
-    # Handle exceptions
-    for i, result in enumerate(results):
-        if isinstance(result, Exception):
-            logger.error(f"Task {i} raised an exception: {result}", exc_info=True)
-            results[i] = {
-                "request_id": requests[i]["request_id"],
-                "error": str(result),
+async def _run_and_finish_one(request, app, inflight=None):
+    """Run one request through vLLM and immediately post its result back
+    as a one-element finish_work payload so the SQLite row acks promptly,
+    rather than waiting for slow siblings in the same batch to drain."""
+    if inflight is not None:
+        inflight.count += 1
+    try:
+        try:
+            result = await async_generate_task(request, app)
+        except Exception as e:
+            logger.error(
+                "Task for %s raised an exception: %s",
+                request.get("request_id"),
+                e,
+                exc_info=True,
+            )
+            result = {
+                "request_id": request["request_id"],
+                "error": str(e),
             }
 
-    params = {"requests": results}
-
-    logger.info("Sending finished inference results with params: %s", params)
-
-    config = get_config()
-
-    session = get_global_session()
-    async with session.post(
-        config["api_url"] + "/v1/generate/finish_work",
-        json=params,
-    ) as resp:
-        assert resp.status == 200
+        config = get_config()
+        session = get_global_session()
+        try:
+            async with session.post(
+                config["api_url"] + "/v1/generate/finish_work",
+                json={"requests": [result]},
+            ) as resp:
+                if resp.status != 200:
+                    logger.error(
+                        "finish_work returned %s for %s",
+                        resp.status,
+                        result.get("request_id"),
+                    )
+        except Exception as e:
+            logger.error(
+                "finish_work POST failed for %s: %s",
+                result.get("request_id"),
+                e,
+                exc_info=True,
+            )
+    finally:
+        if inflight is not None:
+            inflight.count -= 1
 
 
 def truncate_fields(data):

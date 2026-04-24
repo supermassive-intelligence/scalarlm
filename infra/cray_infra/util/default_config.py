@@ -38,10 +38,25 @@ class Config(BaseModel):
     # vLLM Engine Configuration
     generate_batch_size: int = 1024
 
+    # Hard cap on requests submitted to vLLM but not yet finished.
+    # The generate worker refuses to pull more work from the SQLiteAckQueue
+    # until the in-flight count drops below this threshold. vLLM's own
+    # scheduler doesn't apply admission backpressure, so without this cap
+    # the worker's get_batch_size heuristic over-counts available capacity
+    # and floods vLLM's waiting queue. Defaults to generate_batch_size so
+    # existing deployments keep the same effective ceiling.
+    max_inflight_requests: int = 1024
+
     response_timeout: int = 60 # seconds
     inference_work_queue_timeout: int = 30 # seconds
     inference_work_queue_idle_time: int = 5 # seconds
-    inference_work_queue_ack_timeout: int = 300 # seconds
+    # The restart watchdog nacks any request that's been unacked longer
+    # than this back into the pending queue. Was 300s, which was shorter
+    # than p99 for long generations on saturated GPUs — the watchdog
+    # then re-submitted to vLLM while the original was still running,
+    # compounding load. Raised to 30 min; operators with fast inference
+    # can lower it in cray-config.yaml.
+    inference_work_queue_ack_timeout: int = 1800 # seconds
 
     inference_work_queue_path: str = "/app/cray/inference_work_queue.sqlite"
     upload_base_path: str = "/app/cray/inference_requests"
