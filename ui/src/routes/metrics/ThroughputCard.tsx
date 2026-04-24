@@ -1,5 +1,8 @@
-import { useGenerateMetrics } from "@/api/metrics";
+import { useState } from "react";
+
+import { useClearQueue, useGenerateMetrics } from "@/api/metrics";
 import { Card } from "@/components/Card";
+import { ConfirmDestructive } from "@/components/ConfirmDestructive";
 import { ErrorState } from "@/components/ErrorState";
 import { Skeleton } from "@/components/Skeleton";
 import { Sparkline } from "@/components/Sparkline";
@@ -19,9 +22,25 @@ const UTILIZATION_TOOLTIP =
 export function ThroughputCard({ sparklineCapacity }: ThroughputCardProps) {
   const { data, error, refetch, isPending } = useGenerateMetrics();
   const tokenHistory = useRollingBuffer(data?.["token/s"] ?? null, sparklineCapacity);
+  const clearQueue = useClearQueue();
+  const [askClear, setAskClear] = useState(false);
 
   return (
-    <Card title="Inference throughput" subtitle="GET /v1/generate/metrics">
+    <Card
+      title="Inference throughput"
+      subtitle="GET /v1/generate/metrics"
+      action={
+        <button
+          type="button"
+          onClick={() => setAskClear(true)}
+          disabled={clearQueue.isPending || !data || data.queue_depth === 0}
+          className="rounded-md border border-danger/40 bg-danger/10 px-3 py-1 text-xs text-danger hover:border-danger hover:bg-danger/20 disabled:cursor-not-allowed disabled:opacity-40"
+          title="Drop every pending request from the inference queue"
+        >
+          Clear queue
+        </button>
+      }
+    >
       {isPending && !data ? (
         <ThroughputSkeleton />
       ) : error ? (
@@ -79,6 +98,23 @@ export function ThroughputCard({ sparklineCapacity }: ThroughputCardProps) {
           </p>
         </div>
       ) : null}
+
+      <ConfirmDestructive
+        open={askClear}
+        title="Clear inference queue"
+        description="Drops every pending and unacked request from the inference work queue. In-flight requests already handed to vLLM continue to run but their results are discarded. New submissions after this call proceed normally."
+        confirmationText="clear"
+        actionLabel="Clear queue"
+        busy={clearQueue.isPending}
+        onConfirm={async () => {
+          try {
+            await clearQueue.mutateAsync();
+          } finally {
+            setAskClear(false);
+          }
+        }}
+        onClose={() => setAskClear(false)}
+      />
     </Card>
   );
 }

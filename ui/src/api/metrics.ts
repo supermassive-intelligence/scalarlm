@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { apiFetch } from "./client";
 
@@ -26,5 +26,22 @@ export function useGenerateMetrics() {
     queryFn: () => apiFetch<GenerateMetrics>("/generate/metrics"),
     refetchInterval: 3_000,
     staleTime: 0,
+  });
+}
+
+/**
+ * POST /v1/generate/clear_queue — drops every pending/unacked row from
+ * the SQLiteAckQueue. Requests already handed to vLLM are not cancelled
+ * (the worker finishes them, it just has nowhere to post results back
+ * to); new submissions after this call proceed normally.
+ */
+export function useClearQueue() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () =>
+      apiFetch<unknown>("/generate/clear_queue", { method: "POST" }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["generate-metrics"] });
+    },
   });
 }
