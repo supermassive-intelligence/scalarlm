@@ -17,6 +17,11 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 
 from cray_infra.api.fastapi.aiohttp.get_global_session import get_global_session
+from cray_infra.api.fastapi.routers.openai_v1_helpers import (
+    _OPENAI_CACHE_ENABLED,
+    _cache_lookup,
+    _cache_store,
+)
 from cray_infra.generate.metrics import get_metrics
 from cray_infra.util.get_config import get_config
 
@@ -96,7 +101,17 @@ async def create_completions(request: CompletionRequest, raw_request: Request):
     config = get_config()
     params = _filter_params(request.model_dump(mode="json", exclude_none=True), _COMPLETION_ALLOWED_KEYS)
     _ensure_usage_reported(params)
+    cached = _cache_lookup(params, config)
+    if cached is not None:
+        return JSONResponse(content=cached)
     logger.info("Received completions request: %s", params)
+    if _OPENAI_CACHE_ENABLED and not params.get("stream"):
+        return await _proxy_nonstreaming_cached(
+            upstream_url=config["vllm_api_url"] + "/v1/completions",
+            params=params,
+            endpoint_label="completions",
+            config=config,
+        )
     return _proxy_streaming(
         upstream_url=config["vllm_api_url"] + "/v1/completions",
         params=params,
@@ -110,7 +125,17 @@ async def create_chat_completions(request: ChatCompletionRequest, raw_request: R
     config = get_config()
     params = _filter_params(request.model_dump(mode="json", exclude_none=True), _CHAT_ALLOWED_KEYS)
     _ensure_usage_reported(params)
+    cached = _cache_lookup(params, config)
+    if cached is not None:
+        return JSONResponse(content=cached)
     logger.info("Received chat completions request: %s", params)
+    if _OPENAI_CACHE_ENABLED and not params.get("stream"):
+        return await _proxy_nonstreaming_cached(
+            upstream_url=config["vllm_api_url"] + "/v1/chat/completions",
+            params=params,
+            endpoint_label="chat completions",
+            config=config,
+        )
     return _proxy_streaming(
         upstream_url=config["vllm_api_url"] + "/v1/chat/completions",
         params=params,
@@ -139,6 +164,56 @@ def _ensure_usage_reported(params: dict) -> None:
     opts = dict(params.get("stream_options") or {})
     opts.setdefault("include_usage", True)
     params["stream_options"] = opts
+
+
+async def _proxy_nonstreaming_cached(
+    *,
+    upstream_url: str,
+    params: dict,
+    endpoint_label: str,
+    config: dict,
+) -> JSONResponse:
+    """Collect the upstream body in full, store it in the openai-cache,
+    then return it to the caller. Used for non-streaming requests when
+    `SCALARLM_OPENAI_CACHE=1`; streaming requests still go through
+    `_proxy_streaming` since the cache is batch-granular.
+    """
+    session = get_global_session()
+    metrics = get_metrics()
+    metrics.record_new_request()
+    try:
+        async with session.post(upstream_url, json=params) as resp:
+            text = await resp.text()
+            if resp.status != 200:
+                logger.error(
+                    "vLLM %s error (%s): %s", endpoint_label, resp.status, text,
+                )
+                metrics.record_completed_request(token_count=0, flop_count=None)
+                return JSONResponse(
+                    content={"error": f"Failed to create {endpoint_label}: {text}"},
+                    status_code=resp.status,
+                )
+            try:
+                body = json.loads(text)
+            except json.JSONDecodeError:
+                metrics.record_completed_request(token_count=0, flop_count=None)
+                return JSONResponse(
+                    content={"error": f"vLLM returned non-JSON body for {endpoint_label}"},
+                    status_code=502,
+                )
+    except Exception:  # noqa: BLE001
+        metrics.record_completed_request(token_count=0, flop_count=None)
+        raise
+
+    token_count = 0
+    usage = body.get("usage") if isinstance(body, dict) else None
+    if isinstance(usage, dict):
+        total = usage.get("total_tokens")
+        if isinstance(total, (int, float)):
+            token_count = int(total)
+    metrics.record_completed_request(token_count=token_count, flop_count=None)
+    _cache_store(params, body, config)
+    return JSONResponse(content=body)
 
 
 def _proxy_streaming(

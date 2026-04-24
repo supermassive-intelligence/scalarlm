@@ -119,6 +119,51 @@ diff) so upstream rebases don't silently drop it:
 Measured effect: on the N=100 distinct pilot A/B, throughput recovered
 +15 %. The patch is now part of every built image.
 
+## Phase 30 — response cache for `/v1/completions` and `/v1/chat/completions`
+
+`/v1/generate` hashes the batch contents and persists the response to
+`{upload_base_path}/{hash}_response.json`; repeat calls with the same payload
+skip inference and return the stored batch. The openai path had no
+equivalent, which (a) made identical-prompt workloads pay full inference
+cost every time and (b) left OpenAI-compatible clients without a benefit
+scalarlm was already giving `/v1/generate` callers.
+
+### Design
+
+- **Keyed on the filtered params dict:** `(model, prompt|messages,
+  max_tokens, temperature, top_p, stop, n, tools, tool_choice)`. Any field
+  that changes inference output is in the key; transport-only fields
+  (`stream`, `stream_options`, `seed` when non-deterministic, etc.) are
+  excluded.
+- **SHA-256 over sorted-key JSON:** deterministic across Python sessions;
+  collisions are not a concern for this key size.
+- **Disk-backed at `{upload_base_path}/openai_cache/{sha256}.json`:** same
+  directory root as `/v1/generate`'s cache, simplifying GC and quota
+  management.
+- **Streaming always bypassed:** the cache is batch-granular and a
+  streamed response would have to be buffered in memory before storage.
+  Acceptable trade-off — streaming is for interactive UX, not batch
+  replay.
+- **Opt-in via `SCALARLM_OPENAI_CACHE=1`** so existing deployments don't
+  see behavior change unless they choose to. Recommended on for any
+  deployment that serves batch/eval/dataset-labeling workloads.
+
+### Performance effect
+
+On a repeat-batch workload (1000 prompts, second call with identical
+params), Blackwell 2-GPU:
+
+| path | cold p/s | warm (cache hit) p/s |
+|---|---:|---:|
+| openai /v1/completions | 63 (ms=256) | ~35 000 |
+| scalarlm /v1/generate  | 91 (ms=256) | ~690 |
+
+The warm-hit openai throughput dominates scalarlm's because openai
+returns the entire batch in one `JSONResponse.content` load;
+`/v1/generate`'s `poll_for_responses` iterates all N `request_id`s and
+re-reads the response file once per prompt. Not a property of the cache
+layer, a property of the scalarlm response-polling loop.
+
 ## Alternatives explored that didn't help
 
 Before the queue-route landed, five proxy-layer approaches were tried to
