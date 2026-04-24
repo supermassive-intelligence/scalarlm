@@ -164,6 +164,71 @@ returns the entire batch in one `JSONResponse.content` load;
 re-reads the response file once per prompt. Not a property of the cache
 layer, a property of the scalarlm response-polling loop.
 
+## Phase 31 — route bulk array `/v1/completions` through the queue worker
+
+At N ≥ 100 distinct prompts, the direct-proxy path lags `/v1/generate` by
+~30 %. The gap wasn't vLLM — same kernels, same KV cache, same
+`max_num_seqs`. It was what the proxy did with the N requests:
+
+- **Direct proxy** forwarded the array through to vLLM's OpenAI server,
+  which created N `AsyncStream` futures. At N=1000 those futures all
+  live on the APIServer event loop simultaneously, eating CPU on
+  per-future output dispatch between engine iterations.
+- **`/v1/generate`** writes the batch to a queue, a dedicated worker
+  pulls `get_batch_size()` items at a time, submits them via
+  `asyncio.gather`, waits, pulls the next chunk. The engine sees the
+  same submissions either way, but the proxy event loop only ever
+  handles a bounded number of in-flight futures.
+
+The structural fix is to reuse the queue worker. This commit adds a fast
+path that, when array length ≥ `SCALARLM_QUEUE_ROUTE_THRESHOLD`, builds
+a `GenerateRequest` from the `CompletionRequest` and hands off to the
+same `generate()` handler `/v1/generate` uses. The `GenerateResponse`
+is translated back to the OpenAI `CompletionResponse` shape.
+
+### Design choices
+
+- **Opt-in via `SCALARLM_QUEUE_ROUTE_THRESHOLD` (int, default 0 / off).**
+  Recommended production value: **100**. Below that, the direct path is
+  the fast path for interactive latency; above that, the queue pacing
+  dominates.
+- **Streaming and non-string prompts are never routed.** The queue is
+  batch-oriented (no partial emission) and the current
+  `GenerateRequest` only handles strings and dict prompts.
+- **`request.prompt` is read directly (no `model_dump`).** At N=1000 the
+  full `model_dump(mode="json")` walk costs ~20-30 ms per call; the fast
+  path reads only the cache-relevant fields.
+- **Cache store is skipped on queue-routed responses.** The queue
+  worker's own disk cache at `{hash}_response.json` is authoritative;
+  duplicating in openai-cache is wasted I/O.
+
+### Known limitations (deliberate, to keep the change small)
+
+- **`usage.*_tokens` returns 0.** scalarlm's `Result` model doesn't carry
+  `token_count` today. The worker's `async_completion_task` already
+  parses `response_data["usage"]` — promoting those fields onto
+  `Result` is ~15 lines of follow-up and will land in a follow-up PR.
+  Not blocking for throughput benchmarks; blocking for usage-based
+  billing integrations.
+- **No streaming on queue-routed calls.** Callers that need streaming at
+  N ≥ threshold will get it — just through the direct path (above the
+  queue route, in the handler order) if they pass `stream=true`.
+- **No logprobs on queue-routed calls.**
+
+### Performance
+
+Blackwell 2-GPU PP=2, `max_num_seqs=256`, Qwen3-Next-80B-A3B-FP8,
+N=1000 distinct prompts, `max_tokens=16`, 3-run mean:
+
+| path | mean p/s | min | max |
+|---|---:|---:|---:|
+| openai /v1/completions (direct)  | ~62   | 60.1  | 63.5  |
+| openai /v1/completions (queue route) | **89.7** | 86.4  | 94.2  |
+| scalarlm /v1/generate            | 90.9  | 88.2  | 93.7  |
+
+Queue-routed openai hits **statistical parity** with `/v1/generate` on
+this workload (1.3 % mean gap, within run-to-run variance).
+
 ## Alternatives explored that didn't help
 
 Before the queue-route landed, five proxy-layer approaches were tried to

@@ -19,8 +19,11 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from cray_infra.api.fastapi.aiohttp.get_global_session import get_global_session
 from cray_infra.api.fastapi.routers.openai_v1_helpers import (
     _OPENAI_CACHE_ENABLED,
+    _cache_key_from_request,
     _cache_lookup,
+    _cache_lookup_by_key,
     _cache_store,
+    _should_route_via_queue_fast,
 )
 from cray_infra.generate.metrics import get_metrics
 from cray_infra.util.get_config import get_config
@@ -99,6 +102,20 @@ async def list_models():
 async def create_completions(request: CompletionRequest, raw_request: Request):
     """Create completions - proxy to vLLM server."""
     config = get_config()
+
+    # Bulk-route fast path (Phase 31). Fires BEFORE model_dump so bulk
+    # requests don't pay the O(N) pydantic walk.
+    if _should_route_via_queue_fast(request):
+        if _OPENAI_CACHE_ENABLED:
+            hit = _cache_lookup_by_key(_cache_key_from_request(request), config)
+            if hit is not None:
+                return JSONResponse(content=hit)
+        logger.info(
+            "completions via queue: model=%s prompts=%d",
+            request.model, len(request.prompt),
+        )
+        return await _route_via_scalarlm_queue(request, config)
+
     params = _filter_params(request.model_dump(mode="json", exclude_none=True), _COMPLETION_ALLOWED_KEYS)
     _ensure_usage_reported(params)
     cached = _cache_lookup(params, config)
@@ -117,6 +134,73 @@ async def create_completions(request: CompletionRequest, raw_request: Request):
         params=params,
         endpoint_label="completions",
     )
+
+
+async def _route_via_scalarlm_queue(request, config: dict) -> JSONResponse:
+    """Dispatch a bulk array /v1/completions request through the existing
+    /v1/generate queue worker. The worker calls create_completion on a
+    controlled `get_batch_size()`-sized slice, `asyncio.gather`s the
+    sub-calls, and posts results back — keeping the engine saturated
+    without fanning N AsyncStream futures onto the APIServer event loop.
+
+    The worker's queue layer caches by content hash too, so repeat calls
+    short-circuit at that layer as well (in addition to openai's own
+    cache above). We deliberately do not double-store in the openai
+    cache here — the queue's `{hash}_response.json` already holds it.
+
+    Limitations (deliberate, documented in enhance-openai-api.md):
+    - no streaming (queue is batch-oriented)
+    - `usage.*_tokens` returns 0 (GenerateResponse.Result doesn't carry
+      token_count today — follow-up item to plumb through)
+    - no logprobs
+    """
+    # Imported lazily so modules that import this router at startup don't
+    # force-import the /v1/generate pipeline.
+    from cray_infra.api.fastapi.generate.generate import generate as _scalarlm_generate
+    from cray_infra.api.fastapi.routers.request_types.generate_request import (
+        GenerateRequest,
+    )
+
+    metrics = get_metrics()
+    metrics.record_new_request()
+
+    gen_req = GenerateRequest(
+        model=request.model,
+        prompts=list(request.prompt),
+        max_tokens=request.max_tokens or 16,
+        temperature=request.temperature or 0.0,
+        tools=getattr(request, "tools", None),
+        tool_choice=getattr(request, "tool_choice", None),
+    )
+    gen_resp = await _scalarlm_generate(gen_req)
+
+    import time as _t
+    choices = []
+    for i, r in enumerate(gen_resp.results):
+        choices.append({
+            "index": i,
+            "text": r.response or "",
+            "finish_reason": "stop" if r.error is None else "error",
+            "logprobs": None,
+        })
+    group_id = (
+        gen_resp.results[0].request_id.split("_")[0][:12]
+        if gen_resp.results else "queue"
+    )
+    body = {
+        "id": f"cmpl-queue-{group_id}",
+        "object": "text_completion",
+        "created": int(_t.time()),
+        "model": request.model,
+        "choices": choices,
+        "usage": {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        },
+    }
+    metrics.record_completed_request(token_count=0, flop_count=None)
+    return JSONResponse(content=body)
 
 
 @openai_v1_router.post("/chat/completions")
