@@ -66,11 +66,22 @@ async def fill_work_queue(work_queue):
 
         group_request_id = strip_request_id(item_path)
 
-        # Skip if already processed
+        # Skip if already processed. Acking the duplicate is important:
+        # `work_queue.get()` popped it in `unack` state, and without an
+        # ack it stays checked out in SQLiteAckQueue forever. Duplicates
+        # accumulate → the queue's internal counters drift → `len()`
+        # eventually returns a negative number ("__len__() should return
+        # >= 0") and the emit-metrics path starts failing.
         response_path = group_request_id_to_response_path(group_request_id)
 
         if os.path.exists(response_path):
             logger.debug(f"Skipping already processed request {group_request_id}")
+            try:
+                await work_queue.ack(id)
+            except Exception as e:
+                logger.debug(
+                    f"Failed to ack duplicate request {group_request_id}: {e}"
+                )
             continue
 
         async with acquire_file_lock(item_path):

@@ -48,12 +48,21 @@ class Metrics:
 
         self.queue_depth += 1
 
-    def get_all_metrics(self):
+    def get_all_metrics(self, queue_depth_override=None):
         """
         Get the current metrics.
+
+        When `queue_depth_override` is not None, it replaces the in-memory
+        counter in the returned payload. Callers should pass the actual
+        SQLiteAckQueue length so the UI shows ground truth rather than
+        the running estimate (which drifts upward on any error path that
+        skips finish_work — see the route handler for the full story).
         """
+        queue_depth = (
+            queue_depth_override if queue_depth_override is not None else self.queue_depth
+        )
         return {
-            "queue_depth": self.queue_depth,
+            "queue_depth": queue_depth,
             "requests": self.total_completed_requests,
             "tokens": self.total_completed_tokens,
             "total_time": self.total_completed_response_time,
