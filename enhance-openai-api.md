@@ -164,6 +164,31 @@ returns the entire batch in one `JSONResponse.content` load;
 re-reads the response file once per prompt. Not a property of the cache
 layer, a property of the scalarlm response-polling loop.
 
+## Phase 31b — conditional `--enable-lora`
+
+scalarlm has been passing `--enable-lora` to vLLM unconditionally. The flag
+makes vLLM wrap every layer in a LoRA-aware shim so adapters can be
+hot-loaded at runtime. For pods that never load adapters (the common
+inference case), that wrapping is pure overhead: an extra indirection on
+every forward pass, plus a larger attack surface for vLLM-fork bugs. In
+particular, on the current `scalarlm-on-v0.19.0` HEAD the LoRA wrapper
+for fused-MoE layers tries to call `TorchAllocator.set()` on an interface
+that now only exposes `get()`, and every MoE inference crashes at engine
+init. Dense models (e.g. Qwen3-32B) don't trigger it, MoE models
+(Qwen3-Next-80B-A3B) do.
+
+This commit makes `--enable-lora` conditional on `config["enable_lora"]`
+(default `True` for back-compat, opt out via `SCALARLM_ENABLE_LORA=false`).
+Benefit matrix:
+
+| deployment | `enable_lora` | effect |
+|---|---|---|
+| Training/eval pod (loads adapters) | `true` (default) | unchanged — adapters work |
+| Pure-inference pod (no adapters) | `false` | sidesteps the LoRA wrapper; fixes the MoE bug above; modest per-forward-pass perf win |
+
+Setting `enable_lora=false` **disables** `/v1/load_lora_adapter` at
+runtime. Pods that need dynamic adapter swap must leave the default on.
+
 ## Phase 31 — route bulk array `/v1/completions` through the queue worker
 
 At N ≥ 100 distinct prompts, the direct-proxy path lags `/v1/generate` by

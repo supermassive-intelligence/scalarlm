@@ -52,6 +52,18 @@ class Config(BaseModel):
     dtype: str = "auto"
     limit_mm_per_prompt:str = '{"image":2}'
 
+    # Whether to pass --enable-lora to vLLM on startup. When true (default),
+    # every layer in the model is wrapped in a LoRA-aware shim so adapters
+    # can be hot-loaded. That wrapping has cost on every forward pass even
+    # with no adapter loaded, and on some vLLM-fork builds the MoE LoRA
+    # wrapper has outright bugs (e.g. the TorchAllocator.set interface drift
+    # on scalarlm-on-v0.19.0 HEAD). Deployments that know they won't use
+    # LoRA/tokenformer adapters should set SCALARLM_ENABLE_LORA=false to
+    # skip the wrapping entirely. Dynamic adapter loading via
+    # /v1/load_lora_adapter won't be available in that mode — fine for
+    # pure-inference pods, not fine for training-eval pods.
+    enable_lora: bool = True
+
     max_log_length: int = 100
 
     server_list: str = "all"
