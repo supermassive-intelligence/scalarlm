@@ -65,7 +65,11 @@ ls -la "$DEST_DIR" | head -5
 # so source it from SCRIPT_DIR directly rather than a vllm_patches/ subdir.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PATCHER="${SCRIPT_DIR}/apply_patches.py"
-if [ -x "${PATCHER}" ]; then
+# We invoke the patcher via `python3 ${PATCHER}`, so it doesn't need the
+# exec bit — check for readability instead so a file missing +x (e.g.
+# after some cp/rsync that didn't preserve mode) doesn't silently skip
+# patch application.
+if [ -f "${PATCHER}" ] && [ -r "${PATCHER}" ]; then
     echo "🩹 Applying ScalarLM vLLM-fork patches"
     python3 "${PATCHER}" "${DEST_DIR}"
 else

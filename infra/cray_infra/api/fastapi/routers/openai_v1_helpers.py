@@ -12,13 +12,28 @@ import hashlib
 import json
 import logging
 import os
+import tempfile
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+
+def _parse_env_bool(name: str, default: bool = False) -> bool:
+    """Robust boolean parse for scalarlm env flags. Accepts common forms
+    (``1`` / ``true`` / ``yes`` / ``on`` — case-insensitive). Anything
+    else, or unset, returns ``default``. Prevents the ``bool(int(...))``
+    pattern from crashing module import when a user sets
+    ``SCALARLM_OPENAI_CACHE=true``.
+    """
+    v = os.environ.get(name)
+    if v is None:
+        return default
+    return v.strip().lower() in ("1", "true", "yes", "on")
+
+
 # --- Phase 30: response cache ---------------------------------------------
 
-_OPENAI_CACHE_ENABLED = bool(int(os.environ.get("SCALARLM_OPENAI_CACHE", "0") or 0))
+_OPENAI_CACHE_ENABLED = _parse_env_bool("SCALARLM_OPENAI_CACHE")
 _OPENAI_CACHE_KEYS = (
     "model", "prompt", "messages", "max_tokens", "temperature",
     "top_p", "stop", "n", "tools", "tool_choice",
@@ -27,6 +42,24 @@ _OPENAI_CACHE_KEYS = (
 # --- Phase 31: bulk queue-route fast-path ---------------------------------
 
 _QUEUE_ROUTE_THRESHOLD = int(os.environ.get("SCALARLM_QUEUE_ROUTE_THRESHOLD", "0") or 0)
+
+# Fields that the queue-route translation does NOT forward to the worker.
+# If any of these is set to a non-default value on a bulk request, keep
+# the request on the direct proxy path instead of silently dropping them.
+# Map of field name → default value that we treat as "unset".
+_QUEUE_ROUTE_UNSUPPORTED = {
+    "top_p": None,
+    "stop": None,
+    "seed": None,
+    "presence_penalty": 0.0,
+    "frequency_penalty": 0.0,
+    "response_format": None,
+    "logprobs": None,
+    "logit_bias": None,
+    "suffix": None,
+    "echo": False,
+    "best_of": None,
+}
 
 
 def _cache_dir(config: dict) -> str:
@@ -85,14 +118,30 @@ def _cache_store(params: dict, body: dict, config: dict) -> None:
         return
     if not isinstance(body, dict) or "choices" not in body:
         return
-    path = os.path.join(_cache_dir(config), _cache_key(params) + ".json")
-    tmp = path + ".tmp"
+    key = _cache_key(params)
+    cache_dir = _cache_dir(config)
+    path = os.path.join(cache_dir, key + ".json")
+    # Unique tmp path so two concurrent writers of the same key don't
+    # clobber each other's tmp file and leave a half-written .json on
+    # the rename. mkstemp creates the file atomically with a unique
+    # suffix; we os.fdopen its fd so we never open() a path twice.
     try:
-        with open(tmp, "w") as fh:
+        fd, tmp = tempfile.mkstemp(
+            prefix=key + ".", suffix=".json.tmp", dir=cache_dir,
+        )
+    except OSError:
+        logger.exception("openai cache store mkstemp failed under %s", cache_dir)
+        return
+    try:
+        with os.fdopen(fd, "w") as fh:
             json.dump(body, fh)
         os.replace(tmp, path)
     except OSError:
         logger.exception("openai cache store failed at %s", path)
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
 
 
 def _should_route_via_queue_fast(request) -> bool:
@@ -103,7 +152,21 @@ def _should_route_via_queue_fast(request) -> bool:
     prompt = getattr(request, "prompt", None)
     if not isinstance(prompt, list) or len(prompt) < _QUEUE_ROUTE_THRESHOLD:
         return False
-    return all(isinstance(p, str) for p in prompt)
+    if not all(isinstance(p, str) for p in prompt):
+        return False
+    # The queue-route translation only forwards model / prompts /
+    # max_tokens / temperature / tools / tool_choice to the worker.
+    # If the caller set any other OpenAI completion param, keep the
+    # request on the direct proxy so the param actually takes effect.
+    for field, default in _QUEUE_ROUTE_UNSUPPORTED.items():
+        if getattr(request, field, default) != default:
+            return False
+    # n defaults to 1 for /v1/completions; reject n > 1 because the
+    # queue worker only returns one completion per prompt.
+    n = getattr(request, "n", 1)
+    if n is not None and n != 1:
+        return False
+    return True
 
 
 # --- Router-level pure helpers (kept here for unit-testability) -----------

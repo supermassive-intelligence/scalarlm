@@ -87,15 +87,43 @@ async def _route_via_scalarlm_queue(request, config: dict) -> JSONResponse:
     )
     gen_resp = await _scalarlm_generate(gen_req)
 
+    # Per-item errors bubble up as a 500 with an OpenAI-shaped body.
+    # scalarlm's /v1/generate supports partial success; /v1/completions
+    # does not (the OpenAI `finish_reason` enum has no "error" value,
+    # so clients would fail validation on a mixed-success batch).
+    # Fail the whole request instead.
+    failed = [(i, r.error) for i, r in enumerate(gen_resp.results) if r.error]
+    if failed:
+        first_i, first_err = failed[0]
+        metrics.record_completed_request(token_count=0, flop_count=None)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": {
+                    "message": (
+                        f"inference failed for prompt index {first_i}: "
+                        f"{first_err}" + (
+                            f" (and {len(failed) - 1} other prompt(s))"
+                            if len(failed) > 1 else ""
+                        )
+                    ),
+                    "type": "server_error",
+                    "param": None,
+                    "code": None,
+                }
+            },
+        )
+
     import time as _t
-    choices = []
-    for i, r in enumerate(gen_resp.results):
-        choices.append({
+    choices = [
+        {
             "index": i,
             "text": r.response or "",
-            "finish_reason": "stop" if r.error is None else "error",
+            "finish_reason": "stop",
             "logprobs": None,
-        })
+        }
+        for i, r in enumerate(gen_resp.results)
+    ]
     group_id = (
         gen_resp.results[0].request_id.split("_")[0][:12]
         if gen_resp.results else "queue"

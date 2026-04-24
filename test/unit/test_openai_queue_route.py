@@ -113,6 +113,64 @@ def test_reject_mixed_list(router_threshold_100):
     assert r._should_route_via_queue_fast(req) is False
 
 
+# ---- reject on params the queue-route translation drops ------------------
+
+
+def test_reject_when_top_p_set(router_threshold_100):
+    r = router_threshold_100
+    assert r._should_route_via_queue_fast(_req(top_p=0.9)) is False
+
+
+def test_reject_when_stop_set(router_threshold_100):
+    r = router_threshold_100
+    assert r._should_route_via_queue_fast(_req(stop=["<|end|>"])) is False
+
+
+def test_reject_when_seed_set(router_threshold_100):
+    r = router_threshold_100
+    assert r._should_route_via_queue_fast(_req(seed=42)) is False
+
+
+def test_reject_when_presence_penalty_nonzero(router_threshold_100):
+    r = router_threshold_100
+    assert r._should_route_via_queue_fast(_req(presence_penalty=0.5)) is False
+
+
+def test_reject_when_frequency_penalty_nonzero(router_threshold_100):
+    r = router_threshold_100
+    assert r._should_route_via_queue_fast(_req(frequency_penalty=0.5)) is False
+
+
+def test_accept_when_penalties_at_default(router_threshold_100):
+    """Default 0.0 penalties must not trigger a rejection — that's the
+    pydantic default, not a user-set value."""
+    r = router_threshold_100
+    assert (
+        r._should_route_via_queue_fast(
+            _req(presence_penalty=0.0, frequency_penalty=0.0)
+        ) is True
+    )
+
+
+def test_reject_when_response_format_set(router_threshold_100):
+    r = router_threshold_100
+    assert (
+        r._should_route_via_queue_fast(
+            _req(response_format={"type": "json_object"})
+        ) is False
+    )
+
+
+def test_reject_when_n_greater_than_1(router_threshold_100):
+    r = router_threshold_100
+    assert r._should_route_via_queue_fast(_req(n=3)) is False
+
+
+def test_accept_when_n_is_1(router_threshold_100):
+    r = router_threshold_100
+    assert r._should_route_via_queue_fast(_req(n=1)) is True
+
+
 # ---- Cache Key Consistency: _cache_key_from_request vs _cache_key(params) --
 
 

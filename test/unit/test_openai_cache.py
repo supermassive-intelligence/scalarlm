@@ -178,6 +178,34 @@ def test_cache_store_no_op_when_disabled(router_cache_disabled, tmp_path):
     assert not cache_dir.exists() or not any(cache_dir.iterdir())
 
 
+# ---- _parse_env_bool robust env parsing ----------------------------------
+
+
+@pytest.mark.parametrize("val,expected", [
+    ("1", True), ("true", True), ("True", True), ("TRUE", True),
+    ("yes", True), ("YES", True), ("on", True), ("ON", True),
+    ("  true  ", True),  # surrounding whitespace tolerated
+    ("0", False), ("false", False), ("no", False), ("off", False),
+    ("", False), ("garbage", False), ("2", False),
+])
+def test_parse_env_bool_accepts_common_forms(val, expected, monkeypatch):
+    """The old ``bool(int(os.environ.get(...)))`` pattern crashed on
+    SCALARLM_OPENAI_CACHE=true (ValueError from int("true")). The
+    robust parser accepts any common boolean form and falls back to
+    default on anything else, matching how most config libraries handle
+    env-var booleans."""
+    monkeypatch.setenv("_TEST_ENV_BOOL", val)
+    from cray_infra.api.fastapi.routers import openai_v1_helpers as r
+    assert r._parse_env_bool("_TEST_ENV_BOOL") is expected
+
+
+def test_parse_env_bool_unset_uses_default(monkeypatch):
+    monkeypatch.delenv("_TEST_ENV_BOOL", raising=False)
+    from cray_infra.api.fastapi.routers import openai_v1_helpers as r
+    assert r._parse_env_bool("_TEST_ENV_BOOL") is False
+    assert r._parse_env_bool("_TEST_ENV_BOOL", default=True) is True
+
+
 # ---- _cache_key_from_request consistency ---------------------------------
 
 
