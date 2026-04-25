@@ -24,6 +24,7 @@ import { useAlias } from "@/stores/useAliases";
 import { ConfigPanel } from "./ConfigPanel";
 import { DatasetPanel } from "./DatasetPanel";
 import { LogPane } from "./LogPane";
+import { PublishToHFModal } from "./PublishToHFModal";
 
 export function TrainDetail() {
   const { jobHash = "" } = useParams<{ jobHash: string }>();
@@ -33,6 +34,7 @@ export function TrainDetail() {
   const del = useDeleteJob();
   const [askCancel, setAskCancel] = useState(false);
   const [askDelete, setAskDelete] = useState(false);
+  const [publishOpen, setPublishOpen] = useState(false);
   const alias = useAlias(jobHash);
   const [editingAlias, setEditingAlias] = useState(false);
   const [aliasDraft, setAliasDraft] = useState("");
@@ -200,6 +202,19 @@ export function TrainDetail() {
                 )}
                 <button
                   type="button"
+                  onClick={() => setPublishOpen(true)}
+                  disabled={status !== "COMPLETED"}
+                  title={
+                    status === "COMPLETED"
+                      ? "Publish this checkpoint to a HuggingFace repo"
+                      : `Publish is enabled once the job is COMPLETED (current: ${status}).`
+                  }
+                  className="rounded-md border border-border-subtle bg-bg-card px-3 py-1.5 text-sm text-fg hover:border-border hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Publish to HF
+                </button>
+                <button
+                  type="button"
                   onClick={() => setAskCancel(true)}
                   disabled={!cancellable || cancel.isPending}
                   className="rounded-md border border-border-subtle bg-bg-card px-3 py-1.5 text-sm text-fg hover:border-border hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-40"
@@ -246,6 +261,12 @@ export function TrainDetail() {
           </>
         ) : null}
       </div>
+
+      <PublishToHFModal
+        open={publishOpen}
+        jobHash={jobHash}
+        onClose={() => setPublishOpen(false)}
+      />
 
       <ConfirmDestructive
         open={askCancel}
