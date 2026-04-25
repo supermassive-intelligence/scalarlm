@@ -22,7 +22,7 @@ export function Sparkline({
   values,
   width = 320,
   height = 48,
-  strokeWidth = 1.5,
+  strokeWidth = 2,
   colorClass = "text-accent",
   label,
 }: SparklineProps) {
@@ -49,12 +49,18 @@ export function Sparkline({
       role="img"
     >
       {paths.map((d, i) => (
+        // `vectorEffect="non-scaling-stroke"` makes strokeWidth a literal
+        // pixel measurement regardless of the viewBox scaling. The earlier
+        // version divided strokeWidth by `min(width, height)` thinking it
+        // was normalizing into the [0,1] viewBox — but with the
+        // non-scaling-stroke effect that division gives ~0.03 screen
+        // pixels, i.e. an invisible hairline. Pass the raw px value.
         <path
           key={i}
           d={d}
           fill="none"
           stroke="currentColor"
-          strokeWidth={strokeWidth / Math.min(width, height)}
+          strokeWidth={strokeWidth}
           strokeLinecap="round"
           strokeLinejoin="round"
           vectorEffect="non-scaling-stroke"
