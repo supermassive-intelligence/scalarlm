@@ -29,6 +29,9 @@ export function DatasetPanel({ jobHash }: DatasetPanelProps) {
   const [searchInput, setSearchInput] = useState("");
   const [q, setQ] = useState("");
   const [offset, setOffset] = useState(0);
+  // Index into the current page's `examples` array (not the global
+  // dataset row index). null = no row open.
+  const [selectedRow, setSelectedRow] = useState<number | null>(null);
 
   // Debounce the search input and reset paging when the query changes.
   useEffect(() => {
@@ -147,7 +150,7 @@ export function DatasetPanel({ jobHash }: DatasetPanelProps) {
             role="list"
             className="flex max-h-[480px] flex-col divide-y divide-border-subtle overflow-y-auto rounded-md border border-border-subtle"
           >
-            {examples.map((ex) => (
+            {examples.map((ex, i) => (
               <ExampleRow
                 key={ex.index}
                 index={ex.index}
@@ -155,9 +158,20 @@ export function DatasetPanel({ jobHash }: DatasetPanelProps) {
                 output={ex.output}
                 raw={ex.raw}
                 truncatedFields={ex.truncated_fields}
+                onOpen={() => setSelectedRow(i)}
               />
             ))}
           </ul>
+          {selectedRow !== null && examples[selectedRow] && (
+            <DatasetExampleModal
+              example={examples[selectedRow]}
+              hasPrev={selectedRow > 0}
+              hasNext={selectedRow < examples.length - 1}
+              onPrev={() => setSelectedRow((r) => (r === null ? r : r - 1))}
+              onNext={() => setSelectedRow((r) => (r === null ? r : r + 1))}
+              onClose={() => setSelectedRow(null)}
+            />
+          )}
           <div className="mt-3 flex items-center justify-between text-xs text-fg-muted">
             <span>
               Showing {pageStart.toLocaleString()}–
@@ -200,6 +214,7 @@ interface ExampleRowProps {
   output?: string;
   raw: Record<string, unknown>;
   truncatedFields?: string[];
+  onOpen: () => void;
 }
 
 function ExampleRow({
@@ -208,9 +223,8 @@ function ExampleRow({
   output,
   raw,
   truncatedFields,
+  onOpen,
 }: ExampleRowProps) {
-  const [expanded, setExpanded] = useState(false);
-
   // If neither `input` nor `output` is present, fall back to dumping raw JSON
   // so datasets with unusual schemas still render something.
   const hasCanonical =
@@ -224,49 +238,43 @@ function ExampleRow({
     }
   }, [raw]);
 
-  const hasExtraFields = useMemo(() => {
-    const keys = Object.keys(raw);
-    return keys.some((k) => k !== "input" && k !== "output");
-  }, [raw]);
-
   return (
-    <li role="listitem" className="px-3 py-2">
-      <div className="flex gap-3">
-        <span className="shrink-0 font-mono text-[11px] text-fg-subtle">
-          #{index}
-        </span>
-        <div className="min-w-0 flex-1">
-          {hasCanonical ? (
-            <div className="grid grid-cols-1 gap-2 text-sm md:grid-cols-2">
-              <Cell label="input" value={input} expanded={expanded} />
-              <Cell label="output" value={output} expanded={expanded} />
-            </div>
-          ) : (
-            <pre className="whitespace-pre-wrap break-words font-mono text-xs text-fg">
-              {rawPreview}
-            </pre>
-          )}
-          {truncatedFields && truncatedFields.length > 0 && (
-            <p className="mt-1 text-[11px] text-warning">
-              Truncated at 4 KiB: {truncatedFields.join(", ")}
-            </p>
-          )}
-          {hasCanonical && (hasExtraFields || expanded) && (
-            <button
-              type="button"
-              onClick={() => setExpanded((v) => !v)}
-              className="mt-1 text-[11px] text-fg-subtle hover:text-fg"
-            >
-              {expanded ? "hide raw" : "show raw"}
-            </button>
-          )}
-          {hasCanonical && expanded && (
-            <pre className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md bg-bg px-2 py-1 font-mono text-[11px] text-fg-muted">
-              {rawPreview}
-            </pre>
-          )}
+    <li
+      role="listitem"
+      // Whole row is the click target — full content lives in the modal,
+      // not inline. Keep <button> semantics for keyboard reachability
+      // (Enter/Space) and a visible focus ring.
+      className="cursor-pointer transition-colors hover:bg-bg-hover/60 focus-within:bg-bg-hover/60"
+    >
+      <button
+        type="button"
+        onClick={onOpen}
+        className="block w-full px-3 py-2 text-left focus:outline-none"
+        aria-label={`Open dataset row ${index}`}
+      >
+        <div className="flex gap-3">
+          <span className="shrink-0 font-mono text-[11px] text-fg-subtle">
+            #{index}
+          </span>
+          <div className="min-w-0 flex-1">
+            {hasCanonical ? (
+              <div className="grid grid-cols-1 gap-2 text-sm md:grid-cols-2">
+                <Cell label="input" value={input} />
+                <Cell label="output" value={output} />
+              </div>
+            ) : (
+              <pre className="line-clamp-3 whitespace-pre-wrap break-words font-mono text-xs text-fg">
+                {rawPreview}
+              </pre>
+            )}
+            {truncatedFields && truncatedFields.length > 0 && (
+              <p className="mt-1 text-[11px] text-warning">
+                Truncated at 4 KiB: {truncatedFields.join(", ")}
+              </p>
+            )}
+          </div>
         </div>
-      </div>
+      </button>
     </li>
   );
 }
@@ -274,22 +282,15 @@ function ExampleRow({
 interface CellProps {
   label: string;
   value: string | undefined;
-  expanded: boolean;
 }
 
-function Cell({ label, value, expanded }: CellProps) {
+function Cell({ label, value }: CellProps) {
   return (
     <div className="min-w-0">
       <div className="text-[10px] uppercase tracking-wider text-fg-subtle">
         {label}
       </div>
-      <div
-        className={
-          expanded
-            ? "whitespace-pre-wrap break-words font-mono text-xs text-fg"
-            : "line-clamp-3 whitespace-pre-wrap break-words font-mono text-xs text-fg"
-        }
-      >
+      <div className="line-clamp-3 whitespace-pre-wrap break-words font-mono text-xs text-fg">
         {value ?? <span className="text-fg-subtle">—</span>}
       </div>
     </div>
@@ -312,5 +313,167 @@ function EmptyNotice({ title, body }: { title: string; body: string }) {
       <p className="text-sm font-medium text-fg">{title}</p>
       <p className="mt-1 text-xs text-fg-muted">{body}</p>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Detail modal — full input/output for one dataset row, with prev/next
+// keyboard nav across rows on the current page.
+// ---------------------------------------------------------------------------
+
+interface DatasetExample {
+  index: number;
+  input?: string;
+  output?: string;
+  raw: Record<string, unknown>;
+  truncated_fields?: string[];
+}
+
+interface DatasetExampleModalProps {
+  example: DatasetExample;
+  hasPrev: boolean;
+  hasNext: boolean;
+  onPrev: () => void;
+  onNext: () => void;
+  onClose: () => void;
+}
+
+function DatasetExampleModal({
+  example,
+  hasPrev,
+  hasNext,
+  onPrev,
+  onNext,
+  onClose,
+}: DatasetExampleModalProps) {
+  const rawText = useMemo(() => {
+    try {
+      return JSON.stringify(example.raw, null, 2);
+    } catch {
+      return String(example.raw);
+    }
+  }, [example.raw]);
+
+  // Esc closes; ←/→ step through neighbors. Listening on document so
+  // the user doesn't have to focus a specific element first.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onClose();
+      } else if (e.key === "ArrowLeft" && hasPrev) {
+        e.preventDefault();
+        onPrev();
+      } else if (e.key === "ArrowRight" && hasNext) {
+        e.preventDefault();
+        onNext();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose, onPrev, onNext, hasPrev, hasNext]);
+
+  const hasInput = typeof example.input === "string";
+  const hasOutput = typeof example.output === "string";
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Dataset row ${example.index}`}
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+      onClick={onClose}
+    >
+      <div
+        className="flex max-h-[88vh] w-full max-w-4xl flex-col gap-3 rounded-lg border border-border bg-bg-card p-5 shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <header className="flex flex-wrap items-center gap-2 border-b border-border-subtle pb-3">
+          <h3 className="text-sm font-semibold text-fg">
+            Row{" "}
+            <code className="font-mono text-fg-muted">#{example.index}</code>
+          </h3>
+          {example.truncated_fields && example.truncated_fields.length > 0 && (
+            <span className="rounded-md border border-warning/30 bg-warning/5 px-2 py-0.5 text-[11px] text-warning">
+              Truncated at 4 KiB: {example.truncated_fields.join(", ")}
+            </span>
+          )}
+          <div className="ml-auto flex items-center gap-1">
+            <button
+              type="button"
+              onClick={onPrev}
+              disabled={!hasPrev}
+              title="Previous row (←)"
+              className="rounded-md border border-border-subtle bg-bg px-2 py-1 text-xs text-fg-muted hover:border-border hover:text-fg disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              ←
+            </button>
+            <button
+              type="button"
+              onClick={onNext}
+              disabled={!hasNext}
+              title="Next row (→)"
+              className="rounded-md border border-border-subtle bg-bg px-2 py-1 text-xs text-fg-muted hover:border-border hover:text-fg disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              →
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              title="Close (Esc)"
+              className="ml-1 rounded-md border border-border-subtle bg-bg px-2 py-1 text-xs text-fg-muted hover:border-border hover:text-fg"
+            >
+              Close
+            </button>
+          </div>
+        </header>
+
+        <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
+          {hasInput && (
+            <DatasetField
+              label="input"
+              value={example.input}
+            />
+          )}
+          {hasOutput && (
+            <DatasetField
+              label="output"
+              value={example.output}
+            />
+          )}
+          {!hasInput && !hasOutput && (
+            <DatasetField label="row" value={rawText} />
+          )}
+
+          <details className="rounded-md border border-border-subtle bg-bg/50">
+            <summary className="cursor-pointer select-none px-3 py-1.5 text-xs text-fg-muted hover:text-fg">
+              Raw JSON
+            </summary>
+            <pre className="m-0 max-h-[40vh] overflow-auto whitespace-pre-wrap break-all border-t border-border-subtle px-3 py-2 font-mono text-[11px] leading-snug text-fg">
+              {rawText}
+            </pre>
+          </details>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DatasetField({
+  label,
+  value,
+}: {
+  label: string;
+  value: string | undefined;
+}) {
+  return (
+    <section className="flex min-h-0 flex-col">
+      <div className="px-1 pb-1 text-[10px] uppercase tracking-wider text-fg-subtle">
+        {label}
+      </div>
+      <pre className="m-0 max-h-[60vh] overflow-auto whitespace-pre-wrap break-words rounded-md border border-border-subtle bg-bg px-3 py-2 font-mono text-xs text-fg">
+        {value ?? "—"}
+      </pre>
+    </section>
   );
 }
