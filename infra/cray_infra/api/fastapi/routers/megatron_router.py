@@ -23,6 +23,7 @@ from cray_infra.training.launch_publish_job import (
     get_publish_status,
     launch_publish_job,
 )
+from cray_infra.training.publish_logs import publish_logs_generator
 from cray_infra.training.list_checkpoints import list_checkpoints
 from cray_infra.training.list_models import list_models
 from cray_infra.training.squeue import squeue
@@ -112,6 +113,41 @@ async def publish_status(job_hash: str):
 async def publish_cancel(job_hash: str):
     """scancel the in-flight publish job; returns the resulting status."""
     return cancel_publish_job(job_hash)
+
+
+@megatron_router.get("/train/{job_hash}/publish/logs")
+async def publish_logs(
+    job_hash: str,
+    starting_line_number: int = 0,
+    starting_byte_offset: int | None = None,
+    tail: int | None = None,
+    limit: int | None = None,
+    before_byte_offset: int | None = None,
+    before_count: int | None = None,
+):
+    """
+    NDJSON tail of the latest publish job's publish.log. Same wire
+    shape as /v1/health/logs/{service}; the UI reuses the same
+    streamNdjsonLogOnce consumer.
+    """
+    try:
+        return StreamingResponse(
+            content=publish_logs_generator(
+                job_hash,
+                starting_line_number=starting_line_number,
+                starting_byte_offset=starting_byte_offset,
+                tail=tail,
+                limit=limit,
+                before_byte_offset=before_byte_offset,
+                before_count=before_count,
+            ),
+            media_type="text/event-stream",
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(e)
+        return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
 @megatron_router.get("/train/logs/{model_name}")

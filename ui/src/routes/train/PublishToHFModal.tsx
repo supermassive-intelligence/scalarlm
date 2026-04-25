@@ -7,10 +7,12 @@
  * See ui/docs/publish-to-hf.md for the full design.
  */
 
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 
+import type { LogLine } from "@/api/training";
 import {
   isTerminalPhase,
+  tailPublishLog,
   useCancelPublish,
   useCheckpoints,
   usePublishStatus,
@@ -169,6 +171,7 @@ export function PublishToHFModal({
 
         {hasSubmitted ? (
           <PublishProgress
+            jobHash={jobHash}
             status={status.data}
             error={status.error as Error | null}
             cancelPending={cancel.isPending}
@@ -411,6 +414,7 @@ const PHASE_ORDER: PublishPhase[] = [
 ];
 
 interface PublishProgressProps {
+  jobHash: string;
   status: PublishStatus | undefined;
   error: Error | null;
   cancelPending: boolean;
@@ -419,6 +423,7 @@ interface PublishProgressProps {
 }
 
 function PublishProgress({
+  jobHash,
   status,
   error,
   cancelPending,
@@ -512,6 +517,8 @@ function PublishProgress({
         </p>
       )}
 
+      <PublishLogTail jobHash={jobHash} forceOpen={isError} />
+
       <footer className="flex justify-end gap-2 pt-1">
         {inFlight && (
           <button
@@ -535,6 +542,73 @@ function PublishProgress({
         )}
       </footer>
     </div>
+  );
+}
+
+/**
+ * Live tail of the publish job's publish.log. Collapsed by default;
+ * the modal opens it automatically on phase=error so the user lands
+ * on the actual stderr without an extra click.
+ */
+function PublishLogTail({
+  jobHash,
+  forceOpen,
+}: {
+  jobHash: string;
+  forceOpen: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [lines, setLines] = useState<LogLine[]>([]);
+  const scrollRef = useRef<HTMLPreElement>(null);
+  // Auto-open on error.
+  useEffect(() => {
+    if (forceOpen) setOpen(true);
+  }, [forceOpen]);
+
+  useEffect(() => {
+    if (!open) return;
+    const controller = new AbortController();
+    setLines([]);
+    void tailPublishLog({
+      jobHash,
+      signal: controller.signal,
+      onLine: (ln) =>
+        setLines((prev) => {
+          const next =
+            prev.length >= 4_000 ? prev.slice(prev.length - 4_000 + 1) : prev.slice();
+          next.push(ln);
+          return next;
+        }),
+    });
+    return () => controller.abort();
+  }, [jobHash, open]);
+
+  // Auto-scroll to bottom as new lines arrive.
+  useEffect(() => {
+    if (!open) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, [lines, open]);
+
+  return (
+    <details
+      open={open}
+      onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}
+      className="rounded-md border border-border-subtle bg-bg/50"
+    >
+      <summary className="cursor-pointer select-none px-3 py-1.5 text-xs text-fg-muted hover:text-fg">
+        publish.log{lines.length > 0 ? ` (${lines.length} lines)` : ""}
+      </summary>
+      <pre
+        ref={scrollRef}
+        className="m-0 max-h-64 overflow-auto whitespace-pre-wrap break-all border-t border-border-subtle px-2 py-1 font-mono text-[11px] leading-snug text-fg"
+      >
+        {lines.length === 0
+          ? "Waiting for log output…"
+          : lines.map((l) => l.line).join("\n")}
+      </pre>
+    </details>
   );
 }
 

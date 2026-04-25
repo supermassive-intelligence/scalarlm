@@ -14,6 +14,8 @@ import {
 } from "@tanstack/react-query";
 
 import { apiFetch } from "./client";
+import { getApiConfig } from "./config";
+import { streamNdjsonLogOnce, type LogLine } from "./training";
 
 export interface CheckpointEntry {
   name: string;
@@ -148,6 +150,70 @@ export function usePublishStatus(
       if ((err as { status?: number })?.status === 404) return false;
       return count < 3;
     },
+  });
+}
+
+/**
+ * Tail the latest publish job's publish.log via the same NDJSON
+ * stream protocol as service logs (`tail=N`, then byte-offset
+ * resume). Reuses `streamNdjsonLogOnce` for the actual parsing so
+ * we don't duplicate the per-line logic.
+ */
+export async function tailPublishLog({
+  jobHash,
+  signal,
+  onLine,
+  initialTail = 200,
+  reopenDelayMs = 1500,
+}: {
+  jobHash: string;
+  signal: AbortSignal;
+  onLine: (line: LogLine) => void;
+  initialTail?: number;
+  reopenDelayMs?: number;
+}): Promise<void> {
+  const { api_base } = getApiConfig();
+
+  let nextOffset: number | null = null;
+  let firstPass = true;
+
+  while (!signal.aborted) {
+    try {
+      const params = new URLSearchParams();
+      if (firstPass && initialTail > 0) {
+        params.set("tail", String(initialTail));
+      } else if (nextOffset !== null) {
+        params.set("starting_byte_offset", String(nextOffset));
+      }
+      const url =
+        `${api_base}/megatron/train/${encodeURIComponent(jobHash)}/publish/logs` +
+        `?${params}`;
+      await streamNdjsonLogOnce(url, 0, signal, (ln) => {
+        if (typeof ln.next_offset === "number") nextOffset = ln.next_offset;
+        onLine(ln);
+      });
+      firstPass = false;
+    } catch (err) {
+      if (signal.aborted || (err as { name?: string }).name === "AbortError")
+        break;
+      // Most common: 404 because the publish.log hasn't been created yet
+      // (SLURM hasn't started the job). Quietly retry after the delay.
+    }
+    await sleep(reopenDelayMs, signal);
+  }
+}
+
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const t = setTimeout(resolve, ms);
+    signal.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(t);
+        resolve();
+      },
+      { once: true },
+    );
   });
 }
 
