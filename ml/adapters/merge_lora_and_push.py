@@ -246,6 +246,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Override the dtype used for the merged model. Defaults to the base model's native dtype.",
     )
     p.add_argument(
+        "--mode",
+        default="merged",
+        choices=("merged", "adapter"),
+        help=(
+            "What to publish. `merged` (default) folds the LoRA into the "
+            "base model and uploads a self-contained model repo. "
+            "`adapter` exports a PEFT-format adapter repo "
+            "(adapter_config.json + adapter_model.safetensors) — small, "
+            "loadable via `PeftModel.from_pretrained(base, repo)`. "
+            "(Adapter mode is wired in a follow-up commit.)"
+        ),
+    )
+    p.add_argument(
+        "--status-file",
+        type=Path,
+        default=None,
+        help=(
+            "Optional JSON file the script writes phase markers into "
+            "while running. Used by the publish-SLURM-job orchestrator "
+            "(see launch_publish_job.py) to drive the UI's progress view."
+        ),
+    )
+    p.add_argument(
         "--log-level",
         default="INFO",
         help="Python logging level (DEBUG, INFO, WARNING, ERROR).",
@@ -260,17 +283,38 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
+    status_writer = _StatusWriter(args.status_file, mode=args.mode)
+    status_writer.update(phase="validating", started_at=_now())
+
+    if args.mode == "adapter":
+        # Adapter-mode export wires up in a follow-up commit (see
+        # ui/docs/publish-to-hf.md §Phased rollout). Fail loudly so the
+        # SLURM job leaves a clear error in status.json instead of
+        # silently treating it as merged.
+        status_writer.update(
+            phase="error",
+            error=(
+                "--mode adapter is not yet implemented; use --mode merged "
+                "or wait for the next release."
+            ),
+            completed_at=_now(),
+        )
+        logger.error("--mode adapter is not yet implemented.")
+        return 2
+
     job_dir = args.job_dir.resolve()
     if not job_dir.is_dir():
-        logger.error("Job directory does not exist: %s", job_dir)
+        msg = f"Job directory does not exist: {job_dir}"
+        status_writer.update(phase="error", error=msg, completed_at=_now())
+        logger.error(msg)
         return 2
 
     job_config = load_job_config(job_dir)
     base_model_name = job_config.get("llm_name") or job_config.get("model")
     if not base_model_name:
-        logger.error(
-            "Job config at %s/config.yaml has no llm_name/model field.", job_dir
-        )
+        msg = f"Job config at {job_dir}/config.yaml has no llm_name/model field."
+        status_writer.update(phase="error", error=msg, completed_at=_now())
+        logger.error(msg)
         return 2
 
     checkpoint_path = args.checkpoint or find_latest_checkpoint(job_dir)
@@ -328,6 +372,7 @@ def main(argv: list[str] | None = None) -> int:
 
     torch_dtype = _resolve_dtype(args.dtype)
 
+    status_writer.update(phase="loading_base", base_model=base_model_name)
     logger.info("Materializing base model: %s", base_model_name)
     base = AutoModelForCausalLM.from_pretrained(
         base_model_name,
@@ -344,6 +389,7 @@ def main(argv: list[str] | None = None) -> int:
         _apply_base_overrides(base, buckets["base"])
 
     # 2) Wrap with PEFT, load the LoRA weights, merge.
+    status_writer.update(phase="merging")
     peft_model = get_peft_model(base, lora_config)
     load_result = peft_model.load_state_dict(buckets["lora"], strict=False)
     if load_result.unexpected_keys:
@@ -360,6 +406,7 @@ def main(argv: list[str] | None = None) -> int:
     merged = peft_model.merge_and_unload()
 
     # Save tokenizer + merged model.
+    status_writer.update(phase="saving")
     output_dir = args.output_dir
     cleanup_tmp = False
     if output_dir is None:
@@ -373,6 +420,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.dry_run:
         logger.info("Dry run — skipping upload. Merged model is at %s", output_dir)
+        status_writer.update(phase="done", completed_at=_now(), repo_url=None)
         return 0
 
     token = (
@@ -383,7 +431,25 @@ def main(argv: list[str] | None = None) -> int:
     commit_message = args.commit_message or _default_commit_message(
         job_dir, checkpoint_path, lora_kwargs
     )
-    _push(output_dir, args.repo_id, token, args.private, commit_message)
+    status_writer.update(phase="uploading", repo_id=args.repo_id)
+    try:
+        _push(output_dir, args.repo_id, token, args.private, commit_message)
+    except Exception as e:
+        status_writer.update(
+            phase="error",
+            error=f"upload failed: {e}",
+            completed_at=_now(),
+        )
+        if cleanup_tmp:
+            import shutil
+            shutil.rmtree(output_dir, ignore_errors=True)
+        raise
+
+    status_writer.update(
+        phase="done",
+        completed_at=_now(),
+        repo_url=f"https://huggingface.co/{args.repo_id}",
+    )
 
     if cleanup_tmp:
         import shutil
@@ -399,6 +465,46 @@ def _resolve_dtype(name: str | None):
         "bfloat16": torch.bfloat16,
         "float32": torch.float32,
     }[name]
+
+
+def _now() -> float:
+    import time
+    return time.time()
+
+
+class _StatusWriter:
+    """
+    Append-only phase tracker for the publish flow.
+
+    `update(**fields)` merges into the on-disk JSON and rewrites
+    atomically. `mode` and `started_at` are written once on first use.
+    When `path` is None this is a no-op (CLI used standalone, not under
+    SLURM orchestration).
+
+    The file is the contract between the merge job and
+    `GET /v1/megatron/train/{hash}/publish/status` — see
+    ui/docs/publish-to-hf.md for the schema.
+    """
+
+    def __init__(self, path: Path | None, mode: str):
+        self.path = path
+        self._state = {"mode": mode, "phase": "queued"}
+
+    def update(self, **fields) -> None:
+        if self.path is None:
+            return
+        self._state.update(fields)
+        # Atomic write: dump to a sibling tempfile, then rename. Avoids
+        # the API pod reading a half-written file mid-update.
+        import json
+        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with tmp.open("w") as f:
+                json.dump(self._state, f)
+            os.replace(tmp, self.path)
+        except OSError as e:
+            logger.warning("Failed to write status file %s: %s", self.path, e)
 
 
 def _apply_base_overrides(base, overrides: dict[str, torch.Tensor]) -> None:

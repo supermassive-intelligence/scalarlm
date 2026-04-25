@@ -1,3 +1,6 @@
+from cray_infra.api.fastapi.routers.request_types.publish_request import (
+    PublishRequest,
+)
 from cray_infra.api.fastapi.routers.request_types.train_request import (
     TrainResponse,
 )
@@ -15,6 +18,10 @@ from cray_infra.training.upload_training_data import upload_training_data
 from cray_infra.training.training_logs_generator import training_logs_generator
 from cray_infra.training.get_training_job_info import get_training_job_info
 from cray_infra.training.get_dataset_slice import get_dataset_slice
+from cray_infra.training.launch_publish_job import (
+    get_publish_status,
+    launch_publish_job,
+)
 from cray_infra.training.list_checkpoints import list_checkpoints
 from cray_infra.training.list_models import list_models
 from cray_infra.training.squeue import squeue
@@ -74,6 +81,30 @@ async def job_dataset(
 @megatron_router.get("/train/{job_hash}/checkpoints")
 async def job_checkpoints(job_hash: str):
     return list_checkpoints(job_hash)
+
+
+@megatron_router.post("/train/{job_hash}/publish")
+async def submit_publish_job(job_hash: str, request: PublishRequest):
+    """
+    Submit a publish-to-HF SLURM job. Returns immediately with the
+    publish_job_id; the UI polls /publish/status for progress.
+    """
+    return launch_publish_job(
+        job_hash,
+        mode=request.mode,
+        repo_id=request.repo_id,
+        private=request.private,
+        hf_token=request.hf_token,
+        checkpoint=request.checkpoint,
+        lora_alpha=request.lora_alpha,
+        commit_message=request.commit_message,
+    )
+
+
+@megatron_router.get("/train/{job_hash}/publish/status")
+async def publish_status(job_hash: str):
+    """Latest publish status.json for this training job."""
+    return get_publish_status(job_hash)
 
 
 @megatron_router.get("/train/logs/{model_name}")

@@ -19,6 +19,7 @@ class Config(BaseModel):
     max_upload_file_size: int = 1024 * 1024 * 1024 * 10
 
     train_job_entrypoint: str = "/app/cray/scripts/train_job_entrypoint.sh"
+    publish_job_entrypoint: str = "/app/cray/scripts/publish_job_entrypoint.sh"
     training_job_directory: str = "/app/cray/jobs"
 
     log_directory: str = "/app/cray/nfs/logs"
