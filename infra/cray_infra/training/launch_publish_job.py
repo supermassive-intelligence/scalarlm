@@ -351,3 +351,39 @@ def get_publish_status(job_hash: str) -> dict:
     raise HTTPException(
         status_code=404, detail="no publish has been submitted for this job"
     )
+
+
+def cancel_publish_job(job_hash: str) -> dict:
+    """
+    `scancel` the latest publish job for this training run and update
+    its status.json to phase=error / error="cancelled by user" so the
+    UI's poller sees the transition. No-ops cleanly when the publish
+    has already finished — returns the current state, not a 404.
+    """
+    state = get_publish_status(job_hash)
+    publish_dir = Path(state["publish_dir"])
+    status_path = publish_dir / "status.json"
+
+    if state.get("phase") not in _NON_TERMINAL_PHASES:
+        return state
+
+    publish_job_id = state.get("publish_job_id")
+    if publish_job_id is not None:
+        try:
+            subprocess.run(
+                ["scancel", str(publish_job_id)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+            logger.warning("scancel failed for publish %s: %s", publish_job_id, e)
+
+    _update_status(
+        status_path,
+        phase="error",
+        error="cancelled by user",
+        completed_at=time.time(),
+    )
+    return get_publish_status(job_hash)

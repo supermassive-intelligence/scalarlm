@@ -1,15 +1,25 @@
 /**
- * Phase 0 of the Publish-to-HF flow. Renders the form shell so the
- * trigger button is wired and operators can see what's coming, but
- * the submit path is intentionally inert — Phase 1 lands the
- * checkpoint-as-is upload, Phase 2 the merge-then-push.
+ * Publish-to-HuggingFace modal.
+ *
+ * Phase 1: submit a SLURM publish job, poll its status.json, render
+ * phase progress, allow cancellation. Log tailing comes in Phase 2.
  *
  * See ui/docs/publish-to-hf.md for the full design.
  */
 
 import { useEffect, useId, useState } from "react";
 
-import { useCheckpoints, type CheckpointEntry } from "@/api/publish";
+import {
+  isTerminalPhase,
+  useCancelPublish,
+  useCheckpoints,
+  usePublishStatus,
+  useSubmitPublish,
+  type CheckpointEntry,
+  type PublishMode,
+  type PublishPhase,
+  type PublishStatus,
+} from "@/api/publish";
 
 interface PublishToHFModalProps {
   open: boolean;
@@ -17,21 +27,31 @@ interface PublishToHFModalProps {
   onClose: () => void;
 }
 
-type Mode = "checkpoint" | "merge";
-
 // Loose client-side guard: must contain exactly one `/`, both halves
 // non-empty, and only word-ish characters. The server forwards to HF
 // which is the authority on naming, so we don't try to reproduce
 // every quirk of org-vs-repo allowed-character lists here.
 const REPO_ID_RE = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
 
-export function PublishToHFModal({ open, jobHash, onClose }: PublishToHFModalProps) {
-  const [mode, setMode] = useState<Mode>("checkpoint");
+export function PublishToHFModal({
+  open,
+  jobHash,
+  onClose,
+}: PublishToHFModalProps) {
+  const [mode, setMode] = useState<PublishMode>("merged");
   const [repoId, setRepoId] = useState("");
   const [isPrivate, setIsPrivate] = useState(false);
   const [token, setToken] = useState("");
   const [showToken, setShowToken] = useState(false);
   const [selectedCheckpoint, setSelectedCheckpoint] = useState<string>("");
+
+  // True once the user has submitted in *this* modal session. Polling
+  // status.json before submit would 404 (or return a stale prior run).
+  const [hasSubmitted, setHasSubmitted] = useState(false);
+
+  const submit = useSubmitPublish(jobHash);
+  const cancel = useCancelPublish(jobHash);
+  const status = usePublishStatus(jobHash, open && hasSubmitted);
 
   const { data: checkpoints, isPending: ckptPending, error: ckptError } =
     useCheckpoints(open ? jobHash : undefined);
@@ -44,34 +64,68 @@ export function PublishToHFModal({ open, jobHash, onClose }: PublishToHFModalPro
     }
   }, [checkpoints, selectedCheckpoint]);
 
-  // Wipe sensitive state when closing.
+  // Wipe sensitive state and per-session flags when closing.
   useEffect(() => {
     if (!open) {
       setToken("");
       setShowToken(false);
+      setHasSubmitted(false);
+      submit.reset();
+      cancel.reset();
     }
+    // submit/cancel intentionally not in deps — calling .reset() inside
+    // a deps array on those would re-fire on every mutation update.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  // Esc to close.
+  // Esc to close (but only when there's no in-flight job — closing
+  // mid-submit would lose the SSE handle; the user must explicitly
+  // cancel or wait).
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") {
+        const phase = status.data?.phase;
+        if (hasSubmitted && phase && !isTerminalPhase(phase)) return;
+        onClose();
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
+  }, [open, onClose, hasSubmitted, status.data?.phase]);
 
   const repoIdValid = repoId === "" || REPO_ID_RE.test(repoId);
   const formReady =
     repoId !== "" &&
     repoIdValid &&
     token !== "" &&
-    selectedCheckpoint !== "";
+    selectedCheckpoint !== "" &&
+    !submit.isPending;
 
   const tokenInputId = useId();
   const repoInputId = useId();
   const ckptInputId = useId();
+
+  const inFlightPhase = status.data?.phase;
+  const isLive = hasSubmitted && !isTerminalPhase(inFlightPhase);
+
+  const handleSubmit = async () => {
+    try {
+      await submit.mutateAsync({
+        mode,
+        repo_id: repoId,
+        private: isPrivate,
+        hf_token: token,
+        checkpoint: selectedCheckpoint || undefined,
+      });
+      // Once submitted, drop the token from React state so it can't
+      // leak into a console.log of the component tree.
+      setToken("");
+      setHasSubmitted(true);
+    } catch {
+      // Error surfaces via submit.error in the UI.
+    }
+  };
 
   if (!open) return null;
 
@@ -81,7 +135,9 @@ export function PublishToHFModal({ open, jobHash, onClose }: PublishToHFModalPro
       aria-modal="true"
       aria-labelledby="publish-modal-title"
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
-      onClick={onClose}
+      onClick={() => {
+        if (!isLive) onClose();
+      }}
     >
       <div
         className="flex w-full max-w-lg flex-col gap-4 rounded-lg border border-border bg-bg-card p-5 shadow-xl"
@@ -102,173 +158,425 @@ export function PublishToHFModal({ open, jobHash, onClose }: PublishToHFModalPro
           <button
             type="button"
             onClick={onClose}
+            disabled={isLive}
+            title={isLive ? "Cancel the publish first" : "Close"}
             aria-label="Close"
-            className="rounded-md border border-border-subtle bg-bg px-2 py-1 text-xs text-fg-muted hover:border-border hover:bg-bg-hover hover:text-fg"
+            className="rounded-md border border-border-subtle bg-bg px-2 py-1 text-xs text-fg-muted hover:border-border hover:bg-bg-hover hover:text-fg disabled:cursor-not-allowed disabled:opacity-40"
           >
             Close
           </button>
         </header>
 
-        <ModeSelector mode={mode} setMode={setMode} />
-
-        <div className="flex flex-col gap-1.5">
-          <label htmlFor={repoInputId} className="text-xs text-fg-muted">
-            Repository
-          </label>
-          <input
-            id={repoInputId}
-            type="text"
-            placeholder="myorg/my-adapter"
-            value={repoId}
-            onChange={(e) => setRepoId(e.target.value)}
-            className="rounded-md border border-border-subtle bg-bg px-3 py-1.5 font-mono text-sm text-fg focus:border-accent focus:outline-none"
-            spellCheck={false}
-            autoCapitalize="off"
-            autoCorrect="off"
+        {hasSubmitted ? (
+          <PublishProgress
+            status={status.data}
+            error={status.error as Error | null}
+            cancelPending={cancel.isPending}
+            onCancel={() => cancel.mutate()}
+            onClose={onClose}
           />
-          {!repoIdValid && (
-            <p className="text-[11px] text-danger">
-              Use the form <code className="font-mono">org/repo-name</code>.
-              Letters, digits, <code>.</code>, <code>-</code>, <code>_</code>.
-            </p>
-          )}
-          <label className="flex items-center gap-2 text-xs text-fg-muted">
-            <input
-              type="checkbox"
-              checked={isPrivate}
-              onChange={(e) => setIsPrivate(e.target.checked)}
-              className="h-3 w-3 accent-accent"
-            />
-            Create as private (existing repo visibility wins)
-          </label>
-        </div>
-
-        <div className="flex flex-col gap-1.5">
-          <label htmlFor={tokenInputId} className="text-xs text-fg-muted">
-            HuggingFace token{" "}
-            <span className="text-fg-subtle">(write access)</span>
-          </label>
-          <div className="flex items-center gap-1.5">
-            <input
-              id={tokenInputId}
-              // Treat the field as opaque text rather than `password`
-              // so browser password managers don't latch onto it; per
-              // ui/docs/publish-to-hf.md the token is held only in
-              // component state, not localStorage.
-              type={showToken ? "text" : "password"}
-              autoComplete="off"
-              autoCorrect="off"
-              spellCheck={false}
-              data-1p-ignore
-              data-lpignore="true"
-              placeholder="hf_***"
-              value={token}
-              onChange={(e) => setToken(e.target.value)}
-              className="flex-1 rounded-md border border-border-subtle bg-bg px-3 py-1.5 font-mono text-sm text-fg focus:border-accent focus:outline-none"
-            />
-            <button
-              type="button"
-              onClick={() => setShowToken((v) => !v)}
-              className="rounded-md border border-border-subtle bg-bg px-2 py-1.5 text-[11px] text-fg-muted hover:border-border hover:text-fg"
-            >
-              {showToken ? "Hide" : "Show"}
-            </button>
-          </div>
-          <p className="text-[11px] text-fg-subtle">
-            Generate at{" "}
-            <a
-              href="https://huggingface.co/settings/tokens"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="underline-offset-2 hover:underline"
-            >
-              huggingface.co/settings/tokens
-            </a>
-            . Held only in this tab; not saved.
-          </p>
-        </div>
-
-        <div className="flex flex-col gap-1.5">
-          <label htmlFor={ckptInputId} className="text-xs text-fg-muted">
-            Checkpoint
-          </label>
-          <select
-            id={ckptInputId}
-            value={selectedCheckpoint}
-            onChange={(e) => setSelectedCheckpoint(e.target.value)}
-            disabled={!checkpoints || checkpoints.length === 0}
-            className="rounded-md border border-border-subtle bg-bg px-3 py-1.5 text-sm text-fg focus:border-accent focus:outline-none disabled:opacity-50"
-          >
-            {ckptPending && <option>Loading…</option>}
-            {checkpoints &&
-              checkpoints.map((c, i) => (
-                <option key={c.name} value={c.name}>
-                  {formatCheckpointLabel(c, i === 0)}
-                </option>
-              ))}
-            {checkpoints && checkpoints.length === 0 && (
-              <option value="">No checkpoints written yet</option>
-            )}
-          </select>
-          {ckptError && (
-            <p className="text-[11px] text-danger">
-              Couldn't load checkpoints: {String((ckptError as Error).message)}
-            </p>
-          )}
-        </div>
-
-        <Phase0Banner />
-
-        <footer className="flex justify-end gap-2 pt-2">
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded-md border border-border-subtle bg-bg px-3 py-1.5 text-sm text-fg hover:border-border hover:bg-bg-hover"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            disabled
-            title="Phase 0: form preview only — submit lands in Phase 1"
-            className="rounded-md bg-accent/40 px-3 py-1.5 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            Publish
-          </button>
-        </footer>
+        ) : (
+          <PublishForm
+            mode={mode}
+            setMode={setMode}
+            repoId={repoId}
+            setRepoId={setRepoId}
+            repoIdValid={repoIdValid}
+            isPrivate={isPrivate}
+            setIsPrivate={setIsPrivate}
+            token={token}
+            setToken={setToken}
+            showToken={showToken}
+            setShowToken={setShowToken}
+            tokenInputId={tokenInputId}
+            repoInputId={repoInputId}
+            ckptInputId={ckptInputId}
+            checkpoints={checkpoints}
+            ckptPending={ckptPending}
+            ckptError={ckptError as Error | null}
+            selectedCheckpoint={selectedCheckpoint}
+            setSelectedCheckpoint={setSelectedCheckpoint}
+            submitError={submit.error as Error | null}
+            formReady={formReady}
+            submitPending={submit.isPending}
+            onCancel={onClose}
+            onSubmit={handleSubmit}
+          />
+        )}
 
         {/* Visually-hidden status for screen readers + e2e selectors. */}
         <span className="sr-only" aria-live="polite">
-          {formReady ? "Form complete" : "Form incomplete"}
+          {hasSubmitted
+            ? `Publish phase ${inFlightPhase ?? "loading"}`
+            : formReady
+            ? "Form complete"
+            : "Form incomplete"}
         </span>
       </div>
     </div>
   );
 }
 
+// ---------------------------------------------------------------------------
+// Pre-submit form
+// ---------------------------------------------------------------------------
+
+interface PublishFormProps {
+  mode: PublishMode;
+  setMode: (m: PublishMode) => void;
+  repoId: string;
+  setRepoId: (s: string) => void;
+  repoIdValid: boolean;
+  isPrivate: boolean;
+  setIsPrivate: (v: boolean) => void;
+  token: string;
+  setToken: (s: string) => void;
+  showToken: boolean;
+  setShowToken: (v: boolean) => void;
+  tokenInputId: string;
+  repoInputId: string;
+  ckptInputId: string;
+  checkpoints: CheckpointEntry[] | undefined;
+  ckptPending: boolean;
+  ckptError: Error | null;
+  selectedCheckpoint: string;
+  setSelectedCheckpoint: (s: string) => void;
+  submitError: Error | null;
+  formReady: boolean;
+  submitPending: boolean;
+  onCancel: () => void;
+  onSubmit: () => void;
+}
+
+function PublishForm(p: PublishFormProps) {
+  return (
+    <>
+      <ModeSelector mode={p.mode} setMode={p.setMode} />
+
+      <div className="flex flex-col gap-1.5">
+        <label htmlFor={p.repoInputId} className="text-xs text-fg-muted">
+          Repository
+        </label>
+        <input
+          id={p.repoInputId}
+          type="text"
+          placeholder="myorg/my-adapter"
+          value={p.repoId}
+          onChange={(e) => p.setRepoId(e.target.value)}
+          className="rounded-md border border-border-subtle bg-bg px-3 py-1.5 font-mono text-sm text-fg focus:border-accent focus:outline-none"
+          spellCheck={false}
+          autoCapitalize="off"
+          autoCorrect="off"
+        />
+        {!p.repoIdValid && (
+          <p className="text-[11px] text-danger">
+            Use the form <code className="font-mono">org/repo-name</code>.
+            Letters, digits, <code>.</code>, <code>-</code>, <code>_</code>.
+          </p>
+        )}
+        <label className="flex items-center gap-2 text-xs text-fg-muted">
+          <input
+            type="checkbox"
+            checked={p.isPrivate}
+            onChange={(e) => p.setIsPrivate(e.target.checked)}
+            className="h-3 w-3 accent-accent"
+          />
+          Create as private (existing repo visibility wins)
+        </label>
+      </div>
+
+      <div className="flex flex-col gap-1.5">
+        <label htmlFor={p.tokenInputId} className="text-xs text-fg-muted">
+          HuggingFace token{" "}
+          <span className="text-fg-subtle">(write access)</span>
+        </label>
+        <div className="flex items-center gap-1.5">
+          <input
+            id={p.tokenInputId}
+            type={p.showToken ? "text" : "password"}
+            autoComplete="off"
+            autoCorrect="off"
+            spellCheck={false}
+            data-1p-ignore
+            data-lpignore="true"
+            placeholder="hf_***"
+            value={p.token}
+            onChange={(e) => p.setToken(e.target.value)}
+            className="flex-1 rounded-md border border-border-subtle bg-bg px-3 py-1.5 font-mono text-sm text-fg focus:border-accent focus:outline-none"
+          />
+          <button
+            type="button"
+            onClick={() => p.setShowToken(!p.showToken)}
+            className="rounded-md border border-border-subtle bg-bg px-2 py-1.5 text-[11px] text-fg-muted hover:border-border hover:text-fg"
+          >
+            {p.showToken ? "Hide" : "Show"}
+          </button>
+        </div>
+        <p className="text-[11px] text-fg-subtle">
+          Generate at{" "}
+          <a
+            href="https://huggingface.co/settings/tokens"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline-offset-2 hover:underline"
+          >
+            huggingface.co/settings/tokens
+          </a>
+          . Held only in this tab; not saved.
+        </p>
+      </div>
+
+      <div className="flex flex-col gap-1.5">
+        <label htmlFor={p.ckptInputId} className="text-xs text-fg-muted">
+          Checkpoint
+        </label>
+        <select
+          id={p.ckptInputId}
+          value={p.selectedCheckpoint}
+          onChange={(e) => p.setSelectedCheckpoint(e.target.value)}
+          disabled={!p.checkpoints || p.checkpoints.length === 0}
+          className="rounded-md border border-border-subtle bg-bg px-3 py-1.5 text-sm text-fg focus:border-accent focus:outline-none disabled:opacity-50"
+        >
+          {p.ckptPending && <option>Loading…</option>}
+          {p.checkpoints &&
+            p.checkpoints.map((c, i) => (
+              <option key={c.name} value={c.name}>
+                {formatCheckpointLabel(c, i === 0)}
+              </option>
+            ))}
+          {p.checkpoints && p.checkpoints.length === 0 && (
+            <option value="">No checkpoints written yet</option>
+          )}
+        </select>
+        {p.ckptError && (
+          <p className="text-[11px] text-danger">
+            Couldn't load checkpoints: {String(p.ckptError.message)}
+          </p>
+        )}
+      </div>
+
+      {p.submitError && (
+        <p
+          role="alert"
+          className="rounded-md border border-danger/30 bg-danger/5 px-3 py-2 text-[11px] text-danger"
+        >
+          {String(p.submitError.message)}
+        </p>
+      )}
+
+      <footer className="flex justify-end gap-2 pt-2">
+        <button
+          type="button"
+          onClick={p.onCancel}
+          className="rounded-md border border-border-subtle bg-bg px-3 py-1.5 text-sm text-fg hover:border-border hover:bg-bg-hover"
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          onClick={p.onSubmit}
+          disabled={!p.formReady}
+          className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {p.submitPending ? "Submitting…" : "Publish"}
+        </button>
+      </footer>
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Post-submit progress view
+// ---------------------------------------------------------------------------
+
+const PHASE_LABEL: Record<PublishPhase, string> = {
+  queued: "Waiting for SLURM…",
+  validating: "Reading checkpoint…",
+  loading_base: "Loading base model…",
+  merging: "Merging LoRA into base…",
+  saving: "Saving model files…",
+  uploading: "Uploading to HuggingFace…",
+  done: "Done.",
+  error: "Failed.",
+};
+
+const PHASE_ORDER: PublishPhase[] = [
+  "queued",
+  "validating",
+  "loading_base",
+  "merging",
+  "saving",
+  "uploading",
+  "done",
+];
+
+interface PublishProgressProps {
+  status: PublishStatus | undefined;
+  error: Error | null;
+  cancelPending: boolean;
+  onCancel: () => void;
+  onClose: () => void;
+}
+
+function PublishProgress({
+  status,
+  error,
+  cancelPending,
+  onCancel,
+  onClose,
+}: PublishProgressProps) {
+  if (error && !status) {
+    return (
+      <div
+        role="alert"
+        className="rounded-md border border-danger/30 bg-danger/5 px-3 py-3 text-sm text-danger"
+      >
+        Couldn't load publish status: {String(error.message)}
+      </div>
+    );
+  }
+
+  if (!status) {
+    return (
+      <div className="rounded-md border border-border-subtle bg-bg/50 px-3 py-3 text-sm text-fg-muted">
+        Submitting…
+      </div>
+    );
+  }
+
+  const phase = status.phase;
+  const isError = phase === "error";
+  const isDone = phase === "done";
+  const inFlight = !isTerminalPhase(phase);
+
+  const currentIdx = isError
+    ? -1
+    : PHASE_ORDER.indexOf(phase);
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="rounded-md border border-border-subtle bg-bg/50 p-3">
+        <div className="flex items-center gap-2">
+          <PhaseDot phase={phase} />
+          <span className="text-sm text-fg">{PHASE_LABEL[phase]}</span>
+        </div>
+        <ol className="mt-3 flex flex-col gap-1 text-[11px] font-mono text-fg-muted">
+          {PHASE_ORDER.filter((p) => p !== "done").map((p, i) => {
+            const reached = !isError && i <= currentIdx;
+            const active = !isError && p === phase;
+            return (
+              <li
+                key={p}
+                className={
+                  active
+                    ? "text-accent"
+                    : reached
+                    ? "text-fg"
+                    : "text-fg-subtle"
+                }
+              >
+                {reached ? "✓" : active ? "▸" : "·"} {p.replace(/_/g, " ")}
+              </li>
+            );
+          })}
+        </ol>
+      </div>
+
+      {status.repo_id && (
+        <p className="text-xs text-fg-muted">
+          Repository:{" "}
+          <code className="font-mono">{status.repo_id}</code>
+        </p>
+      )}
+
+      {isDone && status.repo_url && (
+        <p className="rounded-md border border-success/30 bg-success/10 px-3 py-2 text-xs text-success">
+          Pushed to{" "}
+          <a
+            href={status.repo_url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="font-mono underline-offset-2 hover:underline"
+          >
+            {status.repo_url.replace(/^https?:\/\//, "")}
+          </a>
+        </p>
+      )}
+
+      {isError && (
+        <p
+          role="alert"
+          className="rounded-md border border-danger/30 bg-danger/5 px-3 py-2 text-[11px] text-danger"
+        >
+          {status.error || "Publish failed."}
+        </p>
+      )}
+
+      <footer className="flex justify-end gap-2 pt-1">
+        {inFlight && (
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={cancelPending}
+            title="Cancels the SLURM job. A partial upload may remain on huggingface.co."
+            className="rounded-md border border-danger/40 bg-danger/10 px-3 py-1.5 text-sm text-danger hover:border-danger hover:bg-danger/20 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {cancelPending ? "Cancelling…" : "Cancel"}
+          </button>
+        )}
+        {!inFlight && (
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md border border-border-subtle bg-bg px-3 py-1.5 text-sm text-fg hover:border-border hover:bg-bg-hover"
+          >
+            Close
+          </button>
+        )}
+      </footer>
+    </div>
+  );
+}
+
+function PhaseDot({ phase }: { phase: PublishPhase }) {
+  const cls =
+    phase === "done"
+      ? "bg-success"
+      : phase === "error"
+      ? "bg-danger"
+      : "bg-accent animate-pulse";
+  return <span className={`h-2 w-2 rounded-full ${cls}`} aria-hidden />;
+}
+
+// ---------------------------------------------------------------------------
+// Mode selector — unchanged from Phase 0 except labels match the new
+// Mode 1 (PEFT adapter, vs the old "raw checkpoint" framing).
+// ---------------------------------------------------------------------------
+
 function ModeSelector({
   mode,
   setMode,
 }: {
-  mode: Mode;
-  setMode: (m: Mode) => void;
+  mode: PublishMode;
+  setMode: (m: PublishMode) => void;
 }) {
   return (
     <fieldset className="flex flex-col gap-2 rounded-md border border-border-subtle bg-bg/50 p-3">
       <legend className="px-1 text-xs text-fg-muted">Mode</legend>
       <ModeRadio
-        value="checkpoint"
+        value="adapter"
         current={mode}
         onSelect={setMode}
-        title="Push checkpoint as-is"
-        body="Adapter .pt + metadata only. Loadable by ScalarLM and any vLLM with the LoRA adapter resolver."
+        title="PEFT adapter (coming soon)"
+        body="Small HF-standard adapter repo. Loadable via PeftModel.from_pretrained(base, repo). Wired in the next release."
+        disabled
       />
       <ModeRadio
-        value="merge"
+        value="merged"
         current={mode}
         onSelect={setMode}
-        title="Merge LoRA into base, push full model"
-        body="Single self-contained model. Larger upload (~30–60 GB for a 31B base). Required for off-platform inference."
+        title="Merged full model"
+        body="Single self-contained model repo. Larger upload (~30–60 GB for a 31B base). Required for off-platform inference."
       />
     </fieldset>
   );
@@ -280,21 +588,28 @@ function ModeRadio({
   onSelect,
   title,
   body,
+  disabled,
 }: {
-  value: Mode;
-  current: Mode;
-  onSelect: (m: Mode) => void;
+  value: PublishMode;
+  current: PublishMode;
+  onSelect: (m: PublishMode) => void;
   title: string;
   body: string;
+  disabled?: boolean;
 }) {
   const checked = current === value;
   return (
     <label
       className={
-        "flex cursor-pointer items-start gap-2 rounded-md border px-3 py-2 text-sm transition-colors " +
-        (checked
+        "flex items-start gap-2 rounded-md border px-3 py-2 text-sm transition-colors " +
+        (disabled
+          ? "cursor-not-allowed border-border-subtle bg-bg opacity-60"
+          : "cursor-pointer ") +
+        (checked && !disabled
           ? "border-accent/40 bg-accent/10"
-          : "border-border-subtle bg-bg hover:border-border")
+          : !disabled
+          ? "border-border-subtle bg-bg hover:border-border"
+          : "")
       }
     >
       <input
@@ -302,6 +617,7 @@ function ModeRadio({
         name="publish-mode"
         value={value}
         checked={checked}
+        disabled={disabled}
         onChange={() => onSelect(value)}
         className="mt-0.5 h-3 w-3 accent-accent"
       />
@@ -310,20 +626,6 @@ function ModeRadio({
         <span className="text-[11px] text-fg-muted">{body}</span>
       </span>
     </label>
-  );
-}
-
-function Phase0Banner() {
-  return (
-    <div
-      role="note"
-      className="rounded-md border border-warning/30 bg-warning/5 px-3 py-2 text-[11px] text-warning"
-    >
-      <strong className="font-semibold">Preview:</strong> the publish flow
-      ships in phases. The form here is wired and your inputs are valid;
-      the upload will be enabled in the next release. See{" "}
-      <code className="font-mono">ui/docs/publish-to-hf.md</code>.
-    </div>
   );
 }
 

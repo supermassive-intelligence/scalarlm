@@ -19,6 +19,7 @@ from cray_infra.training.training_logs_generator import training_logs_generator
 from cray_infra.training.get_training_job_info import get_training_job_info
 from cray_infra.training.get_dataset_slice import get_dataset_slice
 from cray_infra.training.launch_publish_job import (
+    cancel_publish_job,
     get_publish_status,
     launch_publish_job,
 )
@@ -105,6 +106,12 @@ async def submit_publish_job(job_hash: str, request: PublishRequest):
 async def publish_status(job_hash: str):
     """Latest publish status.json for this training job."""
     return get_publish_status(job_hash)
+
+
+@megatron_router.post("/train/{job_hash}/publish/cancel")
+async def publish_cancel(job_hash: str):
+    """scancel the in-flight publish job; returns the resulting status."""
+    return cancel_publish_job(job_hash)
 
 
 @megatron_router.get("/train/logs/{model_name}")
