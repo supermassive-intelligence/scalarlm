@@ -286,22 +286,6 @@ def main(argv: list[str] | None = None) -> int:
     status_writer = _StatusWriter(args.status_file, mode=args.mode)
     status_writer.update(phase="validating", started_at=_now())
 
-    if args.mode == "adapter":
-        # Adapter-mode export wires up in a follow-up commit (see
-        # ui/docs/publish-to-hf.md §Phased rollout). Fail loudly so the
-        # SLURM job leaves a clear error in status.json instead of
-        # silently treating it as merged.
-        status_writer.update(
-            phase="error",
-            error=(
-                "--mode adapter is not yet implemented; use --mode merged "
-                "or wait for the next release."
-            ),
-            completed_at=_now(),
-        )
-        logger.error("--mode adapter is not yet implemented.")
-        return 2
-
     job_dir = args.job_dir.resolve()
     if not job_dir.is_dir():
         msg = f"Job directory does not exist: {job_dir}"
@@ -337,9 +321,14 @@ def main(argv: list[str] | None = None) -> int:
         logger.warning(
             "Checkpoint contains %d tokenformer parameter(s); they will be "
             "DROPPED — folding tokenformer adapters into a vanilla model "
-            "isn't supported. The merged model will only carry the LoRA "
-            "delta plus any base-weight overrides.",
+            "isn't supported. The export will only carry the LoRA delta"
+            "%s.",
             tk_count,
+            (
+                " plus any base-weight overrides"
+                if args.mode == "merged"
+                else ""
+            ),
         )
     if lora_count == 0:
         logger.error(
@@ -350,8 +339,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Heavy imports happen here so unit tests on the helpers don't need
     # peft / transformers installed.
-    from peft import LoraConfig, get_peft_model
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from peft import LoraConfig
 
     lora_kwargs = resolve_lora_config_args(
         job_config,
@@ -370,57 +358,71 @@ def main(argv: list[str] | None = None) -> int:
     )
     lora_config = LoraConfig(**lora_kwargs)
 
-    torch_dtype = _resolve_dtype(args.dtype)
+    output_dir, cleanup_tmp = _resolve_output_dir(args.output_dir, args.mode)
 
-    status_writer.update(phase="loading_base", base_model=base_model_name)
-    logger.info("Materializing base model: %s", base_model_name)
-    base = AutoModelForCausalLM.from_pretrained(
-        base_model_name,
-        torch_dtype=torch_dtype if torch_dtype is not None else "auto",
-        low_cpu_mem_usage=True,
-    )
-    if args.device == "cuda":
-        base = base.to("cuda")
-
-    # 1) Apply base-weight overrides (lm_head, embeddings, etc.) directly
-    # to the base model's state_dict before wrapping in PEFT, so the
-    # merge sees the user-fine-tuned base.
-    if base_count > 0:
-        _apply_base_overrides(base, buckets["base"])
-
-    # 2) Wrap with PEFT, load the LoRA weights, merge.
-    status_writer.update(phase="merging")
-    peft_model = get_peft_model(base, lora_config)
-    load_result = peft_model.load_state_dict(buckets["lora"], strict=False)
-    if load_result.unexpected_keys:
-        logger.warning(
-            "LoRA load: %d unexpected keys (e.g. %s) — these tensors were "
-            "saved by the trainer but PEFT doesn't recognize them in the "
-            "current model.",
-            len(load_result.unexpected_keys),
-            load_result.unexpected_keys[:3],
+    if args.mode == "adapter":
+        status_writer.update(phase="saving")
+        if base_count > 0:
+            logger.warning(
+                "Adapter-mode export drops %d base-weight override(s); "
+                "those tensors only make sense paired with a merged base. "
+                "Re-run with --mode merged if you need them.",
+                base_count,
+            )
+        _export_adapter_repo(
+            output_dir=output_dir,
+            lora_tensors=buckets["lora"],
+            lora_config=lora_config,
+            base_model_name=base_model_name,
         )
-    # Most "missing" keys are non-LoRA params PEFT didn't expect to find
-    # in our adapter dict; not a problem.
-    logger.info("Merging LoRA into base...")
-    merged = peft_model.merge_and_unload()
-
-    # Save tokenizer + merged model.
-    status_writer.update(phase="saving")
-    output_dir = args.output_dir
-    cleanup_tmp = False
-    if output_dir is None:
-        output_dir = Path(tempfile.mkdtemp(prefix="scalarlm-merged-"))
-        cleanup_tmp = True
     else:
-        output_dir.mkdir(parents=True, exist_ok=True)
-    logger.info("Saving merged model to %s", output_dir)
-    merged.save_pretrained(output_dir, safe_serialization=True)
-    AutoTokenizer.from_pretrained(base_model_name).save_pretrained(output_dir)
+        # mode == "merged" — fold LoRA into base, save full model.
+        from peft import get_peft_model
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        torch_dtype = _resolve_dtype(args.dtype)
+        status_writer.update(phase="loading_base", base_model=base_model_name)
+        logger.info("Materializing base model: %s", base_model_name)
+        base = AutoModelForCausalLM.from_pretrained(
+            base_model_name,
+            torch_dtype=torch_dtype if torch_dtype is not None else "auto",
+            low_cpu_mem_usage=True,
+        )
+        if args.device == "cuda":
+            base = base.to("cuda")
+
+        if base_count > 0:
+            _apply_base_overrides(base, buckets["base"])
+
+        status_writer.update(phase="merging")
+        peft_model = get_peft_model(base, lora_config)
+        load_result = peft_model.load_state_dict(buckets["lora"], strict=False)
+        if load_result.unexpected_keys:
+            logger.warning(
+                "LoRA load: %d unexpected keys (e.g. %s) — these tensors were "
+                "saved by the trainer but PEFT doesn't recognize them in the "
+                "current model.",
+                len(load_result.unexpected_keys),
+                load_result.unexpected_keys[:3],
+            )
+        # Most "missing" keys are non-LoRA params PEFT didn't expect to find
+        # in our adapter dict; not a problem.
+        logger.info("Merging LoRA into base...")
+        merged = peft_model.merge_and_unload()
+
+        status_writer.update(phase="saving")
+        logger.info("Saving merged model to %s", output_dir)
+        merged.save_pretrained(output_dir, safe_serialization=True)
+        AutoTokenizer.from_pretrained(base_model_name).save_pretrained(output_dir)
 
     if args.dry_run:
-        logger.info("Dry run — skipping upload. Merged model is at %s", output_dir)
+        logger.info(
+            "Dry run — skipping upload. Output is at %s", output_dir
+        )
         status_writer.update(phase="done", completed_at=_now(), repo_url=None)
+        if cleanup_tmp:
+            import shutil
+            shutil.rmtree(output_dir, ignore_errors=True)
         return 0
 
     token = (
@@ -465,6 +467,84 @@ def _resolve_dtype(name: str | None):
         "bfloat16": torch.bfloat16,
         "float32": torch.float32,
     }[name]
+
+
+def _resolve_output_dir(
+    requested: Path | None, mode: str
+) -> tuple[Path, bool]:
+    """Return (output_dir, cleanup_tmp). Auto-creates a temp dir when
+    no --output-dir was passed."""
+    if requested is None:
+        prefix = "scalarlm-merged-" if mode == "merged" else "scalarlm-adapter-"
+        return Path(tempfile.mkdtemp(prefix=prefix)), True
+    requested.mkdir(parents=True, exist_ok=True)
+    return requested, False
+
+
+# PEFT's save_pretrained writes adapter weights with keys like
+# `base_model.model.<inner.path>.lora_A.weight` — the multi-adapter
+# `.default.` segment is stripped at save time. Our trainer captures
+# the raw PEFT state_dict, which keeps that segment in. Strip it so
+# the resulting safetensors file matches what
+# `PeftModel.from_pretrained` expects.
+def strip_default_adapter_segment(key: str) -> str:
+    """
+    Drop the `.default.` (or any other adapter-name) segment between
+    `lora_A`/`lora_B` and `weight`. Returns the input unchanged if
+    the pattern doesn't apply.
+    """
+    parts = key.split(".")
+    # Locate the lora_* token and check the very next segment looks
+    # like an adapter name (not "weight" / "bias" itself). When we
+    # hit that shape, drop the adapter-name segment.
+    for i in range(len(parts) - 2):
+        if parts[i] in ("lora_A", "lora_B", "lora_embedding_A", "lora_embedding_B"):
+            tail = parts[i + 1]
+            terminal = parts[i + 2] if i + 2 < len(parts) else ""
+            if tail not in ("weight", "bias") and terminal in ("weight", "bias"):
+                return ".".join(parts[: i + 1] + parts[i + 2 :])
+    return key
+
+
+def _export_adapter_repo(
+    output_dir: Path,
+    lora_tensors: "dict[str, torch.Tensor]",
+    lora_config: "object",
+    base_model_name: str,
+) -> None:
+    """
+    Write a HF-standard PEFT adapter repo: `adapter_config.json` +
+    `adapter_model.safetensors`. The trainer's PEFT-prefixed key
+    layout matches what `PeftModel.from_pretrained` expects after
+    we strip the `.default.` adapter-name segment.
+    """
+    import json
+    from safetensors.torch import save_file
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    renamed: dict[str, "torch.Tensor"] = {}
+    for k, v in lora_tensors.items():
+        renamed[strip_default_adapter_segment(k)] = v.contiguous()
+
+    safetensors_path = output_dir / "adapter_model.safetensors"
+    save_file(renamed, str(safetensors_path))
+    logger.info(
+        "Wrote %d adapter tensor(s) to %s", len(renamed), safetensors_path
+    )
+
+    # `LoraConfig.to_dict()` is the canonical way to serialize. Add the
+    # base_model_name_or_path field PEFT loaders look for at load time
+    # so a user can do `PeftModel.from_pretrained(repo)` without also
+    # specifying the base.
+    cfg_dict = lora_config.to_dict()
+    cfg_dict["base_model_name_or_path"] = base_model_name
+    cfg_dict.setdefault("peft_type", "LORA")
+    cfg_dict.setdefault("task_type", "CAUSAL_LM")
+    config_path = output_dir / "adapter_config.json"
+    with config_path.open("w") as f:
+        json.dump(cfg_dict, f, indent=2)
+    logger.info("Wrote adapter config to %s", config_path)
 
 
 def _now() -> float:

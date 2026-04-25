@@ -40,7 +40,9 @@ export function PublishToHFModal({
   jobHash,
   onClose,
 }: PublishToHFModalProps) {
-  const [mode, setMode] = useState<PublishMode>("merged");
+  // Default to adapter — smaller, faster, more commonly useful. Users
+  // who specifically need a self-contained model flip to merged.
+  const [mode, setMode] = useState<PublishMode>("adapter");
   const [repoId, setRepoId] = useState("");
   const [isPrivate, setIsPrivate] = useState(false);
   const [token, setToken] = useState("");
@@ -641,9 +643,8 @@ function ModeSelector({
         value="adapter"
         current={mode}
         onSelect={setMode}
-        title="PEFT adapter (coming soon)"
-        body="Small HF-standard adapter repo. Loadable via PeftModel.from_pretrained(base, repo). Wired in the next release."
-        disabled
+        title="PEFT adapter"
+        body="Small HF-standard adapter repo (adapter_config.json + adapter_model.safetensors). Loadable via PeftModel.from_pretrained(base, repo)."
       />
       <ModeRadio
         value="merged"

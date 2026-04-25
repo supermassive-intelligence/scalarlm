@@ -18,6 +18,7 @@ from adapters.merge_lora_and_push import (
     infer_lora_rank,
     load_job_config,
     resolve_lora_config_args,
+    strip_default_adapter_segment,
 )
 
 
@@ -192,3 +193,64 @@ def test_resolve_passes_use_rslora_through():
         lora_keys=_lora_keys(rank=8),
     )
     assert cfg["use_rslora"] is True
+
+
+# ---- strip_default_adapter_segment --------------------------------------
+
+
+def test_strip_drops_default_adapter_name():
+    # Trainer's PEFT state_dict format → HF adapter-repo format.
+    assert (
+        strip_default_adapter_segment(
+            "base_model.model.model.layers.0.self_attn.q_proj.lora_A.default.weight"
+        )
+        == "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight"
+    )
+    assert (
+        strip_default_adapter_segment(
+            "base_model.model.model.layers.0.self_attn.q_proj.lora_B.default.weight"
+        )
+        == "base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight"
+    )
+
+
+def test_strip_handles_non_default_adapter_name():
+    # PEFT supports multi-adapter setups where the segment isn't "default".
+    assert (
+        strip_default_adapter_segment(
+            "base_model.model.x.lora_A.task_specific.weight"
+        )
+        == "base_model.model.x.lora_A.weight"
+    )
+
+
+def test_strip_handles_lora_embedding_keys():
+    assert (
+        strip_default_adapter_segment(
+            "base_model.model.embed.lora_embedding_A.default.weight"
+        )
+        == "base_model.model.embed.lora_embedding_A.weight"
+    )
+
+
+def test_strip_is_idempotent_on_already_stripped_keys():
+    # Already in HF shape (no adapter-name segment) — leave alone.
+    assert (
+        strip_default_adapter_segment(
+            "base_model.model.x.lora_A.weight"
+        )
+        == "base_model.model.x.lora_A.weight"
+    )
+
+
+def test_strip_passes_through_non_lora_keys():
+    assert (
+        strip_default_adapter_segment("lm_head.weight")
+        == "lm_head.weight"
+    )
+    assert (
+        strip_default_adapter_segment(
+            "model.layers.0.self_attn.q_proj.weight"
+        )
+        == "model.layers.0.self_attn.q_proj.weight"
+    )
