@@ -48,6 +48,9 @@ export function PublishToHFModal({
   const [token, setToken] = useState("");
   const [showToken, setShowToken] = useState(false);
   const [selectedCheckpoint, setSelectedCheckpoint] = useState<string>("");
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [loraAlphaOverride, setLoraAlphaOverride] = useState<string>("");
+  const [commitMessage, setCommitMessage] = useState<string>("");
 
   // True once the user has submitted in *this* modal session. Polling
   // status.json before submit would 404 (or return a stale prior run).
@@ -74,6 +77,9 @@ export function PublishToHFModal({
       setToken("");
       setShowToken(false);
       setHasSubmitted(false);
+      setAdvancedOpen(false);
+      setLoraAlphaOverride("");
+      setCommitMessage("");
       submit.reset();
       cancel.reset();
     }
@@ -99,11 +105,22 @@ export function PublishToHFModal({
   }, [open, onClose, hasSubmitted, status.data?.phase]);
 
   const repoIdValid = repoId === "" || REPO_ID_RE.test(repoId);
+
+  const parsedLoraAlphaForValidation =
+    loraAlphaOverride.trim() === ""
+      ? undefined
+      : Number.parseInt(loraAlphaOverride, 10);
+  const loraAlphaIsInvalid =
+    loraAlphaOverride.trim() !== "" &&
+    (Number.isNaN(parsedLoraAlphaForValidation) ||
+      (parsedLoraAlphaForValidation as number) < 1);
+
   const formReady =
     repoId !== "" &&
     repoIdValid &&
     token !== "" &&
     selectedCheckpoint !== "" &&
+    !loraAlphaIsInvalid &&
     !submit.isPending;
 
   const tokenInputId = useId();
@@ -121,6 +138,15 @@ export function PublishToHFModal({
         private: isPrivate,
         hf_token: token,
         checkpoint: selectedCheckpoint || undefined,
+        // Advanced overrides — only sent when populated. Server defaults
+        // (latest checkpoint metadata for lora_alpha, generated commit
+        // message) apply otherwise.
+        lora_alpha:
+          parsedLoraAlphaForValidation !== undefined && !loraAlphaIsInvalid
+            ? parsedLoraAlphaForValidation
+            : undefined,
+        commit_message:
+          commitMessage.trim() === "" ? undefined : commitMessage,
       });
       // Once submitted, drop the token from React state so it can't
       // leak into a console.log of the component tree.
@@ -201,6 +227,13 @@ export function PublishToHFModal({
             ckptError={ckptError as Error | null}
             selectedCheckpoint={selectedCheckpoint}
             setSelectedCheckpoint={setSelectedCheckpoint}
+            advancedOpen={advancedOpen}
+            setAdvancedOpen={setAdvancedOpen}
+            loraAlphaOverride={loraAlphaOverride}
+            setLoraAlphaOverride={setLoraAlphaOverride}
+            loraAlphaInvalid={loraAlphaIsInvalid}
+            commitMessage={commitMessage}
+            setCommitMessage={setCommitMessage}
             submitError={submit.error as Error | null}
             formReady={formReady}
             submitPending={submit.isPending}
@@ -246,6 +279,13 @@ interface PublishFormProps {
   ckptError: Error | null;
   selectedCheckpoint: string;
   setSelectedCheckpoint: (s: string) => void;
+  advancedOpen: boolean;
+  setAdvancedOpen: (v: boolean) => void;
+  loraAlphaOverride: string;
+  setLoraAlphaOverride: (s: string) => void;
+  loraAlphaInvalid: boolean;
+  commitMessage: string;
+  setCommitMessage: (s: string) => void;
   submitError: Error | null;
   formReady: boolean;
   submitPending: boolean;
@@ -359,6 +399,17 @@ function PublishForm(p: PublishFormProps) {
           </p>
         )}
       </div>
+
+      <AdvancedOptions
+        mode={p.mode}
+        open={p.advancedOpen}
+        setOpen={p.setAdvancedOpen}
+        loraAlphaOverride={p.loraAlphaOverride}
+        setLoraAlphaOverride={p.setLoraAlphaOverride}
+        loraAlphaInvalid={p.loraAlphaInvalid}
+        commitMessage={p.commitMessage}
+        setCommitMessage={p.setCommitMessage}
+      />
 
       {p.submitError && (
         <p
@@ -628,6 +679,96 @@ function PhaseDot({ phase }: { phase: PublishPhase }) {
 // Mode selector — unchanged from Phase 0 except labels match the new
 // Mode 1 (PEFT adapter, vs the old "raw checkpoint" framing).
 // ---------------------------------------------------------------------------
+
+interface AdvancedOptionsProps {
+  mode: PublishMode;
+  open: boolean;
+  setOpen: (v: boolean) => void;
+  loraAlphaOverride: string;
+  setLoraAlphaOverride: (s: string) => void;
+  loraAlphaInvalid: boolean;
+  commitMessage: string;
+  setCommitMessage: (s: string) => void;
+}
+
+/**
+ * Phase 3 advanced-options pane. lora_alpha override is only
+ * meaningful for merged mode — adapter-mode publishes the alpha that
+ * was actually trained with (encoded in the adapter_config), so an
+ * override there would silently be ignored. Hide it when adapter
+ * mode is selected to avoid the confusing-no-op.
+ */
+function AdvancedOptions({
+  mode,
+  open,
+  setOpen,
+  loraAlphaOverride,
+  setLoraAlphaOverride,
+  loraAlphaInvalid,
+  commitMessage,
+  setCommitMessage,
+}: AdvancedOptionsProps) {
+  return (
+    <details
+      open={open}
+      onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}
+      className="rounded-md border border-border-subtle bg-bg/50"
+    >
+      <summary className="cursor-pointer select-none px-3 py-1.5 text-xs text-fg-muted hover:text-fg">
+        Advanced
+      </summary>
+      <div className="flex flex-col gap-3 border-t border-border-subtle px-3 py-3">
+        {mode === "merged" ? (
+          <div className="flex flex-col gap-1.5">
+            <label className="text-xs text-fg-muted">
+              lora_alpha override{" "}
+              <span className="text-fg-subtle">
+                (defaults to checkpoint metadata, then 2×rank)
+              </span>
+            </label>
+            <input
+              type="number"
+              min={1}
+              step={1}
+              placeholder="e.g. 32"
+              value={loraAlphaOverride}
+              onChange={(e) => setLoraAlphaOverride(e.target.value)}
+              className="w-32 rounded-md border border-border-subtle bg-bg px-3 py-1.5 font-mono text-sm text-fg focus:border-accent focus:outline-none"
+              spellCheck={false}
+            />
+            {loraAlphaInvalid && (
+              <p className="text-[11px] text-danger">
+                Must be a positive integer.
+              </p>
+            )}
+          </div>
+        ) : (
+          <p className="text-[11px] text-fg-subtle">
+            <span className="font-semibold">lora_alpha</span> is only
+            adjustable in <span className="font-semibold">merged</span>{" "}
+            mode. Adapter-mode exports preserve the value the trainer
+            wrote.
+          </p>
+        )}
+
+        <div className="flex flex-col gap-1.5">
+          <label className="text-xs text-fg-muted">
+            Commit message{" "}
+            <span className="text-fg-subtle">(optional)</span>
+          </label>
+          <input
+            type="text"
+            placeholder="Auto-generated from job + checkpoint when blank"
+            value={commitMessage}
+            onChange={(e) => setCommitMessage(e.target.value)}
+            className="rounded-md border border-border-subtle bg-bg px-3 py-1.5 text-sm text-fg focus:border-accent focus:outline-none"
+            maxLength={500}
+          />
+        </div>
+      </div>
+    </details>
+  );
+}
 
 function ModeSelector({
   mode,
