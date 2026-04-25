@@ -185,6 +185,43 @@ class InferenceWorkQueue:
         async with self.lock:
             return self.queue.unack_count()
 
+    async def pending_request_count(self) -> int:
+        """
+        Total number of *prompts* in flight — sums `request_count`
+        across every queue entry that's not yet acked.
+
+        persistqueue's `__len__` only counts ready entries and
+        `unack_count` only counts claimed-but-not-finished entries.
+        Neither reflects the per-prompt fanout that push_into_queue
+        records on each entry's payload, so a single
+        `llm.generate(["a","b","c"])` looked like 1 / 0 to those
+        counters but is 3 in-flight prompts to the user.
+        """
+        async with self.lock:
+            results = self.queue.queue()
+            total = 0
+            for result in results:
+                try:
+                    status = int(result.get("status", 0))
+                except (TypeError, ValueError):
+                    continue
+                # Skip terminal states (acked / ack_failed). Anything
+                # else — ready, unack, inited — counts as in flight.
+                if status in (
+                    int(persistqueue.AckStatus.acked),
+                    int(persistqueue.AckStatus.ack_failed),
+                ):
+                    continue
+                data = result.get("data") or {}
+                try:
+                    count = int(data.get("request_count", 1))
+                except (TypeError, ValueError):
+                    count = 1
+                if count < 1:
+                    count = 1
+                total += count
+            return total
+
     async def clear_queue(self):
         async with self.lock:
             while not self.queue.empty():
