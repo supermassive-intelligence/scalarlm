@@ -184,6 +184,11 @@ async def _wrap_with_metrics(source):
     """
     metrics = get_metrics()
     metrics.record_new_request()
+    # Separate streaming-only counter so /v1/generate/metrics can show
+    # in-flight requests on this path even though it never touches the
+    # SQLiteAckQueue. The try/finally balance below guarantees this
+    # counter doesn't drift the way Metrics.queue_depth can.
+    metrics.record_streaming_start()
 
     buffer = bytearray()
     try:
@@ -202,6 +207,7 @@ async def _wrap_with_metrics(source):
             token_count=token_count if token_count is not None else 0,
             flop_count=None,
         )
+        metrics.record_streaming_end()
 
 
 def _extract_token_count(payload: bytes) -> Optional[int]:
