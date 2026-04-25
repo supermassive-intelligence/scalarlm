@@ -1,0 +1,194 @@
+"""
+Unit tests for the pure helpers in ml/adapters/merge_lora_and_push.py.
+
+The CLI flow itself touches transformers + peft + huggingface_hub and
+is exercised end-to-end by hand on a real job; here we cover the
+checkpoint-discovery, key-classification, rank inference, and lora-
+config-resolution layers so the wrong alpha or shape can't slip past.
+"""
+
+from pathlib import Path
+
+import pytest
+import torch
+
+from adapters.merge_lora_and_push import (
+    classify_state_dict,
+    find_latest_checkpoint,
+    infer_lora_rank,
+    load_job_config,
+    resolve_lora_config_args,
+)
+
+
+# ---- find_latest_checkpoint ---------------------------------------------
+
+
+def test_find_latest_picks_highest_step(tmp_path):
+    for step in (5, 100, 27):
+        (tmp_path / f"checkpoint_{step}.pt").write_bytes(b"")
+    assert find_latest_checkpoint(tmp_path).name == "checkpoint_100.pt"
+
+
+def test_find_latest_ignores_non_matching_files(tmp_path):
+    (tmp_path / "checkpoint_3.pt").write_bytes(b"")
+    (tmp_path / "checkpoint_3.txt").write_bytes(b"")
+    (tmp_path / "checkpoint_x.pt").write_bytes(b"")
+    (tmp_path / "config.yaml").write_text("")
+    assert find_latest_checkpoint(tmp_path).name == "checkpoint_3.pt"
+
+
+def test_find_latest_raises_when_empty(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        find_latest_checkpoint(tmp_path)
+
+
+# ---- load_job_config ----------------------------------------------------
+
+
+def test_load_job_config_reads_yaml(tmp_path):
+    (tmp_path / "config.yaml").write_text(
+        "llm_name: foo/bar\nlora_config:\n  r: 8\n  lora_alpha: 16\n"
+    )
+    cfg = load_job_config(tmp_path)
+    assert cfg["llm_name"] == "foo/bar"
+    assert cfg["lora_config"] == {"r": 8, "lora_alpha": 16}
+
+
+def test_load_job_config_missing_file_raises(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        load_job_config(tmp_path)
+
+
+def test_load_job_config_empty_file_returns_dict(tmp_path):
+    (tmp_path / "config.yaml").write_text("")
+    assert load_job_config(tmp_path) == {}
+
+
+# ---- classify_state_dict ------------------------------------------------
+
+
+def test_classify_splits_three_buckets():
+    sd = {
+        # LoRA — `.lora_A.` segment
+        "base_model.model.layers.0.self_attn.q_proj.lora_A.default.weight":
+            torch.zeros(8, 16),
+        "base_model.model.layers.0.self_attn.q_proj.lora_B.default.weight":
+            torch.zeros(16, 8),
+        # Tokenformer — leaf match
+        "model.layers.0.mlp.tokenformer_k": torch.zeros(4, 16),
+        "model.layers.0.mlp.tokenformer_v": torch.zeros(4, 16),
+        # Base override
+        "lm_head.weight": torch.zeros(32_000, 16),
+        "model.layers.0.input_layernorm.weight": torch.zeros(16),
+    }
+    out = classify_state_dict(sd)
+    assert len(out["lora"]) == 2
+    assert len(out["tokenformer"]) == 2
+    assert len(out["base"]) == 2
+
+
+def test_classify_lora_substring_does_not_steal_base_keys():
+    # A param literally called `lora_config` shouldn't be classified as LoRA.
+    sd = {"some.module.lora_config": torch.zeros(1)}
+    out = classify_state_dict(sd)
+    assert out["lora"] == {}
+    assert "some.module.lora_config" in out["base"]
+
+
+def test_classify_picks_up_lora_embedding_keys():
+    sd = {
+        "embed.lora_embedding_A": torch.zeros(8, 32_000),
+        "embed.lora_embedding_B": torch.zeros(4096, 8),
+    }
+    out = classify_state_dict(sd)
+    assert len(out["lora"]) == 2
+
+
+# ---- infer_lora_rank ----------------------------------------------------
+
+
+def test_infer_lora_rank_reads_lora_a_leading_dim():
+    sd = {
+        "x.lora_A.default.weight": torch.zeros(16, 4096),
+        "x.lora_B.default.weight": torch.zeros(4096, 16),
+    }
+    assert infer_lora_rank(sd) == 16
+
+
+def test_infer_lora_rank_raises_when_no_lora_a():
+    with pytest.raises(ValueError):
+        infer_lora_rank({"only_b.lora_B.default.weight": torch.zeros(4096, 8)})
+
+
+# ---- resolve_lora_config_args -------------------------------------------
+
+
+def _lora_keys(rank=8):
+    return {
+        "x.lora_A.default.weight": torch.zeros(rank, 4096),
+        "x.lora_B.default.weight": torch.zeros(4096, rank),
+    }
+
+
+def test_resolve_uses_metadata_alpha_when_present():
+    cfg = resolve_lora_config_args(
+        job_config={"lora_config": {"r": 8, "lora_alpha": 4}},
+        metadata={"lora_alpha": 16},
+        lora_keys=_lora_keys(rank=8),
+    )
+    assert cfg["lora_alpha"] == 16
+    assert cfg["_alpha_source"] == "metadata"
+
+
+def test_resolve_falls_back_to_job_config_alpha_when_metadata_missing():
+    cfg = resolve_lora_config_args(
+        job_config={"lora_config": {"r": 8, "lora_alpha": 12}},
+        metadata={},
+        lora_keys=_lora_keys(rank=8),
+    )
+    assert cfg["lora_alpha"] == 12
+    assert cfg["_alpha_source"] == "job_config"
+
+
+def test_resolve_defaults_alpha_to_two_times_rank_when_unspecified():
+    # Mirrors the vLLM-side adapter loader default.
+    cfg = resolve_lora_config_args(
+        job_config={},
+        metadata={},
+        lora_keys=_lora_keys(rank=32),
+    )
+    assert cfg["r"] == 32
+    assert cfg["lora_alpha"] == 64
+    assert cfg["_alpha_source"] == "default"
+
+
+def test_resolve_cli_override_wins():
+    cfg = resolve_lora_config_args(
+        job_config={"lora_config": {"r": 8, "lora_alpha": 4}},
+        metadata={"lora_alpha": 16},
+        lora_keys=_lora_keys(rank=8),
+        lora_alpha_override=99,
+    )
+    assert cfg["lora_alpha"] == 99
+    assert cfg["_alpha_source"] == "cli"
+
+
+def test_resolve_rank_comes_from_tensors_not_config():
+    # Job config drifted (says r=8) but the actual saved tensors are r=16.
+    # Trust the tensors.
+    cfg = resolve_lora_config_args(
+        job_config={"lora_config": {"r": 8, "lora_alpha": 16}},
+        metadata={},
+        lora_keys=_lora_keys(rank=16),
+    )
+    assert cfg["r"] == 16
+
+
+def test_resolve_passes_use_rslora_through():
+    cfg = resolve_lora_config_args(
+        job_config={"lora_config": {"r": 8, "lora_alpha": 16, "use_rslora": True}},
+        metadata={},
+        lora_keys=_lora_keys(rank=8),
+    )
+    assert cfg["use_rslora"] is True
