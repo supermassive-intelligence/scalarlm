@@ -1,5 +1,7 @@
 from cray_infra.util.get_config import get_config
 
+from fastapi import HTTPException, status
+
 import json
 import os
 import yaml
@@ -18,6 +20,8 @@ logger = logging.getLogger(__name__)
 async def launch_training_job(train_args: Dict):
     await wait_for_slurm()
 
+    validate_gpu_request(train_args)
+
     if job_already_exists(train_args):
         logging.info(f"Job already exists: {train_args['job_directory']}")
         return get_existing_job_info(train_args)
@@ -27,6 +31,32 @@ async def launch_training_job(train_args: Dict):
     start_slurm_job(train_args)
 
     return get_existing_job_info(train_args)
+
+
+def validate_gpu_request(train_args: Dict):
+    """
+    Reject a GPU-requesting job up front when no SLURM node has a GPU.
+    Without this, sbatch happily queues the job and it sits PENDING
+    forever (or worse, runs on CPU silently with the
+    `--gres=gpu` flag dropped). Raising here surfaces the mismatch
+    to the SDK caller as a 400 instead of a phantom-pending job.
+
+    `gpus: 0` in the job config opts out of the check for legit
+    CPU-only training.
+    """
+    requested_gpus = train_args.get("gpus", 1)
+    if requested_gpus < 1:
+        return
+    if not is_gpu_job(train_args):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Training job requested gpus={requested_gpus}, but no SLURM "
+                "node advertises a GPU (no `Gres=gpu` in `scontrol show nodes`). "
+                "Submit on a cluster with GPU nodes, or set `gpus: 0` in the "
+                "job config to run on CPU."
+            ),
+        )
 
 
 async def wait_for_slurm():
