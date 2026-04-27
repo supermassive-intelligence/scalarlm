@@ -26,6 +26,12 @@ class JobConfig(BaseModel):
     gradient_accumulation_steps: int = 4
     gradient_checkpointing: bool = False
 
+    # 0 disables; otherwise log torch.cuda.memory_allocated/reserved
+    # every N steps. Used to distinguish a real leak (allocated
+    # grows) from caching-allocator fragmentation (reserved grows,
+    # allocated flat).
+    cuda_memory_log_interval: int = 100
+
     # "auto" runs pick_attention_backend; can be forced to one of
     # "flash_attention_2" / "flash_attention_3" / "sdpa" / "eager"
     # when a model breaks auto-detection (e.g. Gemma-4 has per-layer

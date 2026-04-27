@@ -354,6 +354,7 @@ def get_callbacks(trainer):
     return [
         TimeoutCallback(trainer),
         CheckpointCallback(trainer),
+        CudaMemoryCallback(trainer),
     ]
 
 
@@ -388,6 +389,39 @@ class CheckpointCallback:
             logger.info(
                 f"Checkpoint on step {step} took {time.time() - start_time} seconds"
             )
+
+
+class CudaMemoryCallback:
+    """
+    Periodic snapshot of CUDA allocator state. The two numbers split a
+    leak diagnosis: `allocated` is live tensor bytes, `reserved` is
+    what PyTorch is holding from the driver (active + cached free
+    blocks). Reserved climbing while allocated stays flat is
+    fragmentation, not a leak. Logged every `cuda_memory_log_interval`
+    steps to keep the training log readable.
+    """
+
+    def __init__(self, trainer):
+        self.trainer = trainer
+        job_config = get_job_config()
+        self.interval = job_config.get("cuda_memory_log_interval", 100)
+
+    @main_rank_only
+    def on_step_end(self, step):
+        if self.interval <= 0 or step % self.interval != 0:
+            return
+        if not torch.cuda.is_available():
+            return
+        gib = 1024 ** 3
+        allocated = torch.cuda.memory_allocated() / gib
+        reserved = torch.cuda.memory_reserved() / gib
+        max_allocated = torch.cuda.max_memory_allocated() / gib
+        logger.info(
+            f"CUDA memory @ step {step}: "
+            f"allocated={allocated:.2f} GiB, "
+            f"reserved={reserved:.2f} GiB, "
+            f"max_allocated={max_allocated:.2f} GiB"
+        )
 
 
 class TrainingState:
