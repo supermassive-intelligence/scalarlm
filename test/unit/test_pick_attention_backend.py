@@ -120,6 +120,25 @@ def test_head_dim_over_256_forces_sdpa_even_when_flash_available():
     assert "288" in warning
 
 
+def test_head_dim_gate_reads_gemma4_global_head_dim():
+    # Gemma-4 31B's text_config has `head_dim=256` (sliding layers,
+    # under the cap) AND `global_head_dim=512` (full_attention layers,
+    # over the cap). Reading only `head_dim` lets the 512-dim layers
+    # through and crashes flash-attn at first forward. The gate has
+    # to consider every `*_head_dim` attribute the config carries.
+    text = _Cfg(
+        head_dim=256,
+        global_head_dim=512,
+        hidden_size=5376,
+        num_attention_heads=32,
+    )
+    cfg = _Cfg(text_config=text, model_type="gemma4")
+    with _stub_transformers_utils(fa2=True, fa3=False):
+        impl, warning = pick_attention_backend(cfg)
+    assert impl == "sdpa"
+    assert "512" in (warning or "")
+
+
 def test_head_dim_gate_walks_nested_text_config():
     # Multimodal HF configs (Gemma4, Llama4) hide the real transformer
     # params inside `text_config`. The picker has to walk that.

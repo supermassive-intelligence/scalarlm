@@ -105,37 +105,6 @@ def materialize_model(model_info):
         else:
             raise
 
-    # Runtime backstop. Config inspection underreports head_dim for
-    # architectures with per-layer attention sizing — Gemma-4
-    # alternates local-window and global blocks with different
-    # head_dims, and the top-level config only carries one of them.
-    # The crash this catches happens at first forward, not at load
-    # time, so the from_pretrained try/except above doesn't fire.
-    # Skip the override path: if the operator explicitly asked for
-    # a flash variant we shouldn't second-guess them.
-    if override in (None, "", "auto") and attn_impl in (
-        "flash_attention_2",
-        "flash_attention_3",
-    ):
-        runtime_head_dim = _runtime_max_head_dim(model_info["model"])
-        if (
-            runtime_head_dim is not None
-            and runtime_head_dim > _FLASH_MAX_HEAD_DIM
-        ):
-            logger.warning(
-                "Loaded model exposes head_dim=%d > flash-attn cap %d "
-                "(config didn't surface this). Reloading with sdpa.",
-                runtime_head_dim,
-                _FLASH_MAX_HEAD_DIM,
-            )
-            del model_info["model"]
-            model_info["model"] = AutoModelForCausalLM.from_pretrained(
-                model_info["model_name"],
-                torch_dtype="auto",
-                attn_implementation="sdpa",
-            )
-            attn_impl = "sdpa"
-
     total_time = time.time() - start_time
     logger.info(
         f"from_pretrained latency: {total_time:.2f}s ({total_time/60:.1f} minutes)"
@@ -212,22 +181,13 @@ def materialize_model(model_info):
 _FLASH_MAX_HEAD_DIM = 256
 
 
-def _runtime_max_head_dim(model) -> int | None:
-    """
-    Walk the loaded model for attention modules and return the
-    largest `head_dim` attribute found. HF's attention modules
-    (LlamaAttention, GemmaAttention, etc.) all expose `self.head_dim`
-    on each block — that's the value the kernel actually receives,
-    not what the top-level config reports. Returns None when
-    nothing is discoverable, in which case the caller should
-    leave the chosen backend alone.
-    """
-    best: int | None = None
-    for module in model.modules():
-        head_dim = getattr(module, "head_dim", None)
-        if isinstance(head_dim, int) and head_dim > 0:
-            best = head_dim if best is None else max(best, head_dim)
-    return best
+# Architectures with per-layer attention sizing put the per-block
+# dim under different attribute names. Gemma-4's text_config carries
+# `head_dim=256` for sliding_attention layers AND `global_head_dim=512`
+# for the full_attention layers — both have to be checked or the
+# 512-dim layers slip past the gate and crash flash-attn at first
+# forward. New names get added here as we encounter them.
+_HEAD_DIM_ATTRS = ("head_dim", "global_head_dim", "local_head_dim")
 
 
 def _max_head_dim(config: object) -> int | None:
@@ -237,11 +197,12 @@ def _max_head_dim(config: object) -> int | None:
     when nothing useful is discoverable — caller should treat that as
     "no information, don't gate".
 
-    Each visited config contributes either its explicit `head_dim`
-    attribute, or `hidden_size // num_attention_heads` when that pair
-    is present. Multimodal HF configs (Gemma4, Llama4) put the real
-    transformer params inside `text_config` rather than at the top
-    level, so we have to walk one level down.
+    Each visited config contributes the largest `*_head_dim` attribute
+    it carries (see `_HEAD_DIM_ATTRS`); when none is present, we fall
+    back to `hidden_size // num_attention_heads`. Multimodal HF
+    configs (Gemma4, Llama4) put the real transformer params inside
+    `text_config` rather than at the top level, so we walk one level
+    down.
     """
     if config is None:
         return None
@@ -255,9 +216,14 @@ def _max_head_dim(config: object) -> int | None:
             return
         seen.add(id(cfg))
 
-        head_dim = getattr(cfg, "head_dim", None)
-        if isinstance(head_dim, int) and head_dim > 0:
-            best = head_dim if best is None else max(best, head_dim)
+        explicit_dim: int | None = None
+        for attr in _HEAD_DIM_ATTRS:
+            val = getattr(cfg, attr, None)
+            if isinstance(val, int) and val > 0:
+                explicit_dim = val if explicit_dim is None else max(explicit_dim, val)
+
+        if explicit_dim is not None:
+            best = explicit_dim if best is None else max(best, explicit_dim)
         else:
             hidden = getattr(cfg, "hidden_size", None)
             heads = getattr(cfg, "num_attention_heads", None)
