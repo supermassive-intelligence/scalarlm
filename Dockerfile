@@ -321,7 +321,14 @@ COPY ./infra/requirements-megatron-cpu.txt ${INSTALL_ROOT}/requirements-megatron
 COPY ./requirements.txt ${INSTALL_ROOT}/requirements.txt
 
 RUN if [ "$VLLM_TARGET_DEVICE" != "cpu" ]; then \
-        uv pip install --no-deps --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements-megatron.txt; \
+        # `--no-build-isolation` is needed so flash-attn's setup.py
+        # can import the already-installed torch to pick CUDA + arch
+        # flags. Pre-built flash-attn wheels are still used when one
+        # matches the image's torch + CUDA pair; the flag only
+        # changes the source-build path. The other entries
+        # (transformers, accelerate, peft, ...) ship pure-Python
+        # wheels and don't care either way.
+        uv pip install --no-deps --no-build-isolation --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements-megatron.txt; \
     fi && \
     if [ "$VLLM_TARGET_DEVICE" != "cuda" ]; then \
         uv pip install --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements-megatron-cpu.txt; \
