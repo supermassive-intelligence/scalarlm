@@ -60,10 +60,17 @@ def materialize_model(model_info):
     job_config = get_job_config()
     download_model(model_info["model_name"])
 
-    attn_impl, warning = pick_attention_backend(model_info["model_config"])
-    if warning:
-        logger.warning(warning)
-    logger.info("Loading model with attn_implementation=%s", attn_impl)
+    override = job_config.get("attn_implementation", "auto")
+    if override and override != "auto":
+        attn_impl = override
+        logger.info(
+            "Using attn_implementation=%s from job_config override", attn_impl
+        )
+    else:
+        attn_impl, warning = pick_attention_backend(model_info["model_config"])
+        if warning:
+            logger.warning(warning)
+        logger.info("Loading model with attn_implementation=%s", attn_impl)
 
     start_time = time.time()
     try:
@@ -89,6 +96,7 @@ def materialize_model(model_info):
                 attn_impl,
                 e,
             )
+            attn_impl = "sdpa"
             model_info["model"] = AutoModelForCausalLM.from_pretrained(
                 model_info["model_name"],
                 torch_dtype="auto",
@@ -96,6 +104,37 @@ def materialize_model(model_info):
             )
         else:
             raise
+
+    # Runtime backstop. Config inspection underreports head_dim for
+    # architectures with per-layer attention sizing — Gemma-4
+    # alternates local-window and global blocks with different
+    # head_dims, and the top-level config only carries one of them.
+    # The crash this catches happens at first forward, not at load
+    # time, so the from_pretrained try/except above doesn't fire.
+    # Skip the override path: if the operator explicitly asked for
+    # a flash variant we shouldn't second-guess them.
+    if override in (None, "", "auto") and attn_impl in (
+        "flash_attention_2",
+        "flash_attention_3",
+    ):
+        runtime_head_dim = _runtime_max_head_dim(model_info["model"])
+        if (
+            runtime_head_dim is not None
+            and runtime_head_dim > _FLASH_MAX_HEAD_DIM
+        ):
+            logger.warning(
+                "Loaded model exposes head_dim=%d > flash-attn cap %d "
+                "(config didn't surface this). Reloading with sdpa.",
+                runtime_head_dim,
+                _FLASH_MAX_HEAD_DIM,
+            )
+            del model_info["model"]
+            model_info["model"] = AutoModelForCausalLM.from_pretrained(
+                model_info["model_name"],
+                torch_dtype="auto",
+                attn_implementation="sdpa",
+            )
+            attn_impl = "sdpa"
 
     total_time = time.time() - start_time
     logger.info(
@@ -171,6 +210,24 @@ def materialize_model(model_info):
 # exceeds this bound. fa3 inherits the same cap for our purposes —
 # we'd rather take the safe sdpa path than crash mid-step.
 _FLASH_MAX_HEAD_DIM = 256
+
+
+def _runtime_max_head_dim(model) -> int | None:
+    """
+    Walk the loaded model for attention modules and return the
+    largest `head_dim` attribute found. HF's attention modules
+    (LlamaAttention, GemmaAttention, etc.) all expose `self.head_dim`
+    on each block — that's the value the kernel actually receives,
+    not what the top-level config reports. Returns None when
+    nothing is discoverable, in which case the caller should
+    leave the chosen backend alone.
+    """
+    best: int | None = None
+    for module in model.modules():
+        head_dim = getattr(module, "head_dim", None)
+        if isinstance(head_dim, int) and head_dim > 0:
+            best = head_dim if best is None else max(best, head_dim)
+    return best
 
 
 def _max_head_dim(config: object) -> int | None:

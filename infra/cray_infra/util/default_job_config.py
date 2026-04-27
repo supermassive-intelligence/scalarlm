@@ -26,6 +26,12 @@ class JobConfig(BaseModel):
     gradient_accumulation_steps: int = 4
     gradient_checkpointing: bool = False
 
+    # "auto" runs pick_attention_backend; can be forced to one of
+    # "flash_attention_2" / "flash_attention_3" / "sdpa" / "eager"
+    # when a model breaks auto-detection (e.g. Gemma-4 has per-layer
+    # head_dim variation that config inspection underreports).
+    attn_implementation: str = "auto"
+
     max_token_block_size: int = 16777216 # 16 mega tokens
 
     training_mode: str = "language_model"  # or "embedding"
