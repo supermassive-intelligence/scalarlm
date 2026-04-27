@@ -24,6 +24,7 @@ class JobConfig(BaseModel):
     batch_size: int = 1
     gradient_clip_value: float = 1.0
     gradient_accumulation_steps: int = 4
+    gradient_checkpointing: bool = False
 
     max_token_block_size: int = 16777216 # 16 mega tokens
 

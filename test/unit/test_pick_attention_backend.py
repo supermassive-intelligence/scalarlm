@@ -95,3 +95,73 @@ def test_handles_torch_cuda_check_raising():
         impl, warning = pick_attention_backend()
     assert impl == "sdpa"
     assert warning is None
+
+
+# ---- head_dim gate --------------------------------------------------------
+
+
+class _Cfg:
+    """Tiny stand-in for an HF config object — only needs attribute access."""
+
+    def __init__(self, **kwargs):
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+
+
+def test_head_dim_over_256_forces_sdpa_even_when_flash_available():
+    # Gemma-4 case: flash-attn 2 wheel is installed but the model has
+    # head_dim > 256 which flash-attn's CUDA kernel rejects.
+    cfg = _Cfg(head_dim=288, hidden_size=8192, num_attention_heads=32)
+    with _stub_transformers_utils(fa2=True, fa3=True):
+        impl, warning = pick_attention_backend(cfg)
+    assert impl == "sdpa"
+    assert warning is not None
+    assert "head_dim" in warning
+    assert "288" in warning
+
+
+def test_head_dim_gate_walks_nested_text_config():
+    # Multimodal HF configs (Gemma4, Llama4) hide the real transformer
+    # params inside `text_config`. The picker has to walk that.
+    text = _Cfg(head_dim=320)
+    cfg = _Cfg(text_config=text, vision_config=_Cfg(head_dim=64))
+    with _stub_transformers_utils(fa2=True, fa3=False):
+        impl, warning = pick_attention_backend(cfg)
+    assert impl == "sdpa"
+    assert "320" in (warning or "")
+
+
+def test_head_dim_at_256_still_permits_flash():
+    # Boundary: 256 is exactly flash-attn's cap, not over it.
+    cfg = _Cfg(head_dim=256)
+    with _stub_transformers_utils(fa2=True, fa3=False):
+        impl, warning = pick_attention_backend(cfg)
+    assert impl == "flash_attention_2"
+    assert warning is None
+
+
+def test_head_dim_derived_from_hidden_size_when_attribute_missing():
+    # Configs without explicit head_dim still need to be inspected via
+    # hidden_size // num_attention_heads.
+    cfg = _Cfg(hidden_size=8192, num_attention_heads=16)  # 512
+    with _stub_transformers_utils(fa2=True, fa3=False):
+        impl, _ = pick_attention_backend(cfg)
+    assert impl == "sdpa"
+
+
+def test_no_model_config_does_not_gate_flash():
+    # Backwards-compat: callers that don't pass a config get the old
+    # behaviour (flash if installed, regardless of model shape).
+    with _stub_transformers_utils(fa2=True, fa3=False):
+        impl, _ = pick_attention_backend()
+    assert impl == "flash_attention_2"
+
+
+def test_unprobeable_config_does_not_gate_flash():
+    # If no head_dim and no hidden_size/heads pair are discoverable,
+    # we have no signal — better to let flash try and fall through to
+    # the materialize_model retry-on-sdpa belt rather than block it.
+    cfg = _Cfg()
+    with _stub_transformers_utils(fa2=True, fa3=False):
+        impl, _ = pick_attention_backend(cfg)
+    assert impl == "flash_attention_2"
