@@ -143,7 +143,13 @@ class TrainingLoop:
 
         checkpoint = torch.load(latest_checkpoint_path, weights_only=True)
 
-        self.training_state.current_step = checkpoint["step"]
+        # `step` in the checkpoint is the step that *completed* when the
+        # save fired (CheckpointCallback runs in on_step_end). Start the
+        # loop at the next step so we don't redo the saved step — and,
+        # because the saved step lands on a steps_per_checkpoint
+        # boundary, redoing it would also trigger an immediate
+        # re-checkpoint at on_step_end.
+        self.training_state.current_step = checkpoint["step"] + 1
         self.training_state.epoch = checkpoint["epoch"]
         self.training_state.nan_steps = checkpoint.get("nan_steps", 0)
         self.training_state.model_info["model"].load_state_dict(
