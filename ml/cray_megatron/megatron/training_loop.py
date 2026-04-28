@@ -211,10 +211,39 @@ class TrainingLoop:
             # eventually catches up — matches the slow GiB climb we
             # see only when grad checkpointing is on. gc.collect() +
             # empty_cache() forces the reclaim immediately.
+            #
+            # The before/after snapshot directly measures whether the
+            # cleanup actually freed anything. If `allocated` doesn't
+            # drop, something downstream is still holding the graph
+            # (e.g. an HF/PEFT cache or a hook closure) and we need a
+            # different strategy than gc.collect — likely a no-grad
+            # probe forward to skip building the graph in the first
+            # place.
+            before_alloc = (
+                torch.cuda.memory_allocated() / (1024 ** 3)
+                if torch.cuda.is_available() else 0.0
+            )
+            before_reserved = (
+                torch.cuda.memory_reserved() / (1024 ** 3)
+                if torch.cuda.is_available() else 0.0
+            )
+
             avg_loss = float("nan")
             del loss, forward_kwargs
             gc.collect()
-            torch.cuda.empty_cache()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+                after_alloc = torch.cuda.memory_allocated() / (1024 ** 3)
+                after_reserved = torch.cuda.memory_reserved() / (1024 ** 3)
+                logger.warning(
+                    f"NaN microbatch cleanup: "
+                    f"allocated {before_alloc:.2f}->{after_alloc:.2f} GiB "
+                    f"(freed {before_alloc - after_alloc:.2f}), "
+                    f"reserved {before_reserved:.2f}->{after_reserved:.2f} GiB "
+                    f"(freed {before_reserved - after_reserved:.2f})"
+                )
+
             self.print_microbatch_info(accum_step, avg_loss, start_time)
             return avg_loss
 
