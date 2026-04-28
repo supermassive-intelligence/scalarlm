@@ -18,6 +18,7 @@ from torch.optim import AdamW
 
 import torch
 
+import gc
 import time
 import logging
 from gpu_aware_mpi import allreduce, get_size
@@ -189,7 +190,10 @@ class TrainingLoop:
         # forward pass
         loss = self.training_state.model_info["model"](**forward_kwargs).loss
 
-        is_nan = torch.isnan(torch.tensor(loss))
+        # Use isfinite (catches Inf too — AdamW poisons just as fast on
+        # Inf as on NaN) and pull the bool out via .item() so the check
+        # doesn't keep a graph-bearing tensor alive in `is_nan`.
+        is_nan = not torch.isfinite(loss).item()
 
         if is_nan:
             logger.warning(
@@ -197,8 +201,22 @@ class TrainingLoop:
             )
             logger.warning(f"Skipping backward pass for microbatch {accum_step + 1}")
 
-            # make the loss 0.0 of the same type as loss
-            loss = torch.tensor(0.0, dtype=loss.dtype, device=loss.device)
+            # Drop the forward graph explicitly. Under gradient
+            # checkpointing the graph is full of CheckpointFunction
+            # ctx closures that form reference cycles with their saved
+            # activations; without backward() to walk and free them,
+            # only Python's gen-2 GC can break the cycles, and gen-2
+            # rarely fires during a tight training loop. Result: every
+            # NaN microbatch leaks a full activation graph until GC
+            # eventually catches up — matches the slow GiB climb we
+            # see only when grad checkpointing is on. gc.collect() +
+            # empty_cache() forces the reclaim immediately.
+            avg_loss = float("nan")
+            del loss, forward_kwargs
+            gc.collect()
+            torch.cuda.empty_cache()
+            self.print_microbatch_info(accum_step, avg_loss, start_time)
+            return avg_loss
 
         # Scale loss to account for accumulation
         scaled_loss = loss / gradient_accumulation_steps
@@ -207,8 +225,7 @@ class TrainingLoop:
         _, avg_loss = self.sync_loss(loss)
 
         # backward pass (accumulates gradients)
-        if not is_nan:
-            scaled_loss.backward()
+        scaled_loss.backward()
 
         # Log info for each micro-batch
         self.print_microbatch_info(accum_step, avg_loss, start_time)
