@@ -106,16 +106,34 @@ async def create_completions(request: CompletionRequest, raw_request: Request):
 
 @openai_v1_router.post("/chat/completions")
 async def create_chat_completions(request: ChatCompletionRequest, raw_request: Request):
-    """Create chat completions - proxy to vLLM server."""
-    config = get_config()
-    params = _filter_params(request.model_dump(mode="json", exclude_none=True), _CHAT_ALLOWED_KEYS)
-    _ensure_usage_reported(params)
-    logger.info("Received chat completions request: %s", params)
-    return _proxy_streaming(
-        upstream_url=config["vllm_api_url"] + "/v1/chat/completions",
-        params=params,
-        endpoint_label="chat completions",
+    """
+    Create chat completions.
+
+    Streaming requests (stream=True) keep the existing direct-to-vLLM
+    SSE proxy — SSE keeps the connection alive natively, so it doesn't
+    need the queue-and-heartbeat machinery. Non-streaming requests go
+    through the new queue path: admission control → coalescer →
+    SQLite InferenceWorkQueue → worker → result router → chunked-JSON
+    heartbeat response. See docs/openai-chat-completions-queue.md §3.1.
+    """
+    if getattr(request, "stream", False):
+        config = get_config()
+        params = _filter_params(request.model_dump(mode="json", exclude_none=True), _CHAT_ALLOWED_KEYS)
+        _ensure_usage_reported(params)
+        logger.info("Received streaming chat completions request: %s", params)
+        return _proxy_streaming(
+            upstream_url=config["vllm_api_url"] + "/v1/chat/completions",
+            params=params,
+            endpoint_label="chat completions",
+        )
+
+    # Non-streaming path: queue-backed with admission control and
+    # whitespace-heartbeat transport.
+    from cray_infra.api.fastapi.chat_completions.handler import (
+        chat_completions_via_queue,
     )
+
+    return await chat_completions_via_queue(request)
 
 
 # ---------------------------------------------------------------------------

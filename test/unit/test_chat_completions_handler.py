@@ -177,24 +177,6 @@ async def test_429_does_not_register_correlation_id(patched_components):
 
 
 @pytest.mark.asyncio
-async def test_streaming_request_bypasses_queue_path(patched_components):
-    """stream=True clients are routed elsewhere (existing direct-to-vLLM path)."""
-    coalescer = patched_components["coalescer"]
-    coalescer.submit = AsyncMock()
-
-    sentinel = MagicMock(name="streaming-response")
-
-    with patch.object(
-        h, "proxy_streaming_to_vllm", new_callable=AsyncMock, return_value=sentinel
-    ) as proxy:
-        out = await h.chat_completions_via_queue(_request(stream=True))
-
-    assert out is sentinel
-    proxy.assert_awaited_once()
-    coalescer.submit.assert_not_called()
-
-
-@pytest.mark.asyncio
 async def test_disconnect_during_stream_unregisters_cid(patched_components):
     """
     The streaming generator's `finally` must unregister the cid even

@@ -50,14 +50,15 @@ logger = logging.getLogger(__name__)
 
 async def chat_completions_via_queue(request: Any) -> StreamingResponse:
     """
-    Top-level handler. `request` is an OpenAI-compatible
-    ChatCompletionRequest (vllm.entrypoints.openai.protocol or
-    equivalent). The shape is duck-typed: we read `model`, `messages`,
-    `max_tokens`, `temperature`, and `stream`.
-    """
-    if getattr(request, "stream", False):
-        return await proxy_streaming_to_vllm(request)
+    Non-streaming chat completions handler. The router (see
+    openai_v1_router.py) is responsible for branching on
+    `request.stream`; this function never sees a streaming request.
 
+    `request` is an OpenAI-compatible ChatCompletionRequest
+    (vllm.entrypoints.openai.protocol or equivalent). The shape is
+    duck-typed: we read `model`, `messages`, `max_tokens`, and
+    `temperature`.
+    """
     # Admission check first: rejecting an overload request before
     # rendering the chat template avoids paying the (possibly first-
     # use, multi-second) tokenizer load on requests we're going to
@@ -176,15 +177,3 @@ def get_queue_depth() -> int:
     return get_metrics().queue_depth
 
 
-async def proxy_streaming_to_vllm(request: Any) -> StreamingResponse:
-    """
-    For stream=True clients, hand off to the existing direct-to-vLLM
-    proxy in openai_v1_router. Imported lazily to avoid the router's
-    import-time dependency on vllm-only modules during unit tests of
-    this module.
-    """
-    from cray_infra.api.fastapi.routers.openai_v1_router import (
-        create_chat_completions as _existing_proxy,
-    )
-
-    return await _existing_proxy(request, raw_request=None)
