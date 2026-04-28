@@ -1,6 +1,7 @@
 
 import time
 from collections import deque
+from typing import Dict
 
 generate_metrics = None
 
@@ -11,9 +12,19 @@ generate_metrics = None
 # between polls and rendered a flat sparkline.
 RATE_WINDOW_SECONDS = 60.0
 
+# Bounded sample window for chat batch-size and request-duration
+# histograms. Big enough for stable p50/p99 under realistic QPS, small
+# enough that an O(n log n) sort at read time is trivial.
+CHAT_HISTOGRAM_SAMPLE_SIZE = 1024
+
 
 class Metrics:
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        buffering_check_proxy_timeout_seconds: float = 60.0,
+        buffering_match_threshold_seconds: float = 0.5,
+    ):
         self.queue_depth = 0
         # Concurrent OpenAI-streaming requests in flight. Driven by
         # _wrap_with_metrics in openai_v1_router.py; that path doesn't
@@ -32,6 +43,21 @@ class Metrics:
         # Per-completion window: (timestamp, tokens, flops). Pruned
         # to the last RATE_WINDOW_SECONDS in get_all_metrics.
         self._rate_window: deque = deque()
+
+        # ----- chat-completions metrics (docs §13) -----
+        # Six metrics surfaced through get_all_metrics. The chat path
+        # is independent of the SDK path's queue_depth bookkeeping;
+        # nothing here mutates the existing /v1/generate counters.
+        self.chat_in_flight: int = 0
+        self.chat_admitted_429_count: int = 0
+        self.chat_total_count: int = 0
+        self.chat_apparent_buffering_count: int = 0
+        self._chat_batch_sizes: deque = deque(maxlen=CHAT_HISTOGRAM_SAMPLE_SIZE)
+        self._chat_request_durations: deque = deque(maxlen=CHAT_HISTOGRAM_SAMPLE_SIZE)
+        self._chat_start_times: Dict[str, float] = {}
+
+        self._buffering_proxy_timeout = buffering_check_proxy_timeout_seconds
+        self._buffering_match_threshold = buffering_match_threshold_seconds
 
     def record_completed_request(self, token_count: int, flop_count: int):
         """
@@ -82,6 +108,64 @@ class Metrics:
         if self.streaming_inflight > 0:
             self.streaming_inflight -= 1
 
+    # ------------------------------------------------------------------
+    # Chat-completions metrics (docs §13)
+    # ------------------------------------------------------------------
+
+    def record_chat_admitted(self, correlation_id: str) -> None:
+        """Handler admitted a request: in_flight++, total++, log start time."""
+        self.record_chat_admitted_with_clock(correlation_id, start_time=time.time())
+
+    def record_chat_admitted_with_clock(
+        self, correlation_id: str, *, start_time: float
+    ) -> None:
+        """Test seam — same as record_chat_admitted but takes the clock value."""
+        self.chat_in_flight += 1
+        self.chat_total_count += 1
+        self._chat_start_times[correlation_id] = start_time
+
+    def record_chat_rejected_429(self) -> None:
+        """Admission denied a request with 429."""
+        self.chat_admitted_429_count += 1
+        self.chat_total_count += 1
+
+    def record_chat_resolved(self, correlation_id: str) -> None:
+        """Worker delivered a result for an admitted request."""
+        self.record_chat_resolved_with_clock(correlation_id, end_time=time.time())
+
+    def record_chat_resolved_with_clock(
+        self, correlation_id: str, *, end_time: float
+    ) -> None:
+        start = self._chat_start_times.pop(correlation_id, None)
+        if start is None:
+            # Unknown cid — admitted before this Metrics instance
+            # existed, or already cleaned up. Don't underflow in_flight.
+            return
+
+        if self.chat_in_flight > 0:
+            self.chat_in_flight -= 1
+
+        duration = max(0.0, end_time - start)
+        self._chat_request_durations.append(duration)
+
+        # Apparent-buffering heuristic: if the request landed within
+        # `match_threshold` of a known proxy idle timeout, flag it.
+        # See docs §13.2 — this is a signal, not a strict measurement.
+        if abs(duration - self._buffering_proxy_timeout) <= self._buffering_match_threshold:
+            self.chat_apparent_buffering_count += 1
+
+    def record_chat_unregistered(self, correlation_id: str) -> None:
+        """Client disconnected before resolution — drop the in_flight slot."""
+        if self._chat_start_times.pop(correlation_id, None) is None:
+            return
+        if self.chat_in_flight > 0:
+            self.chat_in_flight -= 1
+
+    def record_chat_batch_size(self, size: int) -> None:
+        """Coalescer flushed a batch of `size` requests as one queue row."""
+        if size > 0:
+            self._chat_batch_sizes.append(size)
+
     def get_all_metrics(self, sdk_queue_depth=None):
         """
         Get the current metrics.
@@ -109,6 +193,20 @@ class Metrics:
             "token/s": token_rate,
             "request/s": request_rate,
             "flop/s": flop_rate,
+            # Chat-completions metrics (docs §13).
+            "chat_in_flight": self.chat_in_flight,
+            "chat_admitted_429_count": self.chat_admitted_429_count,
+            "chat_total_count": self.chat_total_count,
+            "chat_admitted_429_rate": (
+                self.chat_admitted_429_count / self.chat_total_count
+                if self.chat_total_count
+                else 0.0
+            ),
+            "chat_batch_size_p50": _percentile(self._chat_batch_sizes, 50),
+            "chat_batch_size_p99": _percentile(self._chat_batch_sizes, 99),
+            "chat_request_duration_p50": _percentile(self._chat_request_durations, 50),
+            "chat_request_duration_p99": _percentile(self._chat_request_durations, 99),
+            "chat_apparent_buffering_count": self.chat_apparent_buffering_count,
         }
 
     def _windowed_rates(self):
@@ -153,3 +251,13 @@ def get_metrics() -> Metrics:
     if generate_metrics is None:
         generate_metrics = Metrics()
     return generate_metrics
+
+
+def _percentile(samples, percentile: int):
+    """Simple percentile over a small bounded window. O(n log n) per
+    read, called only from get_all_metrics, n <= CHAT_HISTOGRAM_SAMPLE_SIZE."""
+    if not samples:
+        return 0
+    ordered = sorted(samples)
+    k = min(int(len(ordered) * percentile / 100), len(ordered) - 1)
+    return ordered[k]

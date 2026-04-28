@@ -82,3 +82,45 @@ class Config(BaseModel):
     hf_encrypted_token: bytes = b"gAAAAABpyvSQu2QUlUfp-YavLwueXqCU0j2Lhe9Lddij4B-qV3JngfcH4uCtjVGXlWAyM2o91nZXhsS3B3q3zKNiLxnxhFpJd0ddbwWPysez2OpZX4jTFOA9-xjQVk454A_qk6pdJxMv"
     encryption_key: bytes = b"JAJOZunNSRFeXWXWVVVJfiKSzdzFMw0yFn8_JK50h60="
 
+    # ------------------------------------------------------------------
+    # OpenAI chat-completions queue (docs/openai-chat-completions-queue.md)
+    # ------------------------------------------------------------------
+
+    # Mirrors vLLM's --max-num-seqs. Chat admission threshold is a
+    # multiple of this. Kept in scalarlm config so admission decisions
+    # don't round-trip to vLLM at request time.
+    max_num_seqs: int = 256
+
+    # Admission high-water mark = chat_admit_factor × max_num_seqs.
+    # Beyond this, requests get HTTP 429 + Retry-After. See §5.
+    chat_admit_factor: int = 4
+
+    # Coalescer (§6) — packs admitted requests into one queue row to
+    # amortize SQLite write cost. packing_factor is the primary
+    # throughput knob (§6.3): start here, raise if 429 rate climbs.
+    chat_coalescer_packing_factor: int = 10
+    chat_coalescer_window_ms: int = 50
+    chat_coalescer_bypass_threshold: int = 10
+
+    # Whitespace heartbeat interval (§9). 4 s is below httpx's default
+    # 5 s read timeout, leaving margin for slow clocks / event-loop
+    # jitter without the caller seeing an idle gap.
+    chat_heartbeat_interval_seconds: float = 4.0
+
+    # Optional cap on per-request total time. Unset by default — the
+    # queue's existing ack-timeout (inference-queue.md §5.2) provides
+    # a backstop for stuck batches.
+    chat_max_request_seconds: Optional[float] = None
+
+    # WaitEstimator (§5). Used for the Retry-After hint on 429.
+    chat_wait_estimator_default_seconds: float = 5.0
+    chat_wait_estimator_padding: float = 1.5
+    chat_wait_estimator_sample_size: int = 32
+
+    # Apparent-buffering heuristic (§13.2). Flags requests whose
+    # duration falls within `match_threshold_seconds` of a known
+    # proxy idle timeout — strong signal that an upstream proxy is
+    # buffering responses despite our heartbeats.
+    chat_buffering_check_proxy_timeout_seconds: float = 60.0
+    chat_buffering_match_threshold_seconds: float = 0.5
+

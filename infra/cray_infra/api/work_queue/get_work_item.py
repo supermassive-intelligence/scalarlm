@@ -1,4 +1,5 @@
 from cray_infra.api.work_queue.acquire_file_lock import acquire_file_lock
+from cray_infra.api.work_queue.correlation_id_map import stash_correlation_id
 
 from cray_infra.api.work_queue.group_request_id_to_status_path import (
     group_request_id_to_status_path,
@@ -95,6 +96,20 @@ async def fill_work_queue(work_queue):
                 (request, make_id(group_request_id, index))
                 for index, request in enumerate(requests)
             ]
+
+            # Stash chat-completions correlation_ids from this batch
+            # so update_and_ack can later resolve the per-prompt
+            # ResultRouter future. Generate-path entries (no cid) are
+            # skipped — pop_correlation_id will return None for them
+            # and the resolve hook becomes a no-op.
+            for index, batch_request in enumerate(requests):
+                if not isinstance(batch_request, dict):
+                    continue
+                cid = batch_request.get("correlation_id")
+                if cid:
+                    await stash_correlation_id(
+                        make_id(group_request_id, index), cid
+                    )
 
             break
 
