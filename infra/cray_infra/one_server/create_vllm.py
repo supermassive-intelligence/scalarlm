@@ -23,6 +23,11 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Re-export so the arg-builder is reachable from its historical location
+# for any downstream importers, while the torch-free implementation lives
+# in vllm_cli_args for unit tests.
+from cray_infra.one_server.vllm_cli_args import build_vllm_cli_args  # noqa: E402
+
 async def create_vllm(server_status, port):
 
     print(f"DEBUG: BEFORE CONFIG - Environment variables:")
@@ -54,24 +59,7 @@ async def create_vllm(server_status, port):
         description="vLLM OpenAI-Compatible RESTful API server."
     )
     parser = make_arg_parser(parser)
-    args = [
-        f"--dtype={config['dtype']}",
-        f"--max-model-len=auto",
-        #f"--max-num-batched-tokens={config['max_model_length']}",
-        #f"--max-seq-len-to-capture={config['max_model_length']}",
-        f"--gpu-memory-utilization={config['gpu_memory_utilization']}",
-        f"--max-log-len={config['max_log_length']}",
-        f"--tensor-parallel-size={config['tensor_parallel_size']}",
-        #f"--model_impl transformers",
-        "--enable-lora",
-        "--enable-auto-tool-choice",
-        "--tool-call-parser=hermes",
-        "--trust-remote-code",
-    ]
-
-
-    if config['limit_mm_per_prompt'] is not None:
-        args.append(f"--limit-mm-per-prompt={config['limit_mm_per_prompt']}")
+    args = build_vllm_cli_args(config)
 
     # Extra SCALARLM_VLLM_ARGS are passed via environment variable, and should override config values
     extra_args = os.environ.get("SCALARLM_VLLM_ARGS", "")
