@@ -43,6 +43,7 @@ from cray_infra.api.fastapi.chat_completions.result_router import (
     ResultRouter,
     get_result_router,
 )
+from cray_infra.generate.metrics import get_metrics
 from cray_infra.util.get_config import get_config
 
 logger = logging.getLogger(__name__)
@@ -77,6 +78,7 @@ async def chat_completions_via_queue(request: Any) -> StreamingResponse:
             queue_depth=queue_depth,
             max_num_seqs=config["max_num_seqs"],
         )
+        get_metrics().record_chat_rejected_429()
         raise HTTPException(
             status_code=429,
             detail="Server is over capacity; retry after the indicated interval.",
@@ -91,6 +93,7 @@ async def chat_completions_via_queue(request: Any) -> StreamingResponse:
 
     correlation_id = str(uuid4())
     future = router.register(correlation_id)
+    get_metrics().record_chat_admitted(correlation_id)
 
     backend_request = {
         "prompt": rendered_prompt,
@@ -123,6 +126,11 @@ async def _stream_and_unregister(
             yield chunk
     finally:
         router.unregister(correlation_id)
+        # If the worker resolved already, this is a no-op (the cid's
+        # start_time was popped during record_chat_resolved). If the
+        # client disconnected before the worker resolved, this is the
+        # only place that decrements chat_in_flight.
+        get_metrics().record_chat_unregistered(correlation_id)
 
 
 # ---------------------------------------------------------------------------

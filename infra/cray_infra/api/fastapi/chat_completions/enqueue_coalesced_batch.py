@@ -40,3 +40,10 @@ async def enqueue_coalesced_batch(batch: List[Tuple[Any, str]]) -> None:
         handle.write(contents)
 
     await push_into_queue(len(requests), path)
+
+    # Record the realized batch size for the chat_batch_size_p50/p99
+    # histogram (docs §13). Imported lazily so this module remains
+    # importable in unit tests that don't pull in metrics state.
+    from cray_infra.generate.metrics import get_metrics
+
+    get_metrics().record_chat_batch_size(len(requests))

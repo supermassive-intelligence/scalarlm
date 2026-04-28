@@ -57,6 +57,12 @@ async def update_and_ack(inference_work_queue, request_id, item):
     correlation_id = await pop_correlation_id(request_id)
     if correlation_id is not None:
         get_result_router().resolve(correlation_id, item)
+        # Recording the duration here happens at the same instant the
+        # router future resolves — close enough to "user-perceived
+        # delivery" without instrumenting the chunked-JSON byte writer.
+        from cray_infra.generate.metrics import get_metrics
+
+        get_metrics().record_chat_resolved(correlation_id)
 
     if in_memory_results["current_index"] >= in_memory_results["total_requests"]:
         await finish_work_queue_item(request_id, inference_work_queue, in_memory_results)
