@@ -18,7 +18,6 @@ from torch.optim import AdamW
 
 import torch
 
-import gc
 import time
 import logging
 from gpu_aware_mpi import allreduce, get_size
@@ -190,70 +189,31 @@ class TrainingLoop:
         # forward pass
         loss = self.training_state.model_info["model"](**forward_kwargs).loss
 
-        # Use isfinite (catches Inf too — AdamW poisons just as fast on
-        # Inf as on NaN) and pull the bool out via .item() so the check
-        # doesn't keep a graph-bearing tensor alive in `is_nan`.
-        is_nan = not torch.isfinite(loss).item()
-
-        if is_nan:
-            logger.warning(
-                f"NaN loss detected during forward pass at microbatch {accum_step + 1}"
-            )
-            logger.warning(f"Skipping backward pass for microbatch {accum_step + 1}")
-
-            # Drop the forward graph explicitly. Under gradient
-            # checkpointing the graph is full of CheckpointFunction
-            # ctx closures that form reference cycles with their saved
-            # activations; without backward() to walk and free them,
-            # only Python's gen-2 GC can break the cycles, and gen-2
-            # rarely fires during a tight training loop. Result: every
-            # NaN microbatch leaks a full activation graph until GC
-            # eventually catches up — matches the slow GiB climb we
-            # see only when grad checkpointing is on. gc.collect() +
-            # empty_cache() forces the reclaim immediately.
-            #
-            # The before/after snapshot directly measures whether the
-            # cleanup actually freed anything. If `allocated` doesn't
-            # drop, something downstream is still holding the graph
-            # (e.g. an HF/PEFT cache or a hook closure) and we need a
-            # different strategy than gc.collect — likely a no-grad
-            # probe forward to skip building the graph in the first
-            # place.
-            before_alloc = (
-                torch.cuda.memory_allocated() / (1024 ** 3)
-                if torch.cuda.is_available() else 0.0
-            )
-            before_reserved = (
-                torch.cuda.memory_reserved() / (1024 ** 3)
-                if torch.cuda.is_available() else 0.0
-            )
-
-            avg_loss = float("nan")
-            del loss, forward_kwargs
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-                after_alloc = torch.cuda.memory_allocated() / (1024 ** 3)
-                after_reserved = torch.cuda.memory_reserved() / (1024 ** 3)
-                logger.warning(
-                    f"NaN microbatch cleanup: "
-                    f"allocated {before_alloc:.2f}->{after_alloc:.2f} GiB "
-                    f"(freed {before_alloc - after_alloc:.2f}), "
-                    f"reserved {before_reserved:.2f}->{after_reserved:.2f} GiB "
-                    f"(freed {before_reserved - after_reserved:.2f})"
-                )
-
-            self.print_microbatch_info(accum_step, avg_loss, start_time)
-            return avg_loss
-
         # Scale loss to account for accumulation
         scaled_loss = loss / gradient_accumulation_steps
 
         # Synchronize loss across all ranks
         _, avg_loss = self.sync_loss(loss)
 
-        # backward pass (accumulates gradients)
+        # Always call backward, even when loss is NaN/Inf. backward()'s
+        # job we care about here is walking the autograd graph and
+        # freeing the saved-for-backward activations — gradient
+        # computation is just a side effect. Skipping backward on NaN
+        # leaks the entire forward graph (full activations under
+        # gradient checkpointing's recompute pattern), and gc.collect()
+        # +empty_cache() can't reclaim it because the graph is held by
+        # strong refs (autograd Node ctx, FSDP allgather closures), not
+        # cycles.
+        #
+        # The NaN gradients land on `param.grad`, but optimizer.step()
+        # is skipped at step level via `has_nan` and the next step's
+        # zero_grad() clears them before any weight update — weights
+        # are protected without touching backward. (Substituting a
+        # finite loss before backward — `loss * 0`, `where(isnan, 0,
+        # loss)`, etc. — doesn't help: NaN propagates through the
+        # already-saved activations, since the kernels' backward ops
+        # multiply the seed gradient by NaN intermediates and IEEE
+        # 754 makes `0 * NaN = NaN`.)
         scaled_loss.backward()
 
         # Log info for each micro-batch
