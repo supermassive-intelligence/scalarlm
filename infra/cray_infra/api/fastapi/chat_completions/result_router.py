@@ -41,7 +41,11 @@ class ResultRouter:
             raise KeyError(
                 f"correlation_id {correlation_id!r} is already registered"
             )
-        future: asyncio.Future = asyncio.get_event_loop().create_future()
+        # Use the running loop. Production callers (FastAPI handlers,
+        # update_and_ack) are always inside one; if a caller isn't,
+        # surfacing the failure here is more useful than the silent
+        # cross-loop bugs the deprecated `get_event_loop()` produced.
+        future: asyncio.Future = asyncio.get_running_loop().create_future()
         self._futures[correlation_id] = future
         return future
 

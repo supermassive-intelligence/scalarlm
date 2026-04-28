@@ -1,4 +1,8 @@
+from cray_infra.api.fastapi.chat_completions.result_router import (
+    get_result_router,
+)
 from cray_infra.api.work_queue.acquire_file_lock import acquire_file_lock
+from cray_infra.api.work_queue.correlation_id_map import pop_correlation_id
 from cray_infra.api.work_queue.group_request_id_to_response_path import (
     group_request_id_to_response_path,
 )
@@ -43,6 +47,16 @@ async def update_and_ack(inference_work_queue, request_id, item):
 
     in_memory_results["results"][request_id] = item
     in_memory_results["results"][request_id]["is_acked"] = True
+
+    # Resolve the chat-completions ResultRouter future if this
+    # request_id was tagged with a correlation_id at fill_work_queue
+    # time. /v1/generate requests carry no cid; pop returns None and
+    # this becomes a no-op for them. A late completion whose handler
+    # already disconnected also pops fine — router.resolve is silent
+    # for unregistered cids.
+    correlation_id = await pop_correlation_id(request_id)
+    if correlation_id is not None:
+        get_result_router().resolve(correlation_id, item)
 
     if in_memory_results["current_index"] >= in_memory_results["total_requests"]:
         await finish_work_queue_item(request_id, inference_work_queue, in_memory_results)
