@@ -17,62 +17,27 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 
 from cray_infra.api.fastapi.aiohttp.get_global_session import get_global_session
+from cray_infra.api.fastapi.routers.openai_v1_helpers import (
+    _CHAT_ALLOWED_KEYS,
+    _COMPLETION_ALLOWED_KEYS,
+    _USAGE_SCAN_TAIL_BYTES,
+    _ensure_usage_reported,
+    _extract_token_count,
+    _filter_params,
+    _read_total_tokens,
+)
 from cray_infra.generate.metrics import get_metrics
 from cray_infra.util.get_config import get_config
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-import json
 import logging
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 openai_v1_router = APIRouter()
-
-# Tail-window for sniffing the upstream payload for `usage`. The terminal
-# usage event in an OpenAI SSE stream is on the order of a few hundred bytes
-# and always sits at the very end; 64 KB is more than enough headroom while
-# bounding memory for very long completions.
-_USAGE_SCAN_TAIL_BYTES = 64 * 1024
-
-# Allowed keys on requests forwarded to vLLM. `stream_options` is included so
-# that callers can opt into usage reporting; we also force it on for streaming
-# requests below so we can count tokens server-side.
-_COMPLETION_ALLOWED_KEYS = (
-    "model",
-    "temperature",
-    "prompt",
-    "max_tokens",
-    "stream",
-    "stream_options",
-    "tools",
-    "tool_choice",
-    "response_format",
-    "top_p",
-    "stop",
-    "seed",
-    "presence_penalty",
-    "frequency_penalty",
-)
-
-_CHAT_ALLOWED_KEYS = (
-    "model",
-    "temperature",
-    "messages",
-    "max_tokens",
-    "stream",
-    "stream_options",
-    "tools",
-    "tool_choice",
-    "response_format",
-    "top_p",
-    "stop",
-    "seed",
-    "presence_penalty",
-    "frequency_penalty",
-)
 
 
 @openai_v1_router.get("/models")
@@ -139,24 +104,6 @@ async def create_chat_completions(request: ChatCompletionRequest, raw_request: R
 # ---------------------------------------------------------------------------
 # Internals
 # ---------------------------------------------------------------------------
-
-
-def _filter_params(raw: dict, allowed: tuple) -> dict:
-    return {k: v for k, v in raw.items() if v is not None and k in allowed}
-
-
-def _ensure_usage_reported(params: dict) -> None:
-    """For streaming requests, force vLLM to emit a final `usage` event so we
-    can count tokens. OpenAI-compatible clients tolerate the extra field; the
-    ScalarLM chat UI specifically reads it and surfaces tokens-per-message.
-    Non-streaming responses always include usage in the final JSON body, so
-    no opt-in is needed there.
-    """
-    if not params.get("stream"):
-        return
-    opts = dict(params.get("stream_options") or {})
-    opts.setdefault("include_usage", True)
-    params["stream_options"] = opts
 
 
 def _proxy_streaming(
@@ -228,45 +175,3 @@ async def _wrap_with_metrics(source):
         metrics.record_streaming_end()
 
 
-def _extract_token_count(payload: bytes) -> Optional[int]:
-    """Best-effort scan for `usage.total_tokens` in either an SSE stream tail
-    or a single JSON response body. Returns None if not found."""
-    if not payload:
-        return None
-    try:
-        text = payload.decode("utf-8", errors="replace")
-    except Exception:
-        return None
-
-    # SSE path — look for the last `data: {...}` event with a usage field.
-    if "data:" in text:
-        last: Optional[int] = None
-        for event in text.split("\n\n"):
-            for line in event.splitlines():
-                if not line.startswith("data:"):
-                    continue
-                body = line[5:].lstrip()
-                if not body or body == "[DONE]":
-                    continue
-                tokens = _read_total_tokens(body)
-                if tokens is not None:
-                    last = tokens
-        if last is not None:
-            return last
-
-    # Non-streaming path — try parsing the whole tail as JSON.
-    return _read_total_tokens(text)
-
-
-def _read_total_tokens(json_text: str) -> Optional[int]:
-    try:
-        obj = json.loads(json_text)
-    except (json.JSONDecodeError, ValueError):
-        return None
-    if not isinstance(obj, dict):
-        return None
-    usage = obj.get("usage")
-    if not isinstance(usage, dict):
-        return None
-    total = usage.get("total_tokens")
-    return int(total) if isinstance(total, (int, float)) else None
