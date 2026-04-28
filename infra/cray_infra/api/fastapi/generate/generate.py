@@ -1,3 +1,6 @@
+from cray_infra.api.fastapi.chat_completions.render_generate_entry import (
+    render_generate_entry,
+)
 from cray_infra.api.fastapi.routers.request_types.generate_request import (
     GenerateRequest,
 )
@@ -64,9 +67,14 @@ async def generate(request: GenerateRequest):
     try:
         request_count = 0
 
-        for prompt in prompts:
+        for entry in prompts:
+            # Each entry is independently a bare string, a {"prompt":
+            # str} dict, or a {"messages": [...]} dict; the renderer
+            # produces a model-input string in all three cases. See
+            # docs/openai-chat-completions-queue.md §10.
+            rendered_prompt = render_generate_entry(entry, model=model)
             request = {
-                "prompt": prompt,
+                "prompt": rendered_prompt,
                 "model": model,
                 "max_tokens": max_tokens,
                 "temperature": temperature,
