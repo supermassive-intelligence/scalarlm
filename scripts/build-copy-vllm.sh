@@ -8,6 +8,10 @@ DEST_DIR=$2
 LOCAL_PATH=$3
 REPO_URL=$4
 BRANCH=$5
+# Optional pinned commit. When set, we `git checkout` it after the
+# clone so builds are reproducible across time even if BRANCH advances.
+# Empty = use BRANCH tip (matches the pre-pin behavior).
+COMMIT=$6
 
 echo "🔧 Setting up vLLM source..."
 echo "   Source type: $VLLM_SOURCE"
@@ -52,8 +56,31 @@ else
 
     git clone -b "$BRANCH" "$REPO_URL" "$DEST_DIR"
 
+    if [ -n "$COMMIT" ]; then
+        echo "📌 Pinning to commit: $COMMIT"
+        git -C "$DEST_DIR" checkout "$COMMIT"
+    fi
+
     echo "✅ Remote vLLM cloned successfully"
 fi
 
 echo "📍 vLLM is ready at: $DEST_DIR"
 ls -la "$DEST_DIR" | head -5
+
+# ScalarLM fork patches (see scripts/vllm_patches/apply_patches.py for why
+# each one exists and what anchors it's guarding). Runs after the vLLM
+# tree is staged, before the pip install compiles anything. In-container
+# the patcher lives next to this script (single COPY; see Dockerfile),
+# so source it from SCRIPT_DIR directly rather than a vllm_patches/ subdir.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PATCHER="${SCRIPT_DIR}/apply_patches.py"
+# We invoke the patcher via `python3 ${PATCHER}`, so it doesn't need the
+# exec bit — check for readability instead so a file missing +x (e.g.
+# after some cp/rsync that didn't preserve mode) doesn't silently skip
+# patch application.
+if [ -f "${PATCHER}" ] && [ -r "${PATCHER}" ]; then
+    echo "🩹 Applying ScalarLM vLLM-fork patches"
+    python3 "${PATCHER}" "${DEST_DIR}"
+else
+    echo "⚠️  Patcher not found at ${PATCHER}; skipping"
+fi
