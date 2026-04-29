@@ -253,20 +253,45 @@ WORKDIR ${INSTALL_ROOT}
 # Install build dependencies FIRST
 RUN pip install setuptools-scm
 
-# Configure vLLM source - can use either local directory or remote repo
+# Configure vLLM source - can use either local directory or remote repo.
+#
+# VLLM_BRANCH defaults to scalarlm-on-v0.19.0 — the fork's clean re-cut
+# of upstream v0.19.0 with scalarlm patches squashed on top. This is
+# what production scalarlm builds run against. The fork also carries a
+# `main` branch with continuing per-bug commits, but it's a parallel
+# lineage and not the recommended build target.
+#
+# VLLM_COMMIT pins the checkout to a specific SHA so builds are
+# reproducible across time even as scalarlm-on-v0.19.0 advances. Bump
+# this when picking up new fork commits.
+#
+# Current pin: 01f4bae62 (HEAD of vllm-fork PR #25, on top of
+# scalarlm-on-v0.19.0). Includes:
+#   - PR #24 (merged): TorchAllocator .set() crash fix on MoE + LoRA
+#                      engine init.
+#   - PR #25 (open):   Triton scratch-allocator memleak fix +
+#                      libtorch_stable torch 2.10 ABI fix (cherry-picks
+#                      of 5a670ff7a / 4fd1236e9 from vllm-fork main).
+#                      The ABI fix is required to compile against the
+#                      torch 2.10 in nvcr.io/nvidia/pytorch:26.01-py3.
+# Bump to PR #25's merge SHA on scalarlm-on-v0.19.0 once it lands.
 ARG VLLM_SOURCE=remote
-ARG VLLM_BRANCH=main
+ARG VLLM_BRANCH=scalarlm-on-v0.19.0
+ARG VLLM_COMMIT=01f4bae62
 ARG VLLM_REPO=https://github.com/supermassive-intelligence/vllm-fork.git
 
-# Handle vLLM source - support both local and remote modes
-COPY scripts/build-copy-vllm.sh ${INSTALL_ROOT}/build-copy-vllm.sh
+# Handle vLLM source - support both local and remote modes.
+# build-copy-vllm.sh and apply_patches.py are copied in a single COPY
+# step so the image stays under Docker's 127-layer overlay-fs stacking
+# cap. The script sources apply_patches.py from its own SCRIPT_DIR.
+COPY scripts/build-copy-vllm.sh scripts/vllm_patches/apply_patches.py ${INSTALL_ROOT}/
 
 # Handle vLLM source - single RUN command with conditional mount
 # For remote: clone from repository
 # For local: mount and copy from ./vllm directory
 RUN --mount=type=bind,source=./vllm,target=/workspace/vllm,rw \
     bash ${INSTALL_ROOT}/build-copy-vllm.sh ${VLLM_SOURCE} ${INSTALL_ROOT}/vllm \
-    /workspace/vllm ${VLLM_REPO} ${VLLM_BRANCH}
+    /workspace/vllm ${VLLM_REPO} ${VLLM_BRANCH} ${VLLM_COMMIT}
 
 WORKDIR ${INSTALL_ROOT}/vllm
 
@@ -287,7 +312,11 @@ RUN \
     --mount=type=cache,target=/root/.cache/pip \
     --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/app/cray/vllm/.deps \
-    export MAX_JOBS=$(($(nproc) < $(free -g | awk '/^Mem:/ {print int($2/4)}') ? $(nproc) : $(free -g | awk '/^Mem:/ {print int($2/4)}'))) && \
+    NPROC=$(nproc) && \
+    MEM_BASED=$(free -g | awk '/^Mem:/ {print int($2/4)}') && \
+    COMPUTED=$(( NPROC < MEM_BASED ? NPROC : MEM_BASED )) && \
+    export MAX_JOBS=$(( COMPUTED < 16 ? COMPUTED : 16 )) && \
+    echo "MAX_JOBS=${MAX_JOBS} (nproc=${NPROC}, mem-based=${MEM_BASED}, capped at 16)" && \
     pip install --no-build-isolation -e . --verbose
 
 WORKDIR ${INSTALL_ROOT}
@@ -320,7 +349,22 @@ COPY ./infra/requirements-megatron.txt ${INSTALL_ROOT}/requirements-megatron.txt
 COPY ./infra/requirements-megatron-cpu.txt ${INSTALL_ROOT}/requirements-megatron-cpu.txt
 COPY ./requirements.txt ${INSTALL_ROOT}/requirements.txt
 
-RUN if [ "$VLLM_TARGET_DEVICE" != "cpu" ]; then \
+RUN \
+    # Cap MAX_JOBS at 4 here — flash-attn (built under this RUN block
+    # via --no-build-isolation) is much heavier per-job than vllm: each
+    # nvcc instance internally threads through CUDA codegen, so 16
+    # ninja jobs → many more than 16 active threads, enough to NotReady
+    # the kubelet on a 64-core box. flash-attn's own docs recommend
+    # MAX_JOBS=4 for memory-constrained builds; we use it here for
+    # scheduler-pressure-constrained builds for the same reason. The
+    # vllm build above stays at 16 (it's lighter per-job and verified
+    # safe).
+    NPROC=$(nproc) && \
+    MEM_BASED=$(free -g | awk '/^Mem:/ {print int($2/4)}') && \
+    COMPUTED=$(( NPROC < MEM_BASED ? NPROC : MEM_BASED )) && \
+    export MAX_JOBS=$(( COMPUTED < 4 ? COMPUTED : 4 )) && \
+    echo "MAX_JOBS=${MAX_JOBS} (nproc=${NPROC}, mem-based=${MEM_BASED}, capped at 4) for megatron+flash-attn" && \
+    if [ "$VLLM_TARGET_DEVICE" != "cpu" ]; then \
         # `--no-build-isolation` is needed so flash-attn's setup.py
         # can import the already-installed torch to pick CUDA + arch
         # flags. Pre-built flash-attn wheels are still used when one
