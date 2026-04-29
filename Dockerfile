@@ -255,29 +255,17 @@ RUN pip install setuptools-scm
 
 # Configure vLLM source - can use either local directory or remote repo.
 #
-# VLLM_BRANCH defaults to scalarlm-on-v0.19.0 — the fork's clean re-cut
-# of upstream v0.19.0 with scalarlm patches squashed on top. This is
-# what production scalarlm builds run against. The fork also carries a
-# `main` branch with continuing per-bug commits, but it's a parallel
-# lineage and not the recommended build target.
+# VLLM_BRANCH defaults to `main` on vllm-fork. The fixes that previously
+# required pinning to scalarlm-on-v0.19.0 at a specific SHA (TorchAllocator
+# crash, Triton scratch-allocator memleak, torch 2.10 ABI) are now merged
+# into vllm-fork's main branch, so the branch tip is sufficient.
 #
-# VLLM_COMMIT pins the checkout to a specific SHA so builds are
-# reproducible across time even as scalarlm-on-v0.19.0 advances. Bump
-# this when picking up new fork commits.
-#
-# Current pin: 01f4bae62 (HEAD of vllm-fork PR #25, on top of
-# scalarlm-on-v0.19.0). Includes:
-#   - PR #24 (merged): TorchAllocator .set() crash fix on MoE + LoRA
-#                      engine init.
-#   - PR #25 (open):   Triton scratch-allocator memleak fix +
-#                      libtorch_stable torch 2.10 ABI fix (cherry-picks
-#                      of 5a670ff7a / 4fd1236e9 from vllm-fork main).
-#                      The ABI fix is required to compile against the
-#                      torch 2.10 in nvcr.io/nvidia/pytorch:26.01-py3.
-# Bump to PR #25's merge SHA on scalarlm-on-v0.19.0 once it lands.
+# VLLM_COMMIT remains available as an opt-in pin if a deployment needs
+# reproducibility across time or wants to roll back to a specific SHA;
+# leave it empty to use BRANCH tip (the default).
 ARG VLLM_SOURCE=remote
-ARG VLLM_BRANCH=scalarlm-on-v0.19.0
-ARG VLLM_COMMIT=01f4bae62
+ARG VLLM_BRANCH=main
+ARG VLLM_COMMIT=
 ARG VLLM_REPO=https://github.com/supermassive-intelligence/vllm-fork.git
 
 # Handle vLLM source - support both local and remote modes.
