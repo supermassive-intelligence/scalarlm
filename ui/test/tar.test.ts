@@ -12,10 +12,13 @@ import { buildTar } from "../src/lib/tar";
 
 function decodeField(buf: Uint8Array, offset: number, length: number): string {
   // USTAR fields are NUL-terminated ASCII; trim anything after first NUL.
+  // Decoder label is "utf-8" rather than "ascii" because Node 23.x has a bug
+  // where `TextDecoder("ascii").decode(...)` returns a Buffer instead of a
+  // string. UTF-8 decodes pure-ASCII bytes to an identical string.
   const slice = buf.subarray(offset, offset + length);
   let end = slice.indexOf(0);
   if (end === -1) end = slice.length;
-  return new TextDecoder("ascii").decode(slice.subarray(0, end));
+  return new TextDecoder("utf-8").decode(slice.subarray(0, end));
 }
 
 describe("buildTar", () => {
