@@ -88,8 +88,14 @@ async def chat_completions_via_queue(request: Any) -> StreamingResponse:
             headers={"Retry-After": str(max(1, int(wait)))},
         )
 
+    # Resolve the model name before touching the tokenizer: an
+    # unspecified or "latest" model would otherwise crash inside
+    # `AutoTokenizer.from_pretrained(None)` with an opaque HuggingFace
+    # 401. Mirrors `/v1/generate`'s resolution (generate.py:50-63).
+    model = _resolve_model(getattr(request, "model", None), config)
+
     rendered_prompt = render_chat_template(
-        model=request.model,
+        model=model,
         messages=request.messages,
         prompt=None,
     )
@@ -100,7 +106,7 @@ async def chat_completions_via_queue(request: Any) -> StreamingResponse:
 
     backend_request = {
         "prompt": rendered_prompt,
-        "model": request.model,
+        "model": model,
         "max_tokens": getattr(request, "max_tokens", None),
         "temperature": getattr(request, "temperature", None),
         # The worker's dispatcher (`async_generate_task` in
@@ -117,9 +123,40 @@ async def chat_completions_via_queue(request: Any) -> StreamingResponse:
     await get_coalescer().submit(backend_request, correlation_id)
 
     return StreamingResponse(
-        _stream_and_unregister(future, correlation_id, router, request.model),
+        _stream_and_unregister(future, correlation_id, router, model),
         media_type="application/json",
     )
+
+
+def _resolve_model(requested: Any, config: dict) -> str:
+    """
+    Apply the same model-resolution rules as /v1/generate:
+
+      - None / empty → config["model"] (the deployment's default)
+      - "latest" → the most recent training job
+      - anything else → looked up in the vLLM model manager
+
+    Raises HTTPException(404) for an explicitly-named model that the
+    manager doesn't recognise; that's the same shape as the existing
+    /v1/generate failure mode, so SDK error handlers stay uniform.
+    """
+    if not requested:
+        resolved = config["model"]
+        logger.info("Using default model: %s", resolved)
+    elif requested == "latest":
+        from cray_infra.training.get_latest_model import get_latest_model
+
+        resolved = get_latest_model()
+    else:
+        resolved = requested
+
+    from cray_infra.training.vllm_model_manager import get_vllm_model_manager
+
+    found = get_vllm_model_manager().find_model(resolved)
+    if found is None:
+        logger.error("Model %s not found", resolved)
+        raise HTTPException(status_code=404, detail=f"Model {resolved} not found")
+    return found
 
 
 def _encode_chat_completion(model: str):

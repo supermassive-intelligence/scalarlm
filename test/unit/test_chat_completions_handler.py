@@ -73,6 +73,7 @@ def patched_components(fresh_router, fresh_estimator):
          patch.object(h, "get_wait_estimator", return_value=fresh_estimator), \
          patch.object(h, "get_queue_depth", side_effect=lambda: queue_depth_holder["value"]), \
          patch.object(h, "get_config", return_value=fake_config), \
+         patch.object(h, "_resolve_model", side_effect=lambda req, cfg: req or "test-model"), \
          patch.object(h, "render_chat_template", return_value="rendered-prompt"):
         yield {
             "coalescer": coalescer,
@@ -177,6 +178,80 @@ async def test_429_does_not_register_correlation_id(patched_components):
         await h.chat_completions_via_queue(_request())
 
     assert patched_components["router"].in_flight_count == 0
+
+
+# ---------------------------------------------------------------------------
+# _resolve_model — None / "latest" / explicit / unknown
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_model_none_falls_back_to_config_default():
+    """
+    None gets the deployment's default. This was the production crash
+    surfaced by the inference browser: a missing-model request used to
+    crash inside `AutoTokenizer.from_pretrained(None)` with a
+    HuggingFace 401 about a non-existent repo named "None".
+    """
+    cfg = {"model": "default-m"}
+    fake_manager = MagicMock()
+    fake_manager.find_model.return_value = "default-m"
+    with patch(
+        "cray_infra.training.vllm_model_manager.get_vllm_model_manager",
+        return_value=fake_manager,
+    ):
+        assert h._resolve_model(None, cfg) == "default-m"
+    fake_manager.find_model.assert_called_once_with("default-m")
+
+
+def test_resolve_model_empty_string_falls_back_to_config_default():
+    cfg = {"model": "default-m"}
+    fake_manager = MagicMock()
+    fake_manager.find_model.return_value = "default-m"
+    with patch(
+        "cray_infra.training.vllm_model_manager.get_vllm_model_manager",
+        return_value=fake_manager,
+    ):
+        assert h._resolve_model("", cfg) == "default-m"
+
+
+def test_resolve_model_latest_uses_get_latest_model():
+    cfg = {"model": "default-m"}
+    fake_manager = MagicMock()
+    fake_manager.find_model.return_value = "training-job-abc"
+    with patch(
+        "cray_infra.training.get_latest_model.get_latest_model",
+        return_value="training-job-abc",
+    ), patch(
+        "cray_infra.training.vllm_model_manager.get_vllm_model_manager",
+        return_value=fake_manager,
+    ):
+        assert h._resolve_model("latest", cfg) == "training-job-abc"
+
+
+def test_resolve_model_explicit_validates_against_manager():
+    cfg = {"model": "default-m"}
+    fake_manager = MagicMock()
+    fake_manager.find_model.return_value = "explicit-m"
+    with patch(
+        "cray_infra.training.vllm_model_manager.get_vllm_model_manager",
+        return_value=fake_manager,
+    ):
+        assert h._resolve_model("explicit-m", cfg) == "explicit-m"
+    fake_manager.find_model.assert_called_once_with("explicit-m")
+
+
+def test_resolve_model_unknown_raises_404():
+    cfg = {"model": "default-m"}
+    fake_manager = MagicMock()
+    fake_manager.find_model.return_value = None
+    with patch(
+        "cray_infra.training.vllm_model_manager.get_vllm_model_manager",
+        return_value=fake_manager,
+    ):
+        with pytest.raises(HTTPException) as exc:
+            h._resolve_model("nope-not-here", cfg)
+    assert exc.value.status_code == 404
+    assert "nope-not-here" in str(exc.value.detail)
 
 
 @pytest.mark.asyncio
