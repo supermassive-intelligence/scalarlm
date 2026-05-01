@@ -17,6 +17,11 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 
 from cray_infra.api.fastapi.aiohttp.get_global_session import get_global_session
+from cray_infra.api.fastapi.chat_completions.tee_streaming_to_disk import (
+    compute_request_hash,
+    write_request_artifacts,
+    write_response_artifact,
+)
 from cray_infra.api.fastapi.routers.openai_v1_helpers import (
     _CHAT_ALLOWED_KEYS,
     _COMPLETION_ALLOWED_KEYS,
@@ -114,6 +119,17 @@ def _proxy_streaming(
 ) -> StreamingResponse:
     session = get_global_session()
 
+    # Tee a copy of the request batch + status to upload_base_path so
+    # the inference request browser at /inference can surface SSE
+    # traffic — see docs/inference-request-browser.md and
+    # tee_streaming_to_disk.py. Writes are logged-and-swallowed on
+    # error; the SSE stream is the user-visible surface and must not
+    # depend on disk.
+    request_hash = compute_request_hash(params)
+    write_request_artifacts(
+        request_hash=request_hash, params=params, endpoint_label=endpoint_label,
+    )
+
     async def upstream():
         async with session.post(upstream_url, json=params) as resp:
             if resp.status != 200:
@@ -129,12 +145,12 @@ def _proxy_streaming(
                 yield chunk
 
     return StreamingResponse(
-        content=_wrap_with_metrics(upstream()),
+        content=_wrap_with_metrics(upstream(), request_hash=request_hash),
         media_type="text/event-stream",
     )
 
 
-async def _wrap_with_metrics(source):
+async def _wrap_with_metrics(source, *, request_hash: Optional[str] = None):
     """Pass chunks through verbatim while keeping a sliding-window buffer so
     we can extract the terminal `usage.total_tokens` for the metrics counter.
 
@@ -155,12 +171,21 @@ async def _wrap_with_metrics(source):
     # counter doesn't drift the way Metrics.queue_depth can.
     metrics.record_streaming_start()
 
+    # Two buffers: a sliding 64 KB tail used to extract the terminal
+    # `usage.total_tokens` for metrics, and (if a request_hash was
+    # supplied) an unbounded full capture used to write the SSE
+    # response artifact for the inference browser. They serve
+    # different consumers; sharing a single buffer would force a
+    # tradeoff between accurate usage extraction and complete capture.
     buffer = bytearray()
+    full_capture = bytearray() if request_hash else None
     try:
         async for chunk in source:
             if isinstance(chunk, str):
                 chunk = chunk.encode("utf-8")
             buffer.extend(chunk)
+            if full_capture is not None:
+                full_capture.extend(chunk)
             if len(buffer) > _USAGE_SCAN_TAIL_BYTES:
                 # Drop the head; the terminal usage event is guaranteed to
                 # land in the last 64 KB.
@@ -173,5 +198,10 @@ async def _wrap_with_metrics(source):
             flop_count=None,
         )
         metrics.record_streaming_end()
+        if request_hash is not None and full_capture is not None:
+            write_response_artifact(
+                request_hash=request_hash,
+                sse_text=bytes(full_capture).decode("utf-8", errors="replace"),
+            )
 
 

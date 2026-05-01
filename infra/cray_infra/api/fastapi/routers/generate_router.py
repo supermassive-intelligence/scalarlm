@@ -3,6 +3,8 @@ from cray_infra.api.fastapi.generate.get_adaptors import get_adaptors
 from cray_infra.api.fastapi.generate.generate import generate
 from cray_infra.api.fastapi.generate.finish_work import finish_work
 from cray_infra.api.fastapi.generate.get_results import get_results
+from cray_infra.api.fastapi.generate.get_request_detail import get_request_detail
+from cray_infra.api.fastapi.generate.list_requests import list_requests
 from cray_infra.api.fastapi.generate.metrics import metrics
 from cray_infra.api.fastapi.generate.upload import upload
 from cray_infra.api.fastapi.generate.download import download
@@ -69,6 +71,16 @@ async def get_adaptors_endpoint(request: GetAdaptorsRequest):
 @generate_router.get("/metrics")
 async def metrics_endpoint():
     return await metrics()
+
+
+@generate_router.get("/list_requests")
+async def list_requests_endpoint(cursor: float | None = None, limit: int = 50):
+    return await list_requests(cursor=cursor, limit=limit)
+
+
+@generate_router.get("/request/{request_id}")
+async def get_request_endpoint(request_id: str):
+    return await get_request_detail(request_id)
 
 
 

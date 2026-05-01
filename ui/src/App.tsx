@@ -3,6 +3,7 @@ import { Routes, Route } from "react-router-dom";
 
 import { AppLayout } from "./components/AppLayout";
 import { HomePage } from "./routes/home/HomePage";
+import { InferenceBrowserPage } from "./routes/inference/InferenceBrowserPage";
 import { TrainIndex } from "./routes/train/TrainIndex";
 import { TrainDetail } from "./routes/train/TrainDetail";
 import { MetricsPage } from "./routes/metrics/MetricsPage";
@@ -40,6 +41,7 @@ export function App() {
         />
         <Route path="train" element={<TrainIndex />} />
         <Route path="train/:jobHash" element={<TrainDetail />} />
+        <Route path="inference" element={<InferenceBrowserPage />} />
         <Route path="metrics" element={<MetricsPage />} />
         <Route path="models" element={<ModelsPage />} />
         <Route path="settings" element={<SettingsPage />} />
