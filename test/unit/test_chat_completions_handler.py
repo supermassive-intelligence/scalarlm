@@ -148,7 +148,10 @@ async def test_correlation_id_passed_to_coalescer_matches_request_payload(patche
     req, cid = captured[0]
     assert req["correlation_id"] == cid
     assert req["prompt"] == "rendered"
-    assert req["request_type"] == "chat_completion"
+    # Worker's dispatcher only recognises "generate"; the rendered
+    # prompt is a string so it routes through async_completion_task,
+    # and the handler rewraps the result into ChatCompletion shape.
+    assert req["request_type"] == "generate"
 
 
 @pytest.mark.asyncio

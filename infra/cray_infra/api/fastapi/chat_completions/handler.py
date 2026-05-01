@@ -32,6 +32,9 @@ from cray_infra.api.fastapi.chat_completions.admission import (
     WaitEstimator,
     is_over_high_water,
 )
+from cray_infra.api.fastapi.chat_completions.build_chat_completion_response import (
+    build_chat_completion_response,
+)
 from cray_infra.api.fastapi.chat_completions.coalescer import Coalescer
 from cray_infra.api.fastapi.chat_completions.heartbeat import (
     stream_with_heartbeat,
@@ -100,29 +103,53 @@ async def chat_completions_via_queue(request: Any) -> StreamingResponse:
         "model": request.model,
         "max_tokens": getattr(request, "max_tokens", None),
         "temperature": getattr(request, "temperature", None),
-        "request_type": "chat_completion",
+        # The worker's dispatcher (`async_generate_task` in
+        # create_generate_worker.py) only recognises "generate". The
+        # rendered_prompt is a string, so it routes through
+        # `async_completion_task` to /v1/completions in vLLM — which
+        # is what we want, because the chat template is already
+        # applied. We rewrap the worker's response into a
+        # ChatCompletion shape below.
+        "request_type": "generate",
         "correlation_id": correlation_id,
     }
 
     await get_coalescer().submit(backend_request, correlation_id)
 
     return StreamingResponse(
-        _stream_and_unregister(future, correlation_id, router),
+        _stream_and_unregister(future, correlation_id, router, request.model),
         media_type="application/json",
     )
+
+
+def _encode_chat_completion(model: str):
+    """Encoder closure for stream_with_heartbeat. The worker hands us
+    its flat result dict (request_id, response, error, token_count);
+    we rewrap into the OpenAI ChatCompletion shape so the SDK can
+    parse it without surprises."""
+    import json
+
+    def encode(result):
+        wrapped = build_chat_completion_response(result=result, model=model)
+        return json.dumps(wrapped).encode("utf-8")
+
+    return encode
 
 
 async def _stream_and_unregister(
     future,
     correlation_id: str,
     router: ResultRouter,
+    model: str,
 ) -> AsyncIterator[bytes]:
     """
     Wrap the heartbeat stream so the cid is always unregistered on
     completion or generator close (the client-disconnect path).
     """
     try:
-        async for chunk in stream_with_heartbeat(future):
+        async for chunk in stream_with_heartbeat(
+            future, encode_body=_encode_chat_completion(model)
+        ):
             yield chunk
     finally:
         router.unregister(correlation_id)
