@@ -3,12 +3,4 @@ accelerate
 transformers>=5.5.0
 huggingface_hub>=0.37
 peft
-# Flash attention (GPU only). pick_attention_backend in
-# ml/cray_megatron/models/load_model.py auto-selects this when present
-# and falls back to PyTorch SDPA with a warning otherwise. The build
-# imports torch to pick CUDA + arch flags, so the install must run
-# with `--no-build-isolation` (see Dockerfile) — otherwise pip's
-# isolated build env can't see the already-installed torch and the
-# setup.py blows up. Pre-built wheels are used when one matches the
-# image's torch + CUDA.
-flash-attn>=2.7.0
+#flash-attn>=2.7.0 # This bloats the build by over 2 hours, it is too expensive to put here.
