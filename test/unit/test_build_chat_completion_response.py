@@ -93,3 +93,53 @@ def test_id_falls_back_when_request_id_missing():
     out = build_chat_completion_response(result={"response": "hi"}, model="m")
     assert out["id"].startswith("chatcmpl-")
     assert len(out["id"]) > len("chatcmpl-")
+
+
+def test_unwraps_group_level_shape():
+    """
+    Field-tested in the pod: _response.json-shaped dicts can arrive at
+    the wrapper instead of the per-request shape, leaving the actual
+    response buried under `results.<id>.response`. Symptom was empty
+    `content` in the SDK reply.
+    """
+    group = {
+        "results": {
+            "abc_000000000": {
+                "is_acked": True,
+                "response": "[Tool: bash] {...}",
+            }
+        },
+        "current_index": 1,
+        "total_requests": 1,
+        "work_queue_id": None,
+    }
+
+    out = build_chat_completion_response(result=group, model="m")
+
+    assert out["choices"][0]["message"]["content"] == "[Tool: bash] {...}"
+    assert out["choices"][0]["finish_reason"] == "stop"
+
+
+def test_unwrap_picks_first_entry_deterministically():
+    """If multiple entries somehow appear (shouldn't today; defensive
+    coverage), sort keys so two concurrent callers agree which entry
+    is "first"."""
+    group = {
+        "results": {
+            "abc_000000001": {"response": "B"},
+            "abc_000000000": {"response": "A"},
+        },
+        "current_index": 2,
+        "total_requests": 2,
+    }
+    out = build_chat_completion_response(result=group, model="m")
+    assert out["choices"][0]["message"]["content"] == "A"
+
+
+def test_unwrap_no_op_on_per_request_shape():
+    """Per-request shape (the documented contract) must pass through
+    unchanged."""
+    out = build_chat_completion_response(
+        result={"response": "direct", "is_acked": True}, model="m"
+    )
+    assert out["choices"][0]["message"]["content"] == "direct"
