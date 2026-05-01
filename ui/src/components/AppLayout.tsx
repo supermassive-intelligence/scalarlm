@@ -9,6 +9,7 @@ import { KeyboardCheatsheet } from "./KeyboardCheatsheet";
 const navItems = [
   { to: "/chat", label: "Chat" },
   { to: "/train", label: "Train" },
+  { to: "/inference", label: "Inference" },
   { to: "/metrics", label: "Metrics" },
   { to: "/models", label: "Models" },
 ];
