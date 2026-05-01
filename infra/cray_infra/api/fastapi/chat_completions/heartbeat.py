@@ -17,7 +17,7 @@ the path.
 
 import asyncio
 import json
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Callable
 
 
 HEARTBEAT_BYTE = b" "
@@ -28,6 +28,7 @@ async def stream_with_heartbeat(
     work_future: asyncio.Future,
     *,
     heartbeat_interval_seconds: float = DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
+    encode_body: Callable[[Any], bytes] | None = None,
 ) -> AsyncIterator[bytes]:
     """
     Yield whitespace bytes every `heartbeat_interval_seconds` until
@@ -35,7 +36,13 @@ async def stream_with_heartbeat(
 
     The future is `asyncio.shield`-wrapped so the heartbeat-tick
     timeout cancels only the waiter, never the underlying work.
+
+    `encode_body` lets a caller transform the resolved value before it
+    hits the wire — used by the chat completions handler to wrap the
+    worker's flat result dict into the OpenAI ChatCompletion shape
+    without coupling this transport to that vocabulary.
     """
+    encoder = encode_body or _encode_json_body
     while True:
         try:
             result = await asyncio.wait_for(
@@ -46,7 +53,7 @@ async def stream_with_heartbeat(
         except asyncio.TimeoutError:
             yield HEARTBEAT_BYTE
 
-    yield _encode_json_body(result)
+    yield encoder(result)
 
 
 def _encode_json_body(value: Any) -> bytes:
