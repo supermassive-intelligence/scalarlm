@@ -170,6 +170,36 @@ def resolve_lora_config_args(
     }
 
 
+PEFT_OUTER_PREFIX = "base_model.model."
+
+
+def _prefix_for_peft_load(
+    lora_keys: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    """
+    Re-prefix raw checkpoint keys so they line up with what
+    `peft.PeftModel.state_dict()` produces.
+
+    The trainer saves from inside PEFT (its `unwrap_model` returns
+    `lora_model.model.state_dict()`) — so on-disk keys look like
+    `model.<path>.lora_A.default.weight`. PEFT's wrapped state_dict
+    expects `base_model.model.model.<path>.lora_A.default.weight`.
+    Without this prefix-fix every key comes back as "unexpected" and
+    the merge silently folds nothing.
+
+    Idempotent: keys already starting with the prefix pass through
+    unchanged so re-running the fix on an already-prefixed dict is a
+    no-op.
+    """
+    out: dict[str, torch.Tensor] = {}
+    for k, v in lora_keys.items():
+        if k.startswith(PEFT_OUTER_PREFIX):
+            out[k] = v
+        else:
+            out[f"{PEFT_OUTER_PREFIX}{k}"] = v
+    return out
+
+
 # ----------------------------------------------------------------------------
 # CLI / main flow — uses the helpers above plus transformers, peft,
 # huggingface_hub. Imported lazily so unit tests don't need them on PATH.
@@ -396,14 +426,44 @@ def main(argv: list[str] | None = None) -> int:
 
         status_writer.update(phase="merging")
         peft_model = get_peft_model(base, lora_config)
-        load_result = peft_model.load_state_dict(buckets["lora"], strict=False)
+
+        # PEFT wraps the base model so its state_dict keys carry a
+        # `base_model.model.` outer prefix (e.g.
+        # `base_model.model.model.layers.0.self_attn.q_proj.lora_A.default.weight`).
+        # The trainer saves from *inside* the wrapper (its
+        # `unwrap_model` returns `lora_model.model.state_dict()`
+        # filtered to requires_grad=True params, see
+        # `ml/adapters/create_lora_model.py:116`), so the on-disk keys
+        # are missing that prefix. Without re-adding it every key
+        # comes back as "unexpected" and `merge_and_unload` folds zero
+        # deltas — the published model is the unchanged base.
+        prefixed_lora = _prefix_for_peft_load(buckets["lora"])
+        load_result = peft_model.load_state_dict(prefixed_lora, strict=False)
+        loaded_count = len(prefixed_lora) - len(load_result.unexpected_keys)
+        logger.info(
+            "LoRA load: matched %d / %d tensors against the wrapped model.",
+            loaded_count,
+            len(prefixed_lora),
+        )
         if load_result.unexpected_keys:
+            # Anything still unexpected after re-prefixing genuinely
+            # has no peer in the rebuilt PEFT model — typically
+            # vision-tower modules saved by the trainer that
+            # `AutoModelForCausalLM` doesn't materialise for the merge
+            # target. Logged with examples; not fatal.
             logger.warning(
-                "LoRA load: %d unexpected keys (e.g. %s) — these tensors were "
-                "saved by the trainer but PEFT doesn't recognize them in the "
-                "current model.",
+                "LoRA load: %d tensors unmatched after prefix fix (e.g. %s). "
+                "These were saved by the trainer but the merge target's "
+                "module tree doesn't expose them — usually vision/audio "
+                "tower modules absent from AutoModelForCausalLM.",
                 len(load_result.unexpected_keys),
                 load_result.unexpected_keys[:3],
+            )
+        if loaded_count == 0:
+            raise RuntimeError(
+                "merge_lora_and_push: 0 LoRA tensors matched the rebuilt "
+                "PEFT model. Aborting before producing a no-op merge that "
+                "looks successful but uploads the unchanged base model."
             )
         # Most "missing" keys are non-LoRA params PEFT didn't expect to find
         # in our adapter dict; not a problem.
