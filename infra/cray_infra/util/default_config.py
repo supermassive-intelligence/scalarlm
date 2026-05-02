@@ -24,6 +24,15 @@ class Config(BaseModel):
 
     log_directory: str = "/app/cray/nfs/logs"
 
+    # Per-file size cap before the log rotates and per-server backup
+    # count. Three log files × (log_max_bytes × (log_backup_count + 1))
+    # is the worst-case disk footprint for the rotated set. Defaults
+    # land at ~180 MB total — comfortably under the 974 MB NFS PVC the
+    # gemma4 deployment uses, and small enough to tail without trouble.
+    # Operators on bigger volumes can raise these in cray-config.yaml.
+    log_max_bytes: int = 10 * 1024 * 1024  # 10 MB
+    log_backup_count: int = 5
+
     max_gpus_per_node: int = 1
     max_train_time: int = 24 * 60 * 60
     extra_training_seconds: int = 300  # 5 minutes buffer before slurm kills the job
