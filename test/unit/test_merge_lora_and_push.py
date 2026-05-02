@@ -13,6 +13,8 @@ import pytest
 import torch
 
 from adapters.merge_lora_and_push import (
+    PEFT_OUTER_PREFIX,
+    _prefix_for_peft_load,
     classify_state_dict,
     find_latest_checkpoint,
     infer_lora_rank,
@@ -254,3 +256,67 @@ def test_strip_passes_through_non_lora_keys():
         )
         == "model.layers.0.self_attn.q_proj.weight"
     )
+
+
+# ---- _prefix_for_peft_load ----------------------------------------------
+#
+# Production bug this guards against: the trainer saves from inside
+# the PEFT wrapper, so on-disk LoRA keys lack the `base_model.model.`
+# outer prefix that PEFT's wrapped state_dict expects. Without this
+# fix every key returned as "unexpected" from load_state_dict and the
+# merge silently produced a no-op (uploading the unchanged base
+# model). Tests pin the contract.
+
+
+def test_prefix_added_to_unprefixed_keys():
+    raw = {
+        "model.layers.0.self_attn.q_proj.lora_A.default.weight": torch.zeros(8),
+        "model.layers.0.self_attn.q_proj.lora_B.default.weight": torch.zeros(8),
+    }
+    prefixed = _prefix_for_peft_load(raw)
+    expected = {
+        f"{PEFT_OUTER_PREFIX}{k}": v for k, v in raw.items()
+    }
+    assert set(prefixed.keys()) == set(expected.keys())
+    for k in expected:
+        assert prefixed[k] is expected[k]
+
+
+def test_prefix_preserves_keys_already_prefixed():
+    """
+    If someone re-runs the helper on already-prefixed input — or if a
+    future trainer change starts saving with the prefix included —
+    we must not double-prefix. Returns the same dict, untouched.
+    """
+    raw = {
+        f"{PEFT_OUTER_PREFIX}model.x.lora_A.default.weight": torch.zeros(4),
+    }
+    out = _prefix_for_peft_load(raw)
+    assert list(out.keys()) == list(raw.keys())
+
+
+def test_prefix_handles_mixed_prefixed_and_unprefixed():
+    raw = {
+        "model.x.lora_A.default.weight": torch.zeros(4),
+        f"{PEFT_OUTER_PREFIX}model.y.lora_A.default.weight": torch.zeros(4),
+    }
+    out = _prefix_for_peft_load(raw)
+    assert f"{PEFT_OUTER_PREFIX}model.x.lora_A.default.weight" in out
+    assert f"{PEFT_OUTER_PREFIX}model.y.lora_A.default.weight" in out
+    # No double-prefixing.
+    assert not any(
+        k.startswith(f"{PEFT_OUTER_PREFIX}{PEFT_OUTER_PREFIX}") for k in out
+    )
+
+
+def test_prefix_empty_dict_passes_through():
+    assert _prefix_for_peft_load({}) == {}
+
+
+def test_prefix_preserves_tensor_identity():
+    """The renamed dict must point at the same tensors — copying
+    1202 LoRA tensors during merge would double peak memory."""
+    t = torch.zeros(16)
+    raw = {"model.foo.lora_A.default.weight": t}
+    out = _prefix_for_peft_load(raw)
+    assert next(iter(out.values())) is t
