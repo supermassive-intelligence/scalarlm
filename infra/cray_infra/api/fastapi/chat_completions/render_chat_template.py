@@ -66,6 +66,16 @@ def _load_tokenizer(model: str) -> Any:
     return tokenizer
 
 
+def count_prompt_tokens(prompt_text: str, *, model: str) -> int:
+    """
+    Tokenize `prompt_text` with the same tokenizer used to render the
+    chat template, returning the token count. Reuses
+    `_tokenizer_cache` so the chat handler's pre-admission length
+    check doesn't pay a second tokenizer load.
+    """
+    return len(_load_tokenizer(model).encode(prompt_text))
+
+
 def _load_tokenizer_from_pretrained(model: str) -> Any:
     """
     Indirection point so tests can patch the network/disk-touching call

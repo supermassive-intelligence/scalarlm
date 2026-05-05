@@ -35,11 +35,16 @@ from cray_infra.api.fastapi.chat_completions.admission import (
 from cray_infra.api.fastapi.chat_completions.build_chat_completion_response import (
     build_chat_completion_response,
 )
+from cray_infra.api.fastapi.chat_completions.check_request_length import (
+    RequestTooLongError,
+    check_request_length,
+)
 from cray_infra.api.fastapi.chat_completions.coalescer import Coalescer
 from cray_infra.api.fastapi.chat_completions.heartbeat import (
     stream_with_heartbeat,
 )
 from cray_infra.api.fastapi.chat_completions.render_chat_template import (
+    count_prompt_tokens,
     render_chat_template,
 )
 from cray_infra.api.fastapi.chat_completions.result_router import (
@@ -99,6 +104,25 @@ async def chat_completions_via_queue(request: Any) -> StreamingResponse:
         messages=request.messages,
         prompt=None,
     )
+
+    # Pre-admission length check: vLLM doesn't reject prompts that
+    # exceed the per-request KV budget — the scheduler queues them
+    # and the request stalls forever. Reject up front with a clear
+    # 400 so the client can shorten or split. Tokenizer is the
+    # cached one render_chat_template already loaded, so this is a
+    # microsecond-scale check on the hot path. Skipped entirely when
+    # the operator hasn't configured a cap — count_prompt_tokens
+    # would only burn cycles on a no-op check.
+    max_model_length = int(config.get("max_model_length", 0))
+    if max_model_length > 0:
+        try:
+            check_request_length(
+                prompt_tokens=count_prompt_tokens(rendered_prompt, model=model),
+                max_tokens=getattr(request, "max_tokens", None),
+                max_model_length=max_model_length,
+            )
+        except RequestTooLongError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
 
     correlation_id = str(uuid4())
     future = router.register(correlation_id)

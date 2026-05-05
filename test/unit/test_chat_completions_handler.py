@@ -181,6 +181,73 @@ async def test_429_does_not_register_correlation_id(patched_components):
 
 
 # ---------------------------------------------------------------------------
+# Pre-admission length check
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_400_when_prompt_plus_max_tokens_exceeds_max_model_length(
+    patched_components,
+):
+    """
+    A request whose prompt + max_tokens > max_model_length must be
+    rejected up front with HTTP 400. Without this check vLLM queues
+    it forever — the production stuck-request symptom.
+    """
+    patched_components["config"]["max_model_length"] = 100
+
+    with patch.object(h, "count_prompt_tokens", return_value=80):
+        with pytest.raises(HTTPException) as exc_info:
+            await h.chat_completions_via_queue(_request(max_tokens=50))
+
+    assert exc_info.value.status_code == 400
+    detail = exc_info.value.detail
+    assert "80" in detail and "50" in detail and "100" in detail
+
+
+@pytest.mark.asyncio
+async def test_too_long_request_does_not_register_correlation_id(
+    patched_components,
+):
+    """The 400 path must leak nothing into the router or coalescer —
+    same contract as the 429 over-capacity path."""
+    patched_components["config"]["max_model_length"] = 100
+    coalescer = patched_components["coalescer"]
+
+    with patch.object(h, "count_prompt_tokens", return_value=200):
+        with pytest.raises(HTTPException):
+            await h.chat_completions_via_queue(_request(max_tokens=10))
+
+    assert patched_components["router"].in_flight_count == 0
+    coalescer.submit.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_length_check_passes_when_within_threshold(patched_components):
+    """Boundary case: prompt + max_tokens == max_model_length is fine."""
+    patched_components["config"]["max_model_length"] = 100
+
+    with patch.object(h, "count_prompt_tokens", return_value=80):
+        response = await h.chat_completions_via_queue(_request(max_tokens=20))
+
+    # No exception → got the StreamingResponse back.
+    assert response is not None
+
+
+@pytest.mark.asyncio
+async def test_length_check_skipped_when_no_cap_configured(patched_components):
+    """
+    The default fixture has no max_model_length. count_prompt_tokens
+    must NOT be called on the hot path when there's no cap to enforce
+    — saves a tokenizer pass per request on misconfigured pods.
+    """
+    with patch.object(h, "count_prompt_tokens") as count:
+        await h.chat_completions_via_queue(_request())
+
+    count.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # _resolve_model — None / "latest" / explicit / unknown
 # ---------------------------------------------------------------------------
 
