@@ -49,6 +49,7 @@ from cray_infra.api.fastapi.routers.request_types.get_work_response import (
 )
 
 from cray_infra.api.fastapi.aiohttp.get_global_session import get_global_session
+from cray_infra.one_server.decode_error_body import decode_error_body
 
 from cray_infra.util.get_config import get_config
 
@@ -272,13 +273,19 @@ async def add_new_adaptor(app: FastAPI, new_adaptor: str):
 
     if isinstance(response, JSONResponse):
         if response.status_code != 200:
+            # Starlette stores the rendered bytes in `.body`; `.content`
+            # is only a constructor parameter (no attribute by that
+            # name on the instance). The previous reader hit
+            # AttributeError before it could log the actual upstream
+            # error, so every retry just surfaced the meta-bug.
+            error_text = decode_error_body(response)
             logger.error(
                 "Failed to load new adaptor %s: %s",
                 new_adaptor,
-                response.content.decode("utf-8"),
+                error_text,
             )
             raise RuntimeError(
-                f"Failed to load new adaptor {new_adaptor}: {response.content.decode('utf-8')}"
+                f"Failed to load new adaptor {new_adaptor}: {error_text}"
             )
         else:
             logger.info("Successfully loaded new adaptor: %s", new_adaptor)
