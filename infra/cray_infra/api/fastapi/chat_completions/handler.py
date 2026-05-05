@@ -124,6 +124,21 @@ async def chat_completions_via_queue(request: Any) -> StreamingResponse:
         except RequestTooLongError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
 
+    # Default max_tokens before the request hits the worker. vLLM's
+    # CompletionResponse builder asserts non-None
+    # (vllm/entrypoints/openai/completion/serving.py:481), so passing
+    # None all the way through generates the response — and then
+    # crashes building it with a bare `AssertionError` whose
+    # `str()` is empty. The OpenAI SDK lets clients omit max_tokens;
+    # we plug in `default_max_output_tokens` here so the queue path
+    # has a real number to hand vLLM.
+    requested_max_tokens = getattr(request, "max_tokens", None)
+    effective_max_tokens = (
+        requested_max_tokens
+        if requested_max_tokens is not None
+        else int(config.get("default_max_output_tokens", 128))
+    )
+
     correlation_id = str(uuid4())
     future = router.register(correlation_id)
     get_metrics().record_chat_admitted(correlation_id)
@@ -131,7 +146,7 @@ async def chat_completions_via_queue(request: Any) -> StreamingResponse:
     backend_request = {
         "prompt": rendered_prompt,
         "model": model,
-        "max_tokens": getattr(request, "max_tokens", None),
+        "max_tokens": effective_max_tokens,
         "temperature": getattr(request, "temperature", None),
         # The worker's dispatcher (`async_generate_task` in
         # create_generate_worker.py) only recognises "generate". The

@@ -50,6 +50,7 @@ from cray_infra.api.fastapi.routers.request_types.get_work_response import (
 
 from cray_infra.api.fastapi.aiohttp.get_global_session import get_global_session
 from cray_infra.one_server.decode_error_body import decode_error_body
+from cray_infra.one_server.format_exception import format_exception
 
 from cray_infra.util.get_config import get_config
 
@@ -348,9 +349,18 @@ async def _run_and_finish_one(request, app, inflight=None):
                 e,
                 exc_info=True,
             )
+            # `str(e)` blank-strings exceptions raised without args
+            # (bare `AssertionError`, some vLLM internal exceptions,
+            # KeyError("") and friends). The empty string ends up in
+            # the result file's `error` field, which the chat
+            # completions handler then surfaces as a 200 OK with empty
+            # content — looks like silent success for what was actually
+            # a hard failure. Capturing `type` + `repr` keeps the
+            # diagnostic intact even when the exception's __str__ is
+            # empty.
             result = {
                 "request_id": request["request_id"],
-                "error": str(e),
+                "error": format_exception(e),
             }
 
         config = get_config()
