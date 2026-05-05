@@ -155,6 +155,81 @@ async def test_correlation_id_passed_to_coalescer_matches_request_payload(patche
     assert req["request_type"] == "generate"
 
 
+# ---------------------------------------------------------------------------
+# max_tokens default
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_max_tokens_defaults_when_client_omits(patched_components):
+    """
+    The OpenAI SDK lets clients omit max_tokens. vLLM's
+    `request_output_to_completion_response` has a bare
+    `assert request.max_tokens is not None` — passing None all the
+    way through generates the response, then crashes building it
+    with an empty `AssertionError`. The handler must plug in a real
+    number from `default_max_output_tokens` so the worker never sees
+    None.
+    """
+    patched_components["config"]["default_max_output_tokens"] = 256
+    coalescer = patched_components["coalescer"]
+    captured = []
+
+    async def capture(req, cid):
+        captured.append(req)
+
+    coalescer.submit = AsyncMock(side_effect=capture)
+
+    req = _request()
+    req.max_tokens = None
+    await h.chat_completions_via_queue(req)
+
+    assert captured[0]["max_tokens"] == 256
+
+
+@pytest.mark.asyncio
+async def test_max_tokens_passes_through_when_client_provides(
+    patched_components,
+):
+    """A client-supplied max_tokens wins over the default."""
+    patched_components["config"]["default_max_output_tokens"] = 256
+    coalescer = patched_components["coalescer"]
+    captured = []
+
+    async def capture(req, cid):
+        captured.append(req)
+
+    coalescer.submit = AsyncMock(side_effect=capture)
+
+    req = _request(max_tokens=42)
+    await h.chat_completions_via_queue(req)
+
+    assert captured[0]["max_tokens"] == 42
+
+
+@pytest.mark.asyncio
+async def test_max_tokens_default_falls_back_to_128_when_config_missing(
+    patched_components,
+):
+    """If the operator removed `default_max_output_tokens` from the
+    cray-config.yaml, fall back to the in-code default of 128 — the
+    queue must not pass None even on misconfigured pods."""
+    # Fixture's config has no default_max_output_tokens key.
+    coalescer = patched_components["coalescer"]
+    captured = []
+
+    async def capture(req, cid):
+        captured.append(req)
+
+    coalescer.submit = AsyncMock(side_effect=capture)
+
+    req = _request()
+    req.max_tokens = None
+    await h.chat_completions_via_queue(req)
+
+    assert captured[0]["max_tokens"] == 128
+
+
 @pytest.mark.asyncio
 async def test_429_when_over_high_water(patched_components):
     """queue_depth > 4 × max_num_seqs (1024) trips the threshold."""
