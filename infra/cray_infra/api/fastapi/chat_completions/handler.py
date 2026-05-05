@@ -47,6 +47,9 @@ from cray_infra.api.fastapi.chat_completions.render_chat_template import (
     count_prompt_tokens,
     render_chat_template,
 )
+from cray_infra.api.fastapi.chat_completions.resolve_max_model_length import (
+    resolve_max_model_length,
+)
 from cray_infra.api.fastapi.chat_completions.result_router import (
     ResultRouter,
     get_result_router,
@@ -110,10 +113,14 @@ async def chat_completions_via_queue(request: Any) -> StreamingResponse:
     # and the request stalls forever. Reject up front with a clear
     # 400 so the client can shorten or split. Tokenizer is the
     # cached one render_chat_template already loaded, so this is a
-    # microsecond-scale check on the hot path. Skipped entirely when
-    # the operator hasn't configured a cap — count_prompt_tokens
-    # would only burn cycles on a no-op check.
-    max_model_length = int(config.get("max_model_length", 0))
+    # microsecond-scale check on the hot path. The cap comes from
+    # vLLM's runtime config (per-model, cached) rather than the
+    # cray-config knob — that knob default is 256 and tends to drift
+    # stale after operator-side model changes. resolve_max_model_length
+    # falls back to the config value when vLLM is unreachable, and
+    # treats <= 0 as "no cap" so we don't block requests on transient
+    # vLLM unavailability.
+    max_model_length = await resolve_max_model_length(model)
     if max_model_length > 0:
         try:
             check_request_length(

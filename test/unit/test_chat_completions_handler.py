@@ -74,6 +74,7 @@ def patched_components(fresh_router, fresh_estimator):
          patch.object(h, "get_queue_depth", side_effect=lambda: queue_depth_holder["value"]), \
          patch.object(h, "get_config", return_value=fake_config), \
          patch.object(h, "_resolve_model", side_effect=lambda req, cfg: req or "test-model"), \
+         patch.object(h, "resolve_max_model_length", AsyncMock(return_value=0)) as max_len, \
          patch.object(h, "render_chat_template", return_value="rendered-prompt"):
         yield {
             "coalescer": coalescer,
@@ -81,6 +82,7 @@ def patched_components(fresh_router, fresh_estimator):
             "router": fresh_router,
             "estimator": fresh_estimator,
             "config": fake_config,
+            "max_model_length": max_len,
         }
 
 
@@ -267,9 +269,11 @@ async def test_400_when_prompt_plus_max_tokens_exceeds_max_model_length(
     """
     A request whose prompt + max_tokens > max_model_length must be
     rejected up front with HTTP 400. Without this check vLLM queues
-    it forever — the production stuck-request symptom.
+    it forever — the production stuck-request symptom. The cap comes
+    from resolve_max_model_length (vLLM's runtime), not the
+    cray-config knob.
     """
-    patched_components["config"]["max_model_length"] = 100
+    patched_components["max_model_length"].return_value = 100
 
     with patch.object(h, "count_prompt_tokens", return_value=80):
         with pytest.raises(HTTPException) as exc_info:
@@ -286,7 +290,7 @@ async def test_too_long_request_does_not_register_correlation_id(
 ):
     """The 400 path must leak nothing into the router or coalescer —
     same contract as the 429 over-capacity path."""
-    patched_components["config"]["max_model_length"] = 100
+    patched_components["max_model_length"].return_value = 100
     coalescer = patched_components["coalescer"]
 
     with patch.object(h, "count_prompt_tokens", return_value=200):
@@ -300,7 +304,7 @@ async def test_too_long_request_does_not_register_correlation_id(
 @pytest.mark.asyncio
 async def test_length_check_passes_when_within_threshold(patched_components):
     """Boundary case: prompt + max_tokens == max_model_length is fine."""
-    patched_components["config"]["max_model_length"] = 100
+    patched_components["max_model_length"].return_value = 100
 
     with patch.object(h, "count_prompt_tokens", return_value=80):
         response = await h.chat_completions_via_queue(_request(max_tokens=20))
@@ -310,16 +314,41 @@ async def test_length_check_passes_when_within_threshold(patched_components):
 
 
 @pytest.mark.asyncio
-async def test_length_check_skipped_when_no_cap_configured(patched_components):
+async def test_length_check_skipped_when_resolver_returns_zero(
+    patched_components,
+):
     """
-    The default fixture has no max_model_length. count_prompt_tokens
-    must NOT be called on the hot path when there's no cap to enforce
-    — saves a tokenizer pass per request on misconfigured pods.
+    When the resolver can't determine the cap (vLLM unreachable AND
+    no config fallback), it returns 0 → handler treats as "no cap"
+    and skips the check entirely. This protects against transient
+    vLLM unavailability rejecting every request.
     """
+    # Default fixture already returns 0 for resolve_max_model_length.
     with patch.object(h, "count_prompt_tokens") as count:
         await h.chat_completions_via_queue(_request())
 
     count.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_length_check_uses_vllm_reported_cap_not_config(
+    patched_components,
+):
+    """
+    The resolver — not the cray-config knob — is the source of truth.
+    A stale config value of 256 must not reject a 4096-token request
+    when vLLM is happy with 64k. Pin the contract: the handler reads
+    from the resolver and ignores config["max_model_length"] for the
+    purpose of admission.
+    """
+    patched_components["config"]["max_model_length"] = 256
+    patched_components["max_model_length"].return_value = 65536
+
+    with patch.object(h, "count_prompt_tokens", return_value=4096):
+        # 4096 + 1000 = 5096 < 65536 → admit, even though config says 256.
+        response = await h.chat_completions_via_queue(_request(max_tokens=1000))
+
+    assert response is not None
 
 
 # ---------------------------------------------------------------------------
