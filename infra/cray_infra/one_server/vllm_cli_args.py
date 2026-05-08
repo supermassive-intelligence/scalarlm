@@ -24,10 +24,16 @@ def build_vllm_cli_args(config: dict) -> list[str]:
         f"--gpu-memory-utilization={config['gpu_memory_utilization']}",
         f"--max-log-len={config['max_log_length']}",
         f"--tensor-parallel-size={config['tensor_parallel_size']}",
-        "--enable-auto-tool-choice",
-        "--tool-call-parser=hermes",
         "--trust-remote-code",
     ]
+    # Tool-call extraction is opt-out. With Hermes auto-extraction on,
+    # models trained on <tool_call>{...}</tool_call> markup (Qwen3, etc.)
+    # spontaneously emit such blocks even when no tools are sent, and any
+    # malformed JSON inside trips the OpenAI client's json.loads with
+    # JSONDecodeError. Pure-text agents can disable this in the config.
+    if config.get("enable_tool_calls", True):
+        args.append("--enable-auto-tool-choice")
+        args.append("--tool-call-parser=hermes")
     if config.get("enable_lora", True):
         args.append("--enable-lora")
     if config.get("limit_mm_per_prompt") is not None:

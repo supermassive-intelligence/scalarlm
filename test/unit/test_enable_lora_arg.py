@@ -47,10 +47,29 @@ def test_other_required_flags_always_present():
     """The LoRA toggle must not accidentally drop other required args."""
     args = build_vllm_cli_args(_base_config(enable_lora=False))
     assert "--trust-remote-code" in args
-    assert "--enable-auto-tool-choice" in args
-    assert "--tool-call-parser=hermes" in args
     assert any(a.startswith("--tensor-parallel-size=") for a in args)
     assert any(a.startswith("--gpu-memory-utilization=") for a in args)
+
+
+def test_enable_tool_calls_default_true():
+    """Tool-call extraction defaults to on (back-compat)."""
+    cfg = _base_config()
+    cfg.pop("enable_tool_calls", None)
+    args = build_vllm_cli_args(cfg)
+    assert "--enable-auto-tool-choice" in args
+    assert "--tool-call-parser=hermes" in args
+
+
+def test_enable_tool_calls_true_includes_flags():
+    args = build_vllm_cli_args(_base_config(enable_tool_calls=True))
+    assert "--enable-auto-tool-choice" in args
+    assert "--tool-call-parser=hermes" in args
+
+
+def test_enable_tool_calls_false_omits_flags():
+    args = build_vllm_cli_args(_base_config(enable_tool_calls=False))
+    assert "--enable-auto-tool-choice" not in args
+    assert "--tool-call-parser=hermes" not in args
 
 
 def test_limit_mm_per_prompt_included_when_set():
