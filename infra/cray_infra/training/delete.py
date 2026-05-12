@@ -4,6 +4,7 @@ from cray_infra.api.fastapi.routers.request_types.train_request import (
 
 from cray_infra.training.get_latest_model import get_latest_model
 from cray_infra.training.get_training_job_info import get_training_job_status
+from cray_infra.training.vllm_model_manager import get_vllm_model_manager
 
 
 import subprocess
@@ -74,6 +75,8 @@ async def delete(job_hash: str):
         # Delete the entire job directory (model + all artifacts)
         if os.path.isdir(job_directory_path):
             shutil.rmtree(job_directory_path)
+
+        get_vllm_model_manager().unregister_model(job_hash)
         
 
         return TrainResponse(
