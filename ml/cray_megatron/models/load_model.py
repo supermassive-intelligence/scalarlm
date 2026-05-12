@@ -136,8 +136,13 @@ def materialize_model(model_info):
         f"create_tokenformer_model latency: {total_time:.2f}s ({total_time/60:.1f} minutes)"
     )
     start_time = time.time()
-    config = get_config()
-    config_dtype = config["dtype"]
+    # Per-job dtype (train_args["dtype"]) wins over global cray-config.yaml.
+    # Both default to "auto", which means "use the model's native dtype".
+    # The job-level knob is what the FAQ documents and is the right place
+    # to put a per-run dtype override (e.g. fp32 on Apple Silicon CPU where
+    # bf16 matmuls SIGILL).
+    job_dtype = job_config.get("dtype", "auto")
+    config_dtype = job_dtype if job_dtype != "auto" else get_config()["dtype"]
 
     if config_dtype != "auto":
         dtype = (

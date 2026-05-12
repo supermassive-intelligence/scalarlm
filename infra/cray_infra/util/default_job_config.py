@@ -61,3 +61,12 @@ class JobConfig(BaseModel):
 
     training_history_length: int = 1024
 
+    # Override the global cray-config.yaml `dtype` for this job only.
+    # "auto" defers to the global config (which itself defaults to
+    # "auto" = the model's native dtype). Other values: "float32",
+    # "float16", "bfloat16". Per-job control matters on CPU-on-Apple-
+    # Silicon where bf16 matmuls SIGILL under Apple's hypervisor while
+    # fp32 paths run fine — operators can pass `dtype: float32` in
+    # train_args without changing the running deployment's config.
+    dtype: str = "auto"
+
