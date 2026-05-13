@@ -5,6 +5,9 @@ from cray_infra.util.get_config import get_config
 from sortedcontainers import SortedDict
 
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 class VLLMModelManager:
     def __init__(self):
@@ -25,6 +28,18 @@ class VLLMModelManager:
         base_path = config["training_job_directory"]
         start_time = get_start_time(os.path.join(base_path, model))
         self._models[start_time] = model
+
+    def unregister_model(self, model):
+        logger.info(f"Unregistering model: {model}")
+        key = next(
+            (k for k, v in self._models.items() if v == model), None
+        )
+        if key is not None:
+            del self._models[key]
+            logger.info(f"Successfully unregistered model: {model}")
+        else:
+            logger.warning(f"Model not found in registry, skipping unregister: {model}")
+            
 
     def find_model(self, model_name):
         import os
