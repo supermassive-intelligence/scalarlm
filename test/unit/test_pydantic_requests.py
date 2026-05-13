@@ -129,6 +129,22 @@ def test_finish_work_request_requires_id():
         FinishWorkRequest()
 
 
+def test_finish_work_request_accepts_token_split():
+    """The worker propagates prompt/completion separately so the SDK
+    can surface them in `usage`. Fields are optional for backwards
+    compatibility with workers that only know `token_count`."""
+    req = FinishWorkRequest(
+        request_id="abc",
+        response="hi",
+        token_count=42,
+        prompt_tokens=35,
+        completion_tokens=7,
+    )
+    assert req.prompt_tokens == 35
+    assert req.completion_tokens == 7
+    assert req.token_count == 42
+
+
 def test_finish_work_request_accepts_embedding_list():
     # response Union[str, list[float]] — embeddings take the list branch.
     req = FinishWorkRequest(request_id="abc", response=[0.1, 0.2, 0.3])

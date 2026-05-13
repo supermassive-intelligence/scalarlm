@@ -76,6 +76,28 @@ def test_missing_response_field_yields_empty_content_not_none():
     assert out["usage"]["total_tokens"] == 5
 
 
+def test_prompt_completion_split_preferred_over_token_count():
+    """When the worker propagates the prompt/completion split (the
+    normal post-fix path), surface it on `usage` and recompute
+    `total_tokens` from the sum so the OpenAI shape is internally
+    consistent."""
+    result = {
+        "request_id": "abc_0",
+        "response": "hi",
+        "prompt_tokens": 190000,
+        "completion_tokens": 8,
+        # token_count present but contradictory — split should win and
+        # total should be recomputed from the sum, not echoed.
+        "token_count": 0,
+    }
+    out = build_chat_completion_response(result=result, model="m")
+    assert out["usage"] == {
+        "prompt_tokens": 190000,
+        "completion_tokens": 8,
+        "total_tokens": 190008,
+    }
+
+
 def test_missing_token_count_zero_usage():
     result = {"request_id": "abc_0", "response": "hi"}
     out = build_chat_completion_response(result=result, model="m-1")

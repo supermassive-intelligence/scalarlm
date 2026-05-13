@@ -460,10 +460,13 @@ async def async_chat_completion_task(request, app):
         response["error"] = response_data["message"]
 
     if "usage" in response_data:
-        response["token_count"] = response_data["usage"]["total_tokens"]
+        usage = response_data["usage"]
+        response["token_count"] = usage["total_tokens"]
+        response["prompt_tokens"] = usage.get("prompt_tokens")
+        response["completion_tokens"] = usage.get("completion_tokens")
         response["flop_count"] = (
             compute_flop_count(app.state.engine_client.model_config)
-            * response_data["usage"]["total_tokens"]
+            * usage["total_tokens"]
         )
 
     await app.state.engine_client.check_health()
@@ -580,10 +583,13 @@ async def async_completion_task(request, app):
         response["error"] = response_data["message"]
 
     if "usage" in response_data:
-        response["token_count"] = response_data["usage"]["total_tokens"]
+        usage = response_data["usage"]
+        response["token_count"] = usage["total_tokens"]
+        response["prompt_tokens"] = usage.get("prompt_tokens")
+        response["completion_tokens"] = usage.get("completion_tokens")
         response["flop_count"] = (
             compute_flop_count(app.state.engine_client.model_config)
-            * response_data["usage"]["total_tokens"]
+            * usage["total_tokens"]
         )
 
     await app.state.engine_client.check_health()
