@@ -43,6 +43,16 @@ async def finish_work(requests: FinishWorkRequests):
         if request.error is not None:
             result["error"] = request.error
 
+        # Propagate usage onto the stored result so the chat-completions
+        # response builder can surface it. Without this the worker's
+        # token counts only reach Metrics — never the SDK's `usage`.
+        if request.token_count is not None:
+            result["token_count"] = request.token_count
+        if request.prompt_tokens is not None:
+            result["prompt_tokens"] = request.prompt_tokens
+        if request.completion_tokens is not None:
+            result["completion_tokens"] = request.completion_tokens
+
         await update_and_ack(inference_work_queue, request_id=request.request_id, item=result)
 
         metrics = get_metrics()

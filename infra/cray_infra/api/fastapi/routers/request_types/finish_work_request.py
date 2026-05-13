@@ -8,6 +8,8 @@ class FinishWorkRequest(BaseModel):
     response: Optional[Union[str, list[float]]] = None
     error: Optional[str] = None
     token_count: Optional[int] = None
+    prompt_tokens: Optional[int] = None
+    completion_tokens: Optional[int] = None
     flop_count: Optional[int] = None
 
 
