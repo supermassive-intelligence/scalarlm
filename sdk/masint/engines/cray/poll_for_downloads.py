@@ -31,7 +31,7 @@ async def poll_for_downloads(result, api_url=None):
                             downloaded += len(chunk)
                             logger.debug(
                                 f"Downloaded {downloaded} of {total_size} bytes"
-                                " ({(downloaded/total_size)*100:.2f}%)"
+                                f" ({(downloaded/total_size)*100:.2f}%)"
                             )
 
                     f.flush()
