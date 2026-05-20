@@ -139,11 +139,12 @@ Before submitting, `wait_for_slurm` (`launch_training_job.py:32`) polls `squeue`
 | `--gres=gpu:N` | same N, only if cluster has GPUs | Detected by scanning `scontrol show nodes` for `Gres=gpu`. |
 | `--nodes` | `get_node_count` (L174) | `min(train_args["nodes"], max_node_count_from_slurm)` |
 | `--cpus-per-task` | `get_cpu_per_task` (L198) | `CPUTot / max(tasks_per_node, max_gpus)` |
-| `--time` | `get_train_time_limit` (L222) | `min(train_args["timeout"], max_train_time) + extra_training_seconds` |
+| `--time` | `get_train_time_limit` | **Per-slice** cap: `min(train_args["timeout"], max_train_time) + extra_training_seconds`. Not the user's total budget — see §5.4. |
+| `--signal=B:TERM@N` | `signal_grace_seconds` config | SLURM sends SIGTERM to the batch shell `N` seconds (default 120) before `--time` runs out, so the trainer can checkpoint and trigger auto-relaunch (§5.4). `B:` targets the batch shell rather than the job step. |
 | `--output` | fixed | `{job_dir}/slurm-%j.out` |
 | `--job-name` | fixed | `basename(job_directory)` — i.e. the job hash |
 
-`get_train_time_limit` deserves attention: it adds `extra_training_seconds` (default 300 s) as a buffer so the training process can observe SIGCONT/SIGTERM from SLURM and gracefully transition to `QUEUED` before being killed (see §4.2).
+`get_train_time_limit` returns a **per-slice** walltime, not the user's total training budget. `train_args["timeout"]` is the user's total time across all slices; each individual SLURM job is capped at `max_train_time` (the cluster's hard cap on a single job — `slurmctld` won't run anything longer). Long jobs accept that SLURM cuts them into slices and a fresh slice is queued on timeout. `extra_training_seconds` (default 300 s) is a small buffer on top so the trainer can finish a checkpoint without colliding with the SIGKILL deadline. See §5.4 for the relaunch coordination.
 
 Walltime format is `DD-HH:MM:SS` via `format_timedelta` (L241).
 
@@ -160,10 +161,11 @@ Walltime format is `DD-HH:MM:SS` via `format_timedelta` (L241).
 
 1. Scrubs `PMI*` environment variables from the parent (they'd confuse the new MPI world).
 2. Writes `status.json` = `{"status": "QUEUED", "start_time": <now>}`.
-3. Runs `sbatch` with `cwd=job_directory`.
-4. Parses `"Submitted batch job (\d+)"` from stdout (`get_job_id_from_sbatch_output`).
-5. Re-writes `status.json` with `{"job_id": <slurm id>}` merged in (write_job_status merges, never overwrites).
-6. On non-zero exit, writes `{"status": "FAILED", "output": ...}` and returns.
+3. Writes `resubmit.sh` to the job directory (`write_resubmit_script`) containing the exact sbatch invocation. The Python entrypoint shells out to this script on slurm-timeout relaunch (§5.4) without needing to reach the control plane — the Megatron pod can't always reach the API pod in the Helm topology.
+4. Runs `sbatch` with `cwd=job_directory`.
+5. Parses `"Submitted batch job (\d+)"` from stdout (`get_job_id_from_sbatch_output`).
+6. Re-writes `status.json` with `{"job_id": <slurm id>}` merged in (write_job_status merges, never overwrites).
+7. On non-zero exit, writes `{"status": "FAILED", "output": ...}` and returns.
 
 The API response (`TrainResponse`) is the merged status dict plus a `deployed: false` flag — it's not deployed yet because the checkpoint doesn't exist.
 
@@ -173,9 +175,15 @@ The API response (`TrainResponse`) is the merged status dict plus a `deployed: f
 
 ### 4.1 Entry
 
-SLURM runs `{job_dir}/train_job_entrypoint.sh` on the allocated node(s). That script sets MPI/GPU env vars, exports `CRAY_TRAINING_JOB_CONFIG_PATH={job_dir}/config.yaml`, and calls `python -m cray_megatron.main`.
+SLURM runs `{job_dir}/train_job_entrypoint.sh` on the allocated node(s). The bash script is intentionally thin — it just sets the MPI/GPU env vars, exports `CRAY_TRAINING_JOB_CONFIG_PATH={job_dir}/config.yaml`, and `exec`s into `ml/cray_megatron/training_entrypoint.py`.
 
-`ml/cray_megatron/main.py:29`:
+The **Python entrypoint** (`ml/cray_megatron/training_entrypoint.py`) owns three responsibilities that bash handles awkwardly:
+
+1. **Launch mpirun.** `subprocess.Popen(["mpirun", "--allow-run-as-root", sys.executable, ".../main.py", ...])`.
+2. **Forward SIGTERM.** SLURM sends SIGTERM to the batch shell `signal_grace_seconds` before the slice's `--time` (per the `--signal=B:TERM@N` flag in §3.2); the Python entrypoint catches it and forwards to mpirun, which propagates to each rank's python process. Without forwarding, the rank processes never get a chance to checkpoint.
+3. **Consume the relaunch flag.** After mpirun exits, the entrypoint reads `{job_dir}/status.json` and checks `relaunch_requested` — set to `True` by `TrainingLoop._finalize_slice` (§5.4) when slurm-timeout cut the slice short with budget and steps remaining. If true, it shells out to `bash {job_dir}/resubmit.sh` to queue the next slice. Job state lives in `status.json` only; there are no separate sentinel files.
+
+The training process itself is `ml/cray_megatron/main.py:29`:
 
 ```python
 def main():
@@ -183,7 +191,7 @@ def main():
     os.environ["HUGGING_FACE_HUB_TOKEN"] = get_hf_token()
     try:
         setup_logging()
-        setup_signal_handler(harness)         # SIGCONT → status=QUEUED, exit(0)
+        setup_signal_handler(harness)         # SIGTERM/SIGCONT → stop_flag.request_stop()
         trainer = MegatronTrainer(training_harness=harness)
         trainer.train()
     except Exception as e:
@@ -198,7 +206,7 @@ Three points:
 
 - **Harness first.** `TrainingHarness` is constructed before `try` so even setup failures can write `FAILED`.
 - **HF token injection.** `get_hf_token()` decrypts `hf_encrypted_token` from `default_config.py:66` with the Fernet key at `:67`, exports it as `HUGGING_FACE_HUB_TOKEN`. Gives `from_pretrained` access to gated models without shipping plaintext credentials in the job config.
-- **Signal handling.** `signal.SIGCONT` → `harness.update_status(QUEUED)` → `sys.exit(0)`. When SLURM sends SIGCONT for preemption, the job exits cleanly, resets its status to `QUEUED`, and the periodic task `restart_megatron_jobs` (§6) will re-submit it on the next tick.
+- **Signal handling.** The handler (registered for both `SIGTERM` and `SIGCONT`) sets a module-level latch in `ml/cray_megatron/megatron/stop_flag.py` and returns; it deliberately does **not** call `sys.exit()`. The training loop polls the latch at each step boundary, breaks cleanly, and `TrainingLoop.train()`'s post-loop checkpoint runs before the process exits. Without this, killing the trainer mid-step would force the next slice to redo work back to the previous `steps_per_checkpoint` boundary. The latch also records which signal arrived (`stop_flag.last_signal()`) so `_finalize_slice` can tell apart a slurm-timeout SIGTERM (set `relaunch_requested: true` in status.json, see §5.4) from a SIGCONT preempt (leave it false — slurm owns requeue via `restart_megatron_jobs` in §6).
 
 ### 4.2 Status lifecycle
 
@@ -218,19 +226,28 @@ The transitions:
   sbatch submitted       MegatronTrainer.train_loop()    TrainingLoop.train() returns
         │                           │                              │
         ▼                           ▼                              ▼
-     QUEUED ──────────►  TRAINING (metadata: max_steps)  ──►  COMPLETED
+     QUEUED ──────────►  TRAINING (metadata: max_steps)  ──►  COMPLETED (only when no signal)
                                     │
                                     │ every step:
                                     │   status=TRAINING, metadata=history  (update_history)
                                     │
+                                    │ SIGTERM (slurm slice timeout):
+                                    │   stop_flag set → loop drains, checkpoints
+                                    │   → _finalize_slice writes status=QUEUED +
+                                    │     accumulated_train_seconds +
+                                    │     relaunch_requested=True (all in status.json)
+                                    │   → entrypoint runs resubmit.sh (§5.4)
+                                    │
                                     │ SIGCONT (preemption):
-                                    └─►  QUEUED → sys.exit(0)
+                                    │   stop_flag set → loop drains, checkpoints
+                                    │   → status stays as last-written (typically TRAINING)
+                                    │   → restart_megatron_jobs (§6.3) requeues
                                     │
                                     │ any exception:
                                     └─►  FAILED (metadata: error/output)
 ```
 
-`MegatronTrainer.train_loop` (`megatron_trainer.py:21`) writes `TRAINING` with `max_steps` before running, and `COMPLETED` on success. Every training step calls `update_history`, which writes `TRAINING` again with an updated `history` list.
+`MegatronTrainer.train_loop` (`megatron_trainer.py:21`) writes `TRAINING` with `max_steps` before running, and `COMPLETED` on success — but **only** when `stop_flag.was_stop_requested()` is false. When a signal cut the slice short, the harness's last-written status (QUEUED for slurm-timeout relaunch) is preserved instead of being clobbered. Every training step calls `update_history`, which writes `TRAINING` again with an updated `history` list.
 
 ### 4.3 The `TrainingHarness`
 
@@ -268,6 +285,7 @@ def train(self):
     self.training_state.model_info = self.model_manager.load_model()
     self.training_loop()
     self.checkpoint()                    # always checkpoint at the end
+    self._finalize_slice()               # accumulated seconds + relaunch decision (§5.4)
 ```
 
 `training_loop` (L45) in plain sequence:
@@ -369,6 +387,33 @@ Resume is automatic: the training loop simply loops `for step in range(starting_
 ### 5.3 `latest` model alias
 
 `get_latest_model()` (used by `get_training_job_info` when the hash is literally `"latest"`) returns the most recently trained model. The `vllm_model_manager.VLLMModelManager` keeps models in a `SortedDict` keyed by `get_start_time(model_dir)`, so "latest" is well-defined. Combined with the SDK's `model_name=None` fallback, clients that don't want to track hashes can always ask for "latest".
+
+### 5.4 Auto-relaunch on SLURM timeout
+
+The user's `train_args["timeout"]` is the total budget for the run. SLURM, however, caps any single job at `max_train_time` (cluster-wide hard ceiling, default 24 h in `default_config.py`). When the user asks for ten days of training, the job runs as a chain of slices, each ≤ `max_train_time`, with a transparent checkpoint-and-relaunch at every boundary. The user sees one job; SLURM sees many sequential ones.
+
+The chain is driven from inside the training process, not the API server. Each slice independently decides whether to queue the next one — the API pod is not involved in the relaunch path and does not need to be reachable from the Megatron pod.
+
+All cross-slice state lives in `status.json` (the same file that powers `GET /v1/megatron/train/{hash}` — §7). There are no sentinel files; one source of truth for job state.
+
+**Per-slice flow**:
+
+1. **Submit**. The API server sets `--time = min(train_args["timeout"], max_train_time) + extra_training_seconds` and `--signal=B:TERM@signal_grace_seconds` (§3.2). It also writes `{job_dir}/resubmit.sh` with the verbatim sbatch invocation (§3.4).
+2. **Run**. The training loop ticks. `TimeoutCallback` (`training_loop.py`) compares `accumulated_seconds_at_slice_start + (now - slice_start)` against `train_args["timeout"]` at each step boundary and stops the loop when total elapsed exceeds the user budget. `accumulated_seconds_at_slice_start` is loaded from `status.json` at slice start (zero for the first slice).
+3. **SIGTERM arrives**. SLURM sends SIGTERM `signal_grace_seconds` (default 120 s) before `--time` expires. The Python entrypoint forwards it to mpirun; each rank's `setup_signal_handler` sets the `stop_flag` latch. The loop breaks at the next step boundary, `TrainingLoop.train()` runs its post-loop `self.checkpoint()`.
+4. **`_finalize_slice` decides whether to relaunch**. The decision is `was_sigterm AND steps_remain AND budget_remain`:
+   - `was_sigterm`: `stop_flag.last_signal() == signal.SIGTERM`. SIGCONT (preempt) is excluded — `restart_megatron_jobs` (§6.3) owns that path.
+   - `steps_remain`: `current_step + 1 < max_steps`.
+   - `budget_remain`: `accumulated < train_args["timeout"]`.
+5. **Persist**. Always write `accumulated_train_seconds` and an explicit `relaunch_requested` boolean to `status.json` (via the harness's read-modify-write `update_status`, which preserves other keys). When the decision is **relaunch**, also flip status to `QUEUED`.
+6. **Entrypoint shells out**. Once mpirun has exited, the Python entrypoint reads `status.json`, sees `relaunch_requested: true`, and runs `bash {job_dir}/resubmit.sh`. `sbatch` queues a new job (with a new SLURM job ID — by design, the SDK does not surface SLURM IDs to users) and returns immediately. The current slice's bash exits and SLURM tears down the batch step.
+7. **Next slice resumes**. The new slice's `training_loop` calls `does_any_checkpoint_exist()` → `resume_from_checkpoint` (§5.2), loads `accumulated_train_seconds` from `status.json` into `TrainingState`, and starts ticking. `TimeoutCallback`'s budget check now uses the carried-forward elapsed time.
+
+**Stale flag cleanup**: `_clear_stale_relaunch_flag` runs at every slice's training-loop start. If a previous slice set `relaunch_requested=True` and then crashed before the entrypoint consumed it, the entrypoint would relaunch even after a clean run completed. The defensive clear ensures the flag only stays True between `_finalize_slice` setting it and the entrypoint reading it.
+
+**`MegatronTrainer` doesn't clobber QUEUED**: the wrapper only writes `COMPLETED` when `stop_flag.was_stop_requested()` is false — otherwise the slice-end status the harness wrote (QUEUED for relaunch) survives.
+
+**What can defeat the relaunch**: if a checkpoint takes longer than `signal_grace_seconds` to write, SLURM hits the hard `--time` limit and SIGKILLs everyone before the entrypoint can call `sbatch`. The relaunch is lost; the job sits at `QUEUED` until the next `restart_megatron_jobs` (§6.3) tick re-submits it. Tune `signal_grace_seconds` upward for very large models if checkpoint writes routinely exceed 120 s.
 
 ---
 
@@ -472,8 +517,16 @@ Canceling does not unregister the model from vLLM unless the entire directory is
 | `nodes` | 1 | `sbatch --nodes` (clamped by SLURM). |
 | `adapter_type` | `tokenformer` | Or `lora`. |
 | `lora_config` | `{r:32, alpha:32, dropout:0.1, target_modules:"all-linear"}` | Used when `adapter_type=lora`. |
-| `timeout` | 14400 (4 h) | Wall-clock cap — enforced by `TimeoutCallback`. |
+| `timeout` | 14400 (4 h) | User's **total** wall-clock budget across all SLURM slices — enforced by `TimeoutCallback` against accumulated elapsed (§5.4). Each individual SLURM slice is capped at the server's `max_train_time`; this can be larger than that, and the trainer will chain slices automatically. |
 | `training_history_length` | 1024 | `history` list cap. |
+
+Server-side knobs that interact with the timeout (in `default_config.py`):
+
+| Field | Default | Meaning |
+|---|---|---|
+| `max_train_time` | 86400 (24 h) | Per-slice cap on `--time`. `train_args["timeout"]` longer than this becomes a multi-slice run (§5.4). |
+| `extra_training_seconds` | 300 (5 min) | Buffer added on top of `--time` so the trainer's final checkpoint has room before the hard SLURM kill. |
+| `signal_grace_seconds` | 120 | Window between SLURM's SIGTERM and the hard `--time` deadline. Must be smaller than `max_train_time` and larger than one training step + checkpoint write. Tune up for very large models. |
 
 Any subset of these can be passed in `train_args={...}`; unspecified fields default as above. The server merges them with server-derived fields (`job_directory`, `training_data_path`, `dataset_hash`) before writing `config.yaml`.
 
@@ -485,7 +538,9 @@ Any subset of these can be passed in `train_args={...}`; unspecified fields defa
 
 **Crash safety.** Training process crashes: status stays at whatever was last written; the next `restart_megatron_jobs` tick resubmits; the sbatch worker resumes from the latest checkpoint. The API pod crashes: nothing happens to running SLURM jobs; they keep writing status.json. On API restart, the periodic task reads current state from disk.
 
-**Preemption.** SLURM sends SIGCONT → signal handler writes `QUEUED` + exits cleanly → `restart_megatron_jobs` re-submits → resume.
+**Preemption.** SLURM sends SIGCONT → signal handler sets `stop_flag` → loop drains and checkpoints cleanly → `_finalize_slice` persists `accumulated_train_seconds` but leaves `relaunch_requested: false` (slurm owns requeue here) → `restart_megatron_jobs` (§6.3) re-submits on the next tick → resume.
+
+**SLURM slice timeout.** SLURM sends SIGTERM `signal_grace_seconds` before `--time` → handler sets `stop_flag` → loop drains and checkpoints → `_finalize_slice` sets `relaunch_requested: true` in `status.json` if `train_args["timeout"]` budget remains → Python entrypoint reads the flag and runs `resubmit.sh` to queue the next slice → next slice resumes from checkpoint with `accumulated_train_seconds` carried forward. See §5.4. Distinct SLURM job IDs across slices is by design; users key on the job-directory hash, not the SLURM ID.
 
 **Checkpoint always final.** `TrainingLoop.train()` calls `self.checkpoint()` after the loop exits (whether via `max_steps`, `TimeoutCallback`, or `should_stop_training`). You can never finish a run without a fresh checkpoint.
 

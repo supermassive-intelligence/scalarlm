@@ -3,6 +3,7 @@ from cray_infra.training.print_logo import print_logo
 
 from cray_megatron.megatron.training_loop import TrainingLoop, get_max_steps
 from cray_megatron.megatron.training_harness import TrainingHarness
+from cray_megatron.megatron import stop_flag
 
 import sys
 
@@ -27,4 +28,9 @@ class MegatronTrainer:
 
         TrainingLoop(self.training_harness).train()
 
-        self.training_harness.update_status(status=TrainingJobStatus.COMPLETED)
+        # When a signal cut the slice short, TrainingLoop._finalize_slice
+        # has already written the right status (QUEUED for a slurm-
+        # timeout relaunch; the harness's existing status for SIGCONT
+        # preempt). Writing COMPLETED here would clobber both.
+        if not stop_flag.was_stop_requested():
+            self.training_harness.update_status(status=TrainingJobStatus.COMPLETED)

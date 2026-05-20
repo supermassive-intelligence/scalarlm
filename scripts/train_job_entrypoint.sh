@@ -1,12 +1,11 @@
 #!/bin/bash
 
-# Safely execute this bash script
-# e exit on first failure
-# x all executed commands are printed to the terminal
-# u unset variables are errors
-# a export all variables to the environment
-# E any trap on ERR is inherited by shell functions
-# -o pipefail | produces a failure code if any stage fails
+# Thin shell wrapper: set env vars then hand off to the Python
+# entrypoint. Per-slice signal forwarding, checkpoint-on-timeout
+# coordination, and relaunch logic live in
+# ml/cray_megatron/training_entrypoint.py so they can stay readable
+# and testable.
+
 set -Eeuoxa pipefail
 
 export CRAY_TRAINING_JOB_CONFIG_PATH=REPLACE_CONFIG_PATH
@@ -19,10 +18,7 @@ export CRAY_TRAINING_JOB_CONFIG_PATH=REPLACE_CONFIG_PATH
 # sliding/full-attention activation shapes). PyTorch 2.1+.
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
-# Get the directory of this script
 LOCAL_DIRECTORY="$( cd "$( dirname "${CRAY_TRAINING_JOB_CONFIG_PATH}" )" >/dev/null 2>&1 && pwd )"
+export PYTHONPATH="${LOCAL_DIRECTORY}/ml:${PYTHONPATH:-}"
 
-# Put the current ml directory in the python path so that the modules can be imported
-export PYTHONPATH=$LOCAL_DIRECTORY/ml:$PYTHONPATH
-
-mpirun --allow-run-as-root python $LOCAL_DIRECTORY/ml/cray_megatron/main.py $*
+exec python "${LOCAL_DIRECTORY}/ml/cray_megatron/training_entrypoint.py" "$@"

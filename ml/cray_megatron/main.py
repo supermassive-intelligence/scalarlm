@@ -2,6 +2,7 @@ from cray_infra.training.training_job_status import TrainingJobStatus
 from cray_infra.huggingface.get_hf_token import get_hf_token
 
 from cray_megatron.megatron.training_harness import TrainingHarness
+from cray_megatron.megatron import stop_flag
 
 from cray_megatron.collectives.main_rank_only import is_main_rank
 
@@ -66,12 +67,19 @@ def setup_logging():
 
 def setup_signal_handler(harness):
     def signal_handler(sig, frame):
-        logger.warning("Received signal: ", sig)
-        harness.update_status(status=TrainingJobStatus.QUEUED)
-
-        sys.exit(0)
+        # Don't sys.exit here — that aborts mid-step, skips the
+        # post-loop checkpoint, and the next slice would redo work
+        # back to the last steps_per_checkpoint boundary. Set the
+        # stop flag and let TrainingLoop unwind: finish the current
+        # step, checkpoint, then exit cleanly. The training loop
+        # consults stop_flag.last_signal() to decide whether to
+        # request a slurm-relaunch (SIGTERM = slice timeout, relaunch;
+        # SIGCONT = preempt, no relaunch — slurm owns requeue).
+        logger.warning("Received signal %s — requesting graceful stop", sig)
+        stop_flag.request_stop(signal_number=sig)
 
     signal.signal(signal.SIGCONT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
 
 
 main()
