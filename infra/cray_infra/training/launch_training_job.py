@@ -128,6 +128,17 @@ def create_slurm_run_command(train_args):
     run_command += [f"--time={train_time_limit}"]
     logger.info(f"train_time_limit: {train_time_limit}")
 
+    # `--signal=B:TERM@grace` makes SLURM send SIGTERM to the batch
+    # shell `grace` seconds before the slice's --time runs out. The
+    # bash entrypoint `exec`s mpirun, so this signal lands on mpirun
+    # directly; mpirun forwards to ranks; the trainer's SIGTERM handler
+    # sets stop_flag, the loop drains and checkpoints cleanly.
+    # restart_megatron_jobs (the API server's periodic reconciler)
+    # then sees the job missing from squeue with status=TRAINING and
+    # queues the next slice — see docs/training-lifecycle.md §5.4.
+    signal_grace = get_config().get("signal_grace_seconds", 300)
+    run_command += [f"--signal=B:TERM@{signal_grace}"]
+
     slurm_log_file = os.path.join(
         get_training_job_directory(train_args), "slurm-%j.out"
     )
@@ -250,6 +261,14 @@ def get_total_cpu_count_from_slurm():
 
 
 def get_train_time_limit(train_args: Dict):
+    # Returns the per-SLURM-slice --time, NOT the user's total training
+    # budget. `train_args["timeout"]` is the total time the user wants
+    # the job to run for; each SLURM slice is capped at max_train_time
+    # (cluster's hard cap on a single job). On per-slice timeout the
+    # trainer checkpoints, exits, and restart_megatron_jobs requeues
+    # (docs/training-lifecycle.md §5.4). TimeoutCallback stops
+    # training once accumulated elapsed across slices reaches
+    # `train_args["timeout"]`.
     train_time = train_args.get("timeout", None)
 
     config = get_config()

@@ -36,6 +36,15 @@ class Config(BaseModel):
     max_gpus_per_node: int = 1
     max_train_time: int = 24 * 60 * 60
     extra_training_seconds: int = 300  # 5 minutes buffer before slurm kills the job
+
+    # Per-slice grace window: SLURM sends SIGTERM this many seconds before
+    # hitting the slice's --time limit, giving the trainer room to
+    # checkpoint and exit cleanly (see docs/training-lifecycle.md §5.4).
+    # Must be smaller than max_train_time and larger than a single
+    # training step + checkpoint write. Default 5 min — covers most
+    # mid-sized models comfortably; bump higher for big models with
+    # slow checkpoint writes.
+    signal_grace_seconds: int = 300
     tensor_parallel_size: int = 1
 
     slurm_wait_time: int = 30 # seconds

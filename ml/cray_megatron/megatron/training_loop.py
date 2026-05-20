@@ -7,8 +7,9 @@ from cray_megatron.models.get_latest_checkpoint_path import (
     delete_old_checkpoints,
 )
 
-from cray_megatron.collectives.main_rank_only import main_rank_only
+from cray_megatron.collectives.main_rank_only import main_rank_only, is_main_rank
 from cray_megatron.megatron.training_harness import TrainingHarness
+from cray_megatron.megatron import stop_flag
 
 from cray_infra.training.training_job_status import TrainingJobStatus
 from cray_infra.util.get_job_config import get_job_config
@@ -42,8 +43,42 @@ class TrainingLoop:
 
         self.checkpoint()
 
+        self._finalize_slice()
+
+    def _finalize_slice(self):
+        """Persist accumulated wall time after every slice. Carried
+        forward via status.json so the next slice's TimeoutCallback
+        compares against the user's TOTAL budget, not just this slice.
+        See docs/training-lifecycle.md §5.4.
+
+        Slice-end dispatch (queuing the next slice when slurm cuts a
+        slice short) is handled separately by `restart_megatron_jobs`
+        on the API server: it polls every megatron_refresh_period for
+        TRAINING/QUEUED jobs missing from squeue and re-submits via
+        start_slurm_job. MegatronTrainer flips to COMPLETED only when
+        no signal was received, which is what keeps that reconciler
+        from respawning jobs that finished cleanly."""
+        slice_elapsed = time.time() - self.training_state.start_time
+        accumulated = (
+            self.training_state.accumulated_seconds_at_slice_start + slice_elapsed
+        )
+        self._persist_accumulated_seconds(accumulated)
+
+    @main_rank_only
+    def _persist_accumulated_seconds(self, accumulated_seconds):
+        # Read-modify-write through the harness preserves status,
+        # job_id, history, etc. We never change status here — that's
+        # MegatronTrainer's job (or update_history's during the loop).
+        current = self.training_harness.get_status()
+        self.training_harness.update_status(
+            status=current.get("status", TrainingJobStatus.TRAINING),
+            metadata={"accumulated_train_seconds": accumulated_seconds},
+        )
+
     def training_loop(self):
         self.on_train_begin()
+
+        self._load_accumulated_seconds()
 
         self.training_state.model_info["model"].train()
 
@@ -132,10 +167,34 @@ class TrainingLoop:
 
             self.on_step_end(step)
 
+            if stop_flag.was_stop_requested():
+                logger.info(
+                    "Stop requested via signal %s — exiting training loop "
+                    "at step %d to checkpoint cleanly",
+                    stop_flag.last_signal(),
+                    step,
+                )
+                self.training_state.should_stop_training = True
+
             if self.training_state.should_stop_training:
                 break
 
         self.on_train_end()
+
+    def _load_accumulated_seconds(self):
+        # Sum of wall-time across prior slices. Persisted in status.json
+        # by _finalize_slice; TimeoutCallback adds the current slice's
+        # in-flight elapsed to this when checking the user's total
+        # budget.
+        status = self.training_harness.get_status()
+        self.training_state.accumulated_seconds_at_slice_start = float(
+            status.get("accumulated_train_seconds", 0.0)
+        )
+        if self.training_state.accumulated_seconds_at_slice_start > 0:
+            logger.info(
+                "Resuming with %.0fs of prior training already elapsed",
+                self.training_state.accumulated_seconds_at_slice_start,
+            )
 
     def resume_from_checkpoint(self):
         latest_checkpoint_path = get_latest_checkpoint_path()
@@ -365,6 +424,11 @@ def get_callbacks(trainer):
 
 
 class TimeoutCallback:
+    """Stops training when the user's TOTAL budget (`train_args["timeout"]`)
+    is exhausted across all slurm slices, not just the current slice.
+    Single-slice trainers and pre-relaunch trainers behave identically
+    because accumulated_seconds_at_slice_start defaults to 0."""
+
     def __init__(self, trainer):
         self.trainer = trainer
         job_config = get_job_config()
@@ -375,9 +439,19 @@ class TimeoutCallback:
         pass
 
     def on_step_end(self, step):
-        if time.time() - self.start_time > self.timeout:
+        slice_elapsed = time.time() - self.start_time
+        total_elapsed = (
+            self.trainer.training_state.accumulated_seconds_at_slice_start
+            + slice_elapsed
+        )
+        if total_elapsed > self.timeout:
             logger.info(
-                f"Training timed out after {time.time() - self.start_time} seconds"
+                "Training timed out after %.0fs total (%.0fs prior slices + "
+                "%.0fs current slice) — user budget was %.0fs",
+                total_elapsed,
+                self.trainer.training_state.accumulated_seconds_at_slice_start,
+                slice_elapsed,
+                self.timeout,
             )
             self.trainer.training_state.should_stop_training = True
 
@@ -440,6 +514,10 @@ class TrainingState:
         self.history = []
         self.start_time = None
         self.nan_steps = 0
+        # Loaded from status.json at the start of every slice (0 on the
+        # first slice). TimeoutCallback adds the in-flight slice elapsed
+        # to this when checking the user's total budget.
+        self.accumulated_seconds_at_slice_start = 0.0
 
 
 def get_max_steps():

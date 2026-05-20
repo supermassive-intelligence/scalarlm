@@ -1,12 +1,14 @@
 #!/bin/bash
 
-# Safely execute this bash script
-# e exit on first failure
-# x all executed commands are printed to the terminal
-# u unset variables are errors
-# a export all variables to the environment
-# E any trap on ERR is inherited by shell functions
-# -o pipefail | produces a failure code if any stage fails
+# Thin shell wrapper: set env vars then exec mpirun. The `exec`
+# replaces the batch shell with mpirun in place — the slurm batch
+# shell's PID becomes mpirun's, so slurm's `--signal=B:TERM@N`
+# (sent to the batch shell) lands on mpirun directly. mpirun's
+# standard SIGTERM forwarding then propagates to each rank's python
+# process, whose handler in main.py sets the stop_flag. No bash trap,
+# no Python wrapper — keeping the sbatch → mpirun → main.py path
+# stock avoids cross-system behavior drift.
+
 set -Eeuoxa pipefail
 
 export CRAY_TRAINING_JOB_CONFIG_PATH=REPLACE_CONFIG_PATH
@@ -19,10 +21,7 @@ export CRAY_TRAINING_JOB_CONFIG_PATH=REPLACE_CONFIG_PATH
 # sliding/full-attention activation shapes). PyTorch 2.1+.
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
-# Get the directory of this script
 LOCAL_DIRECTORY="$( cd "$( dirname "${CRAY_TRAINING_JOB_CONFIG_PATH}" )" >/dev/null 2>&1 && pwd )"
+export PYTHONPATH="${LOCAL_DIRECTORY}/ml:${PYTHONPATH:-}"
 
-# Put the current ml directory in the python path so that the modules can be imported
-export PYTHONPATH=$LOCAL_DIRECTORY/ml:$PYTHONPATH
-
-mpirun --allow-run-as-root python $LOCAL_DIRECTORY/ml/cray_megatron/main.py $*
+exec mpirun --allow-run-as-root python "${LOCAL_DIRECTORY}/ml/cray_megatron/main.py" "$@"
