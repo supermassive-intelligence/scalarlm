@@ -1,10 +1,13 @@
 #!/bin/bash
 
-# Thin shell wrapper: set env vars then hand off to the Python
-# entrypoint. Per-slice signal forwarding, checkpoint-on-timeout
-# coordination, and relaunch logic live in
-# ml/cray_megatron/training_entrypoint.py so they can stay readable
-# and testable.
+# Thin shell wrapper: set env vars then exec mpirun. The `exec`
+# replaces the batch shell with mpirun in place — the slurm batch
+# shell's PID becomes mpirun's, so slurm's `--signal=B:TERM@N`
+# (sent to the batch shell) lands on mpirun directly. mpirun's
+# standard SIGTERM forwarding then propagates to each rank's python
+# process, whose handler in main.py sets the stop_flag. No bash trap,
+# no Python wrapper — keeping the sbatch → mpirun → main.py path
+# stock avoids cross-system behavior drift.
 
 set -Eeuoxa pipefail
 
@@ -21,4 +24,4 @@ export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:T
 LOCAL_DIRECTORY="$( cd "$( dirname "${CRAY_TRAINING_JOB_CONFIG_PATH}" )" >/dev/null 2>&1 && pwd )"
 export PYTHONPATH="${LOCAL_DIRECTORY}/ml:${PYTHONPATH:-}"
 
-exec python "${LOCAL_DIRECTORY}/ml/cray_megatron/training_entrypoint.py" "$@"
+exec mpirun --allow-run-as-root python "${LOCAL_DIRECTORY}/ml/cray_megatron/main.py" "$@"

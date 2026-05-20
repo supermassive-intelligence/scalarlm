@@ -1,8 +1,10 @@
 from cray_infra.training.training_job_status import TrainingJobStatus
 from cray_infra.huggingface.get_hf_token import get_hf_token
+from cray_infra.util.get_job_config import get_job_config
 
 from cray_megatron.megatron.training_harness import TrainingHarness
 from cray_megatron.megatron import stop_flag
+from cray_megatron.relaunch import handle_relaunch_if_needed
 
 from cray_megatron.collectives.main_rank_only import is_main_rank
 
@@ -45,6 +47,14 @@ def main():
             status=TrainingJobStatus.FAILED, metadata={"error": str(e)}
         )
         raise e
+
+    # Auto-relaunch on slurm slice timeout (docs/training-lifecycle.md
+    # §5.4). _finalize_slice has already decided and persisted the
+    # answer in status.json; we just dispatch. Main rank only — sbatch
+    # from every rank would queue N copies. Runs before finalize_mpi
+    # so is_main_rank() can still query MPI state.
+    if is_main_rank():
+        handle_relaunch_if_needed(get_job_config()["job_directory"])
 
     finalize_mpi()
 

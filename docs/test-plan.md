@@ -337,7 +337,7 @@ Covers inference-queue.md §2–§5.
 - `test_get_train_time_limit_uses_user_value_when_below_cap` — `timeout=600`, `max_train_time=86400` → walltime is 600 + `extra_training_seconds` (small jobs run as a single slice, no relaunch).
 - `test_get_train_time_limit_formats_dd_hh_mm_ss` — 3725 s → `"0-01:02:05"` (`format_timedelta`).
 - `test_create_slurm_run_command_emits_signal_flag` — argv contains `--signal=B:TERM@<N>` where `N == signal_grace_seconds` from config (training-lifecycle.md §3.2). `B:` prefix is mandatory — targets the batch shell so the entrypoint can call `sbatch` before being killed.
-- `test_run_sbatch_writes_resubmit_script` — after `run_sbatch`, `{job_dir}/resubmit.sh` exists, is executable, and contains the verbatim sbatch invocation (`shlex.quote`-safe so a job path with spaces doesn't shatter the command). Required by the Python entrypoint's relaunch path (training-lifecycle.md §5.4).
+- `test_run_sbatch_writes_resubmit_script` — after `run_sbatch`, `{job_dir}/resubmit.sh` exists, is executable, and contains the verbatim sbatch invocation (`shlex.quote`-safe so a job path with spaces doesn't shatter the command). Required by main.py's relaunch path (training-lifecycle.md §5.4).
 - `test_resubmit_script_round_trips_with_special_chars` — parametrize `job_directory` over paths containing spaces, `$`, `"`, `'`, `\`. Generated `resubmit.sh` parses with `bash -n` and a stubbed `sbatch` recovers the exact original argv.
 - `test_job_directory_is_content_addressed` — same `train_args` + dataset → same directory; changing one byte → different directory.
 - `test_entrypoint_template_replaces_config_path` — `REPLACE_CONFIG_PATH` in the copied script is replaced with the absolute job-config path (training-lifecycle.md §3.3).
@@ -455,19 +455,17 @@ Use `@testing-library/react` + a fetch mock (`msw` or hand-rolled).
 - `test_chat_page_streams_assistant_message` — user sends "hi", mocked SSE stream returns `"hello"` over 3 chunks, final DOM shows `"hello"` progressively. Stop button aborts.
 - `test_conversation_store_persists_across_reloads` — write a conversation, simulate page reload (teardown + rerender with fresh QueryClient), conversation is re-read from IndexedDB.
 
-### 5.16 Training entrypoint — `ml/cray_megatron/training_entrypoint.py`
+### 5.16 Relaunch dispatch — `ml/cray_megatron/relaunch.py`
 
-Owns the per-slice lifecycle outside the trainer: spawn mpirun, forward SIGTERM, consume the relaunch flag (training-lifecycle.md §4.1, §5.4). Tested with a stubbed mpirun binary that responds to signals deterministically — no real MPI or torch.
+Called by `main.py` on the main rank after `trainer.train()` returns. Reads `status.json`, and if `relaunch_requested` is true, shells out to `bash resubmit.sh`. Lives in its own module — not in `main.py` — so it can be unit-tested without `main()` executing at import time. The `sbatch → mpirun → main.py` path stays stock; no Python wrapper sits between bash and mpirun (training-lifecycle.md §4.1).
 
-- `test_entrypoint_launches_mpirun_with_main_py` — stub `subprocess.Popen` to capture argv; first three tokens are `["mpirun", "--allow-run-as-root", sys.executable]`; the next token ends in `cray_megatron/main.py`.
-- `test_entrypoint_forwards_sigterm_to_mpirun` — start a real subprocess that traps SIGTERM and writes a marker; send SIGTERM to the entrypoint's PID; marker file appears, exit_code reflects the child's clean exit.
-- `test_entrypoint_no_relaunch_when_status_json_missing` — run with an empty job directory; `handle_relaunch` returns without raising; no `subprocess.run(["bash", …])` call.
-- `test_entrypoint_no_relaunch_when_relaunch_requested_false` — seed `status.json` with `{"status":"COMPLETED","relaunch_requested":false}`; no subprocess fired.
-- `test_entrypoint_no_relaunch_when_key_absent` — seed `status.json` with `{"status":"COMPLETED"}` (no `relaunch_requested` key at all); no subprocess fired (`status.get(key)` is falsy).
-- `test_entrypoint_runs_resubmit_when_relaunch_requested_true` — seed `status.json` with `relaunch_requested: true` and write an executable stub `resubmit.sh` that records its argv; entrypoint runs it exactly once.
-- `test_entrypoint_logs_warning_when_resubmit_missing` — `relaunch_requested: true` but no `resubmit.sh` in the directory; entrypoint emits a warning to stdout, does not raise, returns mpirun's exit code.
-- `test_entrypoint_tolerates_corrupt_status_json` — seed `status.json` with invalid JSON; entrypoint logs and skips the relaunch check rather than crashing (operators reading slurm-{id}.out can see what happened).
-- `test_entrypoint_returns_mpirun_exit_code` — stub mpirun to exit with 143 (128+SIGTERM); entrypoint's return code is 143 even when a successful relaunch ran in between.
+- `test_no_op_when_status_missing` — fresh job directory with no `status.json`; `handle_relaunch_if_needed` returns silently. Tolerance for early-failure paths.
+- `test_no_op_when_relaunch_requested_false` — seed `status.json` with `{"status":"COMPLETED","relaunch_requested":false}`; no `subprocess.run` call.
+- `test_no_op_when_key_absent` — seed `status.json` with `{"status":"COMPLETED"}` (no `relaunch_requested` key at all); `status.get(key)` is falsy → no subprocess. Guards backwards compatibility with job dirs that predate this feature.
+- `test_runs_resubmit_when_true` — seed `status.json` with `relaunch_requested: true` plus an executable stub `resubmit.sh`; `subprocess.run(["bash", str(resubmit)])` is called exactly once.
+- `test_warns_when_resubmit_missing` — flag set but no `resubmit.sh` on disk; logs a warning to stdout, does NOT raise (the slice has already exited — raising would just confuse operators reading slurm-{id}.out).
+- `test_tolerates_corrupt_status_json` — invalid JSON in `status.json` is logged and skipped, not raised. Trainer may have died mid-write.
+- `test_accepts_str_or_path` — caller passes `get_job_config()["job_directory"]` (a string); function also accepts `pathlib.Path` for testability.
 
 ---
 
@@ -562,6 +560,7 @@ test/
 │   ├── test_format_timedelta.py
 │   ├── test_main_rank_only.py
 │   ├── test_stop_flag.py
+│   ├── test_relaunch.py                 # ml/cray_megatron/relaunch.py
 │   ├── test_tokenformer_surgeon.py
 │   └── test_mpi_lifecycle.py
 │
@@ -573,7 +572,6 @@ test/
 │   ├── test_launch_training_job.py
 │   ├── test_training_harness.py
 │   ├── test_training_loop.py            # tiny-random-llama, 3 steps on CPU
-│   ├── test_training_entrypoint.py      # mpirun spawn, signal forward, relaunch
 │   ├── test_dataset_loading.py
 │   ├── test_adapters.py
 │   ├── test_tokenformer_manager.py      # vLLM-side
