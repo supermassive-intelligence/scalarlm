@@ -196,7 +196,7 @@ These tests sit above the system and assert contracts the user sees. Each one to
 - `test_train_list_models_includes_completed` — after completion, `llm.list_models()` contains the job hash.
 - `test_train_status_shape` — the returned dict has `status`, `start_time`, `job_id`, `max_steps` keys.
 - `test_train_fails_on_invalid_llm_name` — `llm_name: "__does_not_exist__/__never__"` ends with `status=FAILED` and a non-empty `error` field in `status.json`.
-- `test_train_auto_relaunch_on_slurm_timeout` — set `max_train_time=10` and `signal_grace_seconds=3` server-side, submit with `train_args["timeout"]=25` and `max_steps=20`. Poll `status.json` and assert: (a) `job_id` changes at least once across the run (proving a new sbatch was queued), (b) `accumulated_train_seconds` monotonically increases across slices, (c) terminal status is `COMPLETED` with `step` close to `max_steps`. Verifies the end-to-end chain in training-lifecycle.md §5.4 — SLURM timeout → SIGTERM → checkpoint → status.json `relaunch_requested:true` → entrypoint runs `resubmit.sh` → next slice resumes. Allow 90 s.
+- `test_train_chains_across_slurm_slices` — set `max_train_time=10`, `signal_grace_seconds=3`, and `megatron_refresh_period=2` server-side, submit with `train_args["timeout"]=25` and `max_steps=20`. Poll `status.json` and assert: (a) `job_id` changes at least once across the run (proving the reconciler queued a new sbatch), (b) `accumulated_train_seconds` monotonically increases across slices, (c) terminal status is `COMPLETED` with `step` close to `max_steps`. Verifies the unified chain in training-lifecycle.md §5.4 — SLURM `--time` → SIGTERM → trainer checkpoints → status stays `TRAINING` → `restart_megatron_jobs` notices the job missing from `squeue` → new sbatch → next slice resumes. Allow 90 s.
 
 **Fixture:** `server_full_cpu`. SLURM is already running inside the container from `start_slurm.sh`. Training budget < 60 s on CPU with a tiny random model.
 
@@ -325,6 +325,8 @@ Covers inference-queue.md §2–§5.
 
 - `test_register_megatron_models_discovers_new_pt_files` — drop a `.pt` into `{jobs_dir}/h1/`, run the task once, manager now contains `h1`.
 - `test_restart_megatron_jobs_resubmits_queued_not_in_squeue` — seed a `status.json` with `QUEUED` + a `job_id` not in `squeue`; stub `start_slurm_job`; assert it was called once per such row (training-lifecycle.md §6.3).
+- `test_restart_megatron_jobs_resubmits_training_not_in_squeue` — same shape with `status=TRAINING`. This is the long-jobs path (training-lifecycle.md §5.4): a slice that exited cleanly via SIGTERM leaves status at TRAINING, and the reconciler must queue the next slice without operator intervention.
+- `test_restart_megatron_jobs_skips_completed_jobs` — seed `status=COMPLETED` with no slurm job; assert `start_slurm_job` is NOT called. The status discipline in `MegatronTrainer` is what makes the reconciler safe to run unconditionally.
 - `test_restart_megatron_jobs_keeps_pod_alive_when_training` — with a `TRAINING` status in squeue, assert a `POST /v1/health/keepalive` call is made.
 - `test_clear_acked_requests_gc` — seed 10 acked rows, run task once, 0 rows left in SQLite.
 - `test_tasks_recover_from_individual_failure` — one task raises, next tick still runs the others.
@@ -337,8 +339,6 @@ Covers inference-queue.md §2–§5.
 - `test_get_train_time_limit_uses_user_value_when_below_cap` — `timeout=600`, `max_train_time=86400` → walltime is 600 + `extra_training_seconds` (small jobs run as a single slice, no relaunch).
 - `test_get_train_time_limit_formats_dd_hh_mm_ss` — 3725 s → `"0-01:02:05"` (`format_timedelta`).
 - `test_create_slurm_run_command_emits_signal_flag` — argv contains `--signal=B:TERM@<N>` where `N == signal_grace_seconds` from config (training-lifecycle.md §3.2). `B:` prefix is mandatory — targets the batch shell so the entrypoint can call `sbatch` before being killed.
-- `test_run_sbatch_writes_resubmit_script` — after `run_sbatch`, `{job_dir}/resubmit.sh` exists, is executable, and contains the verbatim sbatch invocation (`shlex.quote`-safe so a job path with spaces doesn't shatter the command). Required by main.py's relaunch path (training-lifecycle.md §5.4).
-- `test_resubmit_script_round_trips_with_special_chars` — parametrize `job_directory` over paths containing spaces, `$`, `"`, `'`, `\`. Generated `resubmit.sh` parses with `bash -n` and a stubbed `sbatch` recovers the exact original argv.
 - `test_job_directory_is_content_addressed` — same `train_args` + dataset → same directory; changing one byte → different directory.
 - `test_entrypoint_template_replaces_config_path` — `REPLACE_CONFIG_PATH` in the copied script is replaced with the absolute job-config path (training-lifecycle.md §3.3).
 - `test_run_sbatch_scrubs_pmi_env` — parent env has `PMI_RANK=3`, subprocess env does not.
@@ -364,14 +364,12 @@ These use the tiny-random-llama model with 3 steps on CPU.
 - `test_training_loop_timeout_callback_stops_on_total_budget` — `train_args["timeout"]=2`, patch forward to sleep 3 s, loop exits early via `TimeoutCallback`, status `COMPLETED` with step < max_steps.
 - `test_training_loop_timeout_callback_honors_accumulated_seconds` — pre-seed `status.json` with `accumulated_train_seconds=1.5`, `train_args["timeout"]=2`, patch forward to sleep 0.6 s. Loop must stop on the first step (slice elapsed 0.6 s + prior 1.5 s > 2 s budget), not after 2 s of slice time. Verifies that the budget is total-across-slices, not per-slice (training-lifecycle.md §5.4).
 - `test_training_loop_update_history_capped` — set `training_history_length=8`, run 20 steps, history has exactly 8 entries with roughly uniform step coverage (verifies `remove_closest_entry` behavior).
-- `test_training_loop_sigterm_sets_relaunch_requested` — send SIGTERM mid-loop, loop exits via `stop_flag`, the post-loop `self.checkpoint()` runs (verifies a fresh `.pt` lands), `_finalize_slice` sets `relaunch_requested: true` AND flips status to `QUEUED` AND advances `accumulated_train_seconds > 0` — all in `status.json` (training-lifecycle.md §5.4 — single source of truth, no separate sentinel file).
-- `test_training_loop_sigterm_relaunch_false_when_budget_exhausted` — pre-seed `accumulated_train_seconds = train_args["timeout"] - 0.1`, send SIGTERM after one step; status.json's `relaunch_requested` is explicitly `false`, status left for `MegatronTrainer` to flip to `COMPLETED`.
-- `test_training_loop_sigterm_relaunch_false_when_max_steps_reached` — run to `max_steps`, send SIGTERM after the loop naturally exits; status.json's `relaunch_requested` is `false` (no steps remain).
-- `test_training_loop_sigcont_relaunch_false` — send SIGCONT mid-loop, loop drains and checkpoints, but `relaunch_requested` stays `false` — slurm/`restart_megatron_jobs` owns the preempt requeue path (training-lifecycle.md §5.4).
-- `test_training_loop_clears_stale_relaunch_flag_at_start` — pre-seed `status.json` with `relaunch_requested: true` before the loop starts; loop runs to natural completion; the field is cleared during slice setup AND `_finalize_slice` writes an explicit `false` at the end (so the entrypoint won't loop-relaunch a completed job).
-- `test_finalize_slice_persists_accumulated_seconds_across_slices` — run slice A (`accumulated_train_seconds` ends at ~`A`), simulate relaunch by reusing the same job dir + harness, run slice B (loop starts with `accumulated_seconds_at_slice_start == A`, ends at ~`A+B`).
-- `test_finalize_slice_preserves_other_status_keys` — pre-seed `status.json` with `job_id`, `start_time`, `history`; after `_finalize_slice` runs, those keys are still present (regression guard for the read-modify-write contract).
-- `test_megatron_trainer_skips_completed_when_signal_seen` — mock `TrainingLoop.train()` to set `stop_flag` and exit; `MegatronTrainer.train_loop()` does NOT call `update_status(COMPLETED)` (otherwise the `QUEUED` written for relaunch would be clobbered).
+- `test_training_loop_sigterm_checkpoints_cleanly` — send SIGTERM mid-loop, loop exits via `stop_flag`, the post-loop `self.checkpoint()` runs (verifies a fresh `.pt` lands), `_finalize_slice` advances `accumulated_train_seconds > 0`. Status stays at whatever was last written (typically `TRAINING`) — `restart_megatron_jobs` (§6.3) is what queues the next slice (training-lifecycle.md §5.4).
+- `test_training_loop_sigcont_same_handling_as_sigterm` — send SIGCONT mid-loop; same behavior as SIGTERM at the trainer level (drain, checkpoint, persist accumulated_seconds). The reconciler picks both up via the same status-missing-from-squeue path.
+- `test_finalize_slice_persists_accumulated_seconds_across_slices` — run slice A (`accumulated_train_seconds` ends at ~`A`), simulate relaunch by reusing the same job dir + harness, run slice B (loop starts with `accumulated_seconds_at_slice_start == A`, ends at ~`A+B`). This is the cross-slice invariant that makes the user's total `timeout` honored.
+- `test_finalize_slice_preserves_other_status_keys` — pre-seed `status.json` with `job_id`, `start_time`, `history`, and an existing `status`; after `_finalize_slice` runs, those keys are still present and `status` is unchanged (regression guard for the read-modify-write contract; `_finalize_slice` never touches status, only `MegatronTrainer` does).
+- `test_megatron_trainer_skips_completed_when_signal_seen` — mock `TrainingLoop.train()` to set `stop_flag` and exit; `MegatronTrainer.train_loop()` does NOT call `update_status(COMPLETED)`. Without this guard, `restart_megatron_jobs` would (correctly) leave the job alone instead of queuing the next slice — this test pins the status discipline that makes §5.4 work.
+- `test_megatron_trainer_writes_completed_when_loop_exits_cleanly` — no signal received; `MegatronTrainer.train_loop()` writes `COMPLETED`. Confirms the inverse — the reconciler stops respawning when the job is genuinely done (max_steps reached or user's total budget exhausted via `TimeoutCallback`).
 
 ### 5.8 Dataset loading — `ml/cray_megatron/megatron/dataset/`
 
@@ -454,18 +452,6 @@ Use `@testing-library/react` + a fetch mock (`msw` or hand-rolled).
 - `test_submit_modal_blocks_invalid_form` — `max_steps: 0`, submit button disabled or form shows validation error.
 - `test_chat_page_streams_assistant_message` — user sends "hi", mocked SSE stream returns `"hello"` over 3 chunks, final DOM shows `"hello"` progressively. Stop button aborts.
 - `test_conversation_store_persists_across_reloads` — write a conversation, simulate page reload (teardown + rerender with fresh QueryClient), conversation is re-read from IndexedDB.
-
-### 5.16 Relaunch dispatch — `ml/cray_megatron/relaunch.py`
-
-Called by `main.py` on the main rank after `trainer.train()` returns. Reads `status.json`, and if `relaunch_requested` is true, shells out to `bash resubmit.sh`. Lives in its own module — not in `main.py` — so it can be unit-tested without `main()` executing at import time. The `sbatch → mpirun → main.py` path stays stock; no Python wrapper sits between bash and mpirun (training-lifecycle.md §4.1).
-
-- `test_no_op_when_status_missing` — fresh job directory with no `status.json`; `handle_relaunch_if_needed` returns silently. Tolerance for early-failure paths.
-- `test_no_op_when_relaunch_requested_false` — seed `status.json` with `{"status":"COMPLETED","relaunch_requested":false}`; no `subprocess.run` call.
-- `test_no_op_when_key_absent` — seed `status.json` with `{"status":"COMPLETED"}` (no `relaunch_requested` key at all); `status.get(key)` is falsy → no subprocess. Guards backwards compatibility with job dirs that predate this feature.
-- `test_runs_resubmit_when_true` — seed `status.json` with `relaunch_requested: true` plus an executable stub `resubmit.sh`; `subprocess.run(["bash", str(resubmit)])` is called exactly once.
-- `test_warns_when_resubmit_missing` — flag set but no `resubmit.sh` on disk; logs a warning to stdout, does NOT raise (the slice has already exited — raising would just confuse operators reading slurm-{id}.out).
-- `test_tolerates_corrupt_status_json` — invalid JSON in `status.json` is logged and skipped, not raised. Trainer may have died mid-write.
-- `test_accepts_str_or_path` — caller passes `get_job_config()["job_directory"]` (a string); function also accepts `pathlib.Path` for testability.
 
 ---
 
@@ -560,7 +546,6 @@ test/
 │   ├── test_format_timedelta.py
 │   ├── test_main_rank_only.py
 │   ├── test_stop_flag.py
-│   ├── test_relaunch.py                 # ml/cray_megatron/relaunch.py
 │   ├── test_tokenformer_surgeon.py
 │   └── test_mpi_lifecycle.py
 │

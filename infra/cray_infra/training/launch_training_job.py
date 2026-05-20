@@ -9,7 +9,6 @@ import time
 import subprocess
 import datetime
 import re
-import shlex
 import shutil
 import logging
 
@@ -129,11 +128,14 @@ def create_slurm_run_command(train_args):
     run_command += [f"--time={train_time_limit}"]
     logger.info(f"train_time_limit: {train_time_limit}")
 
-    # `--signal=B:TERM@grace` makes SLURM send SIGTERM to the batch shell
-    # `grace` seconds before the slice's --time runs out. The entrypoint
-    # traps it, the trainer checkpoints, and resubmit.sh queues a fresh
-    # slice. Without B:, the signal goes to the job step (mpirun) instead
-    # of the bash shell that needs to call sbatch on its way out.
+    # `--signal=B:TERM@grace` makes SLURM send SIGTERM to the batch
+    # shell `grace` seconds before the slice's --time runs out. The
+    # bash entrypoint `exec`s mpirun, so this signal lands on mpirun
+    # directly; mpirun forwards to ranks; the trainer's SIGTERM handler
+    # sets stop_flag, the loop drains and checkpoints cleanly.
+    # restart_megatron_jobs (the API server's periodic reconciler)
+    # then sees the job missing from squeue with status=TRAINING and
+    # queues the next slice — see docs/training-lifecycle.md §5.4.
     signal_grace = get_config().get("signal_grace_seconds", 120)
     run_command += [f"--signal=B:TERM@{signal_grace}"]
 
@@ -262,9 +264,10 @@ def get_train_time_limit(train_args: Dict):
     # Returns the per-SLURM-slice --time, NOT the user's total training
     # budget. `train_args["timeout"]` is the total time the user wants
     # the job to run for; each SLURM slice is capped at max_train_time
-    # (cluster's hard cap on a single job). On timeout the trainer
-    # checkpoints and resubmit.sh queues a fresh slice; TimeoutCallback
-    # stops training once accumulated elapsed across slices reaches
+    # (cluster's hard cap on a single job). On per-slice timeout the
+    # trainer checkpoints, exits, and restart_megatron_jobs requeues
+    # (docs/training-lifecycle.md §5.4). TimeoutCallback stops
+    # training once accumulated elapsed across slices reaches
     # `train_args["timeout"]`.
     train_time = train_args.get("timeout", None)
 
@@ -300,8 +303,6 @@ def run_sbatch(run_command, train_args):
 
     write_job_status("QUEUED", train_args, {"start_time": time.time()})
 
-    write_resubmit_script(run_command, train_args)
-
     logger.info(f"sbatch run_command: {' '.join(run_command)}")
 
     logger.info(f"cwd: {get_training_job_directory(train_args)}")
@@ -326,31 +327,6 @@ def run_sbatch(run_command, train_args):
 def get_job_id_from_sbatch_output(sbatch_output):
     logger.info(f"sbatch_output: {sbatch_output}")
     return re.search(r"Submitted batch job (\d+)", sbatch_output).group(1)
-
-
-def write_resubmit_script(run_command, train_args):
-    # Persist the exact sbatch invocation alongside the job so the
-    # entrypoint can re-queue the job after a slurm-timeout SIGTERM
-    # without needing to call back to the control plane (which the
-    # Megatron pod cannot always reach in the Helm topology).
-    # `cd` so sbatch runs with the same cwd it would have had under
-    # the API server (the job directory).
-    job_directory = get_training_job_directory(train_args)
-    resubmit_path = os.path.join(job_directory, "resubmit.sh")
-
-    quoted = " ".join(shlex.quote(arg) for arg in run_command)
-
-    script = (
-        "#!/bin/bash\n"
-        "set -euo pipefail\n"
-        f"cd {shlex.quote(job_directory)}\n"
-        f"exec {quoted}\n"
-    )
-
-    with open(resubmit_path, "w") as f:
-        f.write(script)
-
-    os.chmod(resubmit_path, 0o755)
 
 
 def write_job_status(status, train_args, extra_info):

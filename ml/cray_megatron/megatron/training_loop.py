@@ -19,16 +19,9 @@ from torch.optim import AdamW
 
 import torch
 
-import signal
 import time
 import logging
 from gpu_aware_mpi import allreduce, get_size
-
-# status.json key that signals "the trainer wants this job re-queued
-# for another slice." The Python entrypoint reads it after mpirun exits
-# and shells out to resubmit.sh if true. Single source of truth for job
-# state — no separate sentinel file.
-RELAUNCH_REQUESTED_KEY = "relaunch_requested"
 
 logger = logging.getLogger(__name__)
 
@@ -53,67 +46,39 @@ class TrainingLoop:
         self._finalize_slice()
 
     def _finalize_slice(self):
-        """Persist accumulated wall time and, if the slice was cut short
-        by a slurm timeout (SIGTERM) with budget and steps remaining,
-        set status.json's relaunch_requested=True for the entrypoint to
-        act on. SIGCONT (preempt) does NOT trigger relaunch — slurm
-        owns requeue in that path."""
+        """Persist accumulated wall time after every slice. Carried
+        forward via status.json so the next slice's TimeoutCallback
+        compares against the user's TOTAL budget, not just this slice.
+        See docs/training-lifecycle.md §5.4.
+
+        Slice-end dispatch (queuing the next slice when slurm cuts a
+        slice short) is handled separately by `restart_megatron_jobs`
+        on the API server: it polls every megatron_refresh_period for
+        TRAINING/QUEUED jobs missing from squeue and re-submits via
+        start_slurm_job. MegatronTrainer flips to COMPLETED only when
+        no signal was received, which is what keeps that reconciler
+        from respawning jobs that finished cleanly."""
         slice_elapsed = time.time() - self.training_state.start_time
         accumulated = (
             self.training_state.accumulated_seconds_at_slice_start + slice_elapsed
         )
-
-        user_timeout = get_job_config()["timeout"]
-        max_steps = get_max_steps()
-
-        # current_step is the last step that ran. We mirror
-        # resume_from_checkpoint's "+1" convention to mean "next step to
-        # run." If next == max_steps the loop is done.
-        next_step = self.training_state.current_step + 1
-        steps_remain = next_step < max_steps
-        budget_remain = accumulated < user_timeout
-        was_sigterm = stop_flag.last_signal() == signal.SIGTERM
-
-        should_relaunch = was_sigterm and steps_remain and budget_remain
-
-        self._persist_slice_state(
-            accumulated_seconds=accumulated,
-            should_relaunch=should_relaunch,
-        )
+        self._persist_accumulated_seconds(accumulated)
 
     @main_rank_only
-    def _persist_slice_state(self, accumulated_seconds, should_relaunch):
-        metadata = {
-            "accumulated_train_seconds": accumulated_seconds,
-            RELAUNCH_REQUESTED_KEY: should_relaunch,
-        }
-        if should_relaunch:
-            logger.info(
-                "Slurm-timeout SIGTERM with %.0fs of %.0fs budget used and "
-                "step %d/%d done — flagging relaunch_requested=True in "
-                "status.json",
-                accumulated_seconds,
-                get_job_config()["timeout"],
-                self.training_state.current_step,
-                get_max_steps(),
-            )
-            status = TrainingJobStatus.QUEUED
-        else:
-            # Loop ran to completion (max_steps or total-budget). Leave
-            # the status as whatever was last written so MegatronTrainer
-            # can flip it to COMPLETED — the explicit
-            # relaunch_requested=False guards against a stale True from
-            # an earlier slice misleading the entrypoint.
-            status = self.training_harness.get_status().get(
-                "status", TrainingJobStatus.TRAINING
-            )
-        self.training_harness.update_status(status=status, metadata=metadata)
+    def _persist_accumulated_seconds(self, accumulated_seconds):
+        # Read-modify-write through the harness preserves status,
+        # job_id, history, etc. We never change status here — that's
+        # MegatronTrainer's job (or update_history's during the loop).
+        current = self.training_harness.get_status()
+        self.training_harness.update_status(
+            status=current.get("status", TrainingJobStatus.TRAINING),
+            metadata={"accumulated_train_seconds": accumulated_seconds},
+        )
 
     def training_loop(self):
         self.on_train_begin()
 
         self._load_accumulated_seconds()
-        self._clear_stale_relaunch_flag()
 
         self.training_state.model_info["model"].train()
 
@@ -229,21 +194,6 @@ class TrainingLoop:
             logger.info(
                 "Resuming with %.0fs of prior training already elapsed",
                 self.training_state.accumulated_seconds_at_slice_start,
-            )
-
-    @main_rank_only
-    def _clear_stale_relaunch_flag(self):
-        # Defensive: if a previous slice set relaunch_requested=True
-        # and then crashed before the entrypoint could consume it, the
-        # entrypoint would relaunch even from a slice that ran to
-        # completion. Clear at the start of every slice; we'll set it
-        # back to True in _finalize_slice if this slice genuinely needs
-        # relaunching.
-        current = self.training_harness.get_status()
-        if current.get(RELAUNCH_REQUESTED_KEY):
-            self.training_harness.update_status(
-                status=current.get("status", TrainingJobStatus.TRAINING),
-                metadata={RELAUNCH_REQUESTED_KEY: False},
             )
 
     def resume_from_checkpoint(self):

@@ -1,14 +1,11 @@
 """
-Unit tests for the auto-relaunch additions to launch_training_job.py.
+Unit tests for the long-jobs additions to launch_training_job.py.
 
 Covers training-lifecycle.md §3.2 (--signal flag, per-slice --time
-semantics) and §3.4 / §5.4 (resubmit.sh writer). The slurm-side and
-status.json-side relaunch behavior is covered separately by
-test_stop_flag.py and (forthcoming) test_training_entrypoint.py.
+semantics). The dispatch arm (restart_megatron_jobs re-submitting
+TRAINING/QUEUED jobs that fell out of squeue) is tested separately.
 """
 
-import os
-import shlex
 import subprocess
 
 import pytest
@@ -122,66 +119,3 @@ def test_create_slurm_run_command_signal_grace_defaults_to_120(tmp_path, monkeyp
     )
 
     assert "--signal=B:TERM@120" in cmd
-
-
-# ---- write_resubmit_script ------------------------------------------------
-
-
-def test_write_resubmit_script_writes_executable(tmp_path):
-    job_dir = tmp_path / "job"
-    job_dir.mkdir()
-    mod.write_resubmit_script(
-        ["sbatch", "--time=0-01:00:00", "/path/to/entry.sh"],
-        {"job_directory": str(job_dir)},
-    )
-    script = job_dir / "resubmit.sh"
-    assert script.is_file()
-    # Executable bit set so `bash resubmit.sh` AND a direct exec both work.
-    assert os.access(script, os.X_OK)
-
-
-def test_write_resubmit_script_contains_verbatim_sbatch_invocation(tmp_path):
-    job_dir = tmp_path / "job"
-    job_dir.mkdir()
-    argv = ["sbatch", "--ntasks-per-node=1", "--time=0-01:00:00", "/x/entry.sh"]
-    mod.write_resubmit_script(argv, {"job_directory": str(job_dir)})
-    content = (job_dir / "resubmit.sh").read_text()
-    for token in argv:
-        assert shlex.quote(token) in content, f"missing token {token!r} in {content!r}"
-    assert content.startswith("#!/bin/bash\n")
-    assert "exec" in content
-
-
-@pytest.mark.parametrize(
-    "tricky_path",
-    [
-        "/tmp/job with spaces",
-        "/tmp/job'with'quotes",
-        "/tmp/job\"with\"doublequotes",
-        "/tmp/job$with$dollars",
-        "/tmp/job\\with\\backslashes",
-    ],
-)
-def test_write_resubmit_script_quotes_tricky_paths(tmp_path, tricky_path):
-    # The entrypoint shells out via `bash resubmit.sh`. shlex.quote on
-    # every argv token means a path with spaces, quotes, $, or
-    # backslashes doesn't shatter into multiple shell words. Verify by
-    # re-parsing the script with shlex.split and recovering the original
-    # argv.
-    job_dir = tmp_path / "job"
-    job_dir.mkdir()
-    argv = ["sbatch", "--output=" + tricky_path + "/slurm.out", tricky_path + "/x.sh"]
-    mod.write_resubmit_script(argv, {"job_directory": str(job_dir)})
-    script_text = (job_dir / "resubmit.sh").read_text()
-    # bash -n parse check
-    parse = subprocess.run(
-        ["bash", "-n", str(job_dir / "resubmit.sh")],
-        capture_output=True,
-    )
-    assert parse.returncode == 0, parse.stderr.decode()
-    # Recover the argv from the `exec ...` line.
-    exec_line = next(
-        line for line in script_text.splitlines() if line.startswith("exec ")
-    )
-    recovered = shlex.split(exec_line[len("exec ") :])
-    assert recovered == argv, (recovered, argv)
