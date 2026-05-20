@@ -97,9 +97,11 @@ def test_create_slurm_run_command_emits_signal_flag(tmp_path, monkeypatch):
     assert "B:" in signal_args[0]
 
 
-def test_create_slurm_run_command_signal_grace_defaults_to_120(tmp_path, monkeypatch):
+def test_create_slurm_run_command_signal_grace_defaults_to_300(tmp_path, monkeypatch):
     _stub_scontrol(monkeypatch)
-    # Config omits signal_grace_seconds entirely; builder falls back to 120.
+    # Config omits signal_grace_seconds entirely; builder falls back to
+    # the in-code default of 300s (5 min — comfortable for typical
+    # mid-sized model checkpoint writes).
     monkeypatch.setattr(
         mod,
         "get_config",
@@ -118,4 +120,4 @@ def test_create_slurm_run_command_signal_grace_defaults_to_120(tmp_path, monkeyp
         {"job_directory": str(job_dir), "timeout": 600, "gpus": 0, "nodes": 1}
     )
 
-    assert "--signal=B:TERM@120" in cmd
+    assert "--signal=B:TERM@300" in cmd

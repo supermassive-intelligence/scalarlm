@@ -39,10 +39,12 @@ class Config(BaseModel):
 
     # Per-slice grace window: SLURM sends SIGTERM this many seconds before
     # hitting the slice's --time limit, giving the trainer room to
-    # checkpoint and request a relaunch (see docs/training-lifecycle.md —
-    # auto-resume on slurm timeout). Must be smaller than max_train_time
-    # and larger than a single training step + checkpoint write.
-    signal_grace_seconds: int = 120
+    # checkpoint and exit cleanly (see docs/training-lifecycle.md §5.4).
+    # Must be smaller than max_train_time and larger than a single
+    # training step + checkpoint write. Default 5 min — covers most
+    # mid-sized models comfortably; bump higher for big models with
+    # slow checkpoint writes.
+    signal_grace_seconds: int = 300
     tensor_parallel_size: int = 1
 
     slurm_wait_time: int = 30 # seconds

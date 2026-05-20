@@ -140,7 +140,7 @@ Before submitting, `wait_for_slurm` (`launch_training_job.py:32`) polls `squeue`
 | `--nodes` | `get_node_count` (L174) | `min(train_args["nodes"], max_node_count_from_slurm)` |
 | `--cpus-per-task` | `get_cpu_per_task` (L198) | `CPUTot / max(tasks_per_node, max_gpus)` |
 | `--time` | `get_train_time_limit` | **Per-slice** cap: `min(train_args["timeout"], max_train_time) + extra_training_seconds`. Not the user's total budget — see §5.4. |
-| `--signal=B:TERM@N` | `signal_grace_seconds` config | SLURM sends SIGTERM to the batch shell `N` seconds (default 120) before `--time` runs out, so the trainer can checkpoint and trigger auto-relaunch (§5.4). `B:` targets the batch shell rather than the job step. |
+| `--signal=B:TERM@N` | `signal_grace_seconds` config | SLURM sends SIGTERM to the batch shell `N` seconds (default 300, i.e. 5 min) before `--time` runs out, so the trainer can checkpoint and trigger auto-relaunch (§5.4). `B:` targets the batch shell rather than the job step. |
 | `--output` | fixed | `{job_dir}/slurm-%j.out` |
 | `--job-name` | fixed | `basename(job_directory)` — i.e. the job hash |
 
@@ -394,7 +394,7 @@ There is **no separate auto-relaunch dispatch path** inside the trainer. The sam
 
 **Trainer responsibilities (per slice)**
 
-1. **At submit time**, the API server sets `--time = min(train_args["timeout"], max_train_time) + extra_training_seconds` and `--signal=B:TERM@signal_grace_seconds` (§3.2). The first `--time` field is the per-slice cap; `signal_grace_seconds` (default 120 s) is the warning window SLURM gives before the hard kill.
+1. **At submit time**, the API server sets `--time = min(train_args["timeout"], max_train_time) + extra_training_seconds` and `--signal=B:TERM@signal_grace_seconds` (§3.2). The first `--time` field is the per-slice cap; `signal_grace_seconds` (default 300 s — 5 min) is the warning window SLURM gives before the hard kill.
 2. **During the loop**, `TimeoutCallback` compares `accumulated_seconds_at_slice_start + (now - slice_start)` against the user's total `train_args["timeout"]` at each step boundary and stops the loop when total elapsed exceeds the user budget. `accumulated_seconds_at_slice_start` is loaded from `status.json` at slice start (zero for the first slice).
 3. **When SLURM sends SIGTERM** (`signal_grace_seconds` before `--time`), the bash batch script's `exec mpirun` means slurm's signal lands directly on mpirun (§4.1); mpirun's standard SIGTERM forwarding reaches each rank's python process, and the handler sets the `stop_flag` latch. The training loop polls the latch at each step boundary, breaks cleanly, and `TrainingLoop.train()`'s post-loop `self.checkpoint()` runs before the process exits. Without the SIGTERM handler, slurm would SIGKILL the trainer at the hard `--time` and the next slice would redo work back to the previous `steps_per_checkpoint` boundary.
 4. **`_finalize_slice`** updates `status.json` with the new `accumulated_train_seconds`. The harness's read-modify-write `update_status` preserves the other keys (`job_id`, `start_time`, `history`, …).
@@ -413,7 +413,7 @@ There is **no separate auto-relaunch dispatch path** inside the trainer. The sam
 
 **Latency.** SIGTERM checkpoint → process exit → up to one `megatron_refresh_period` (default 30 s) of reconciler lag → new sbatch. Tiny next to multi-hour slice durations; operators who want shorter relaunch latency tune `megatron_refresh_period` downward.
 
-**What can defeat clean handoff.** If a checkpoint takes longer than `signal_grace_seconds` to write, SLURM hits the hard `--time` limit and SIGKILLs the trainer mid-checkpoint. The previous checkpoint is still on disk (so the next slice resumes from there, losing the work done after that checkpoint); status stays `TRAINING` so the reconciler still requeues. Tune `signal_grace_seconds` upward for very large models if checkpoint writes routinely exceed 120 s.
+**What can defeat clean handoff.** If a checkpoint takes longer than `signal_grace_seconds` to write, SLURM hits the hard `--time` limit and SIGKILLs the trainer mid-checkpoint. The previous checkpoint is still on disk (so the next slice resumes from there, losing the work done after that checkpoint); status stays `TRAINING` so the reconciler still requeues. Tune `signal_grace_seconds` upward for very large models if checkpoint writes routinely exceed 5 min.
 
 ---
 
@@ -528,7 +528,7 @@ Server-side knobs that interact with the timeout (in `default_config.py`):
 |---|---|---|
 | `max_train_time` | 86400 (24 h) | Per-slice cap on `--time`. `train_args["timeout"]` longer than this becomes a multi-slice run (§5.4). |
 | `extra_training_seconds` | 300 (5 min) | Buffer added on top of `--time` so the trainer's final checkpoint has room before the hard SLURM kill. |
-| `signal_grace_seconds` | 120 | Window between SLURM's SIGTERM and the hard `--time` deadline. Must be smaller than `max_train_time` and larger than one training step + checkpoint write. Tune up for very large models. |
+| `signal_grace_seconds` | 300 (5 min) | Window between SLURM's SIGTERM and the hard `--time` deadline. Must be smaller than `max_train_time` and larger than one training step + checkpoint write. Tune up for very large models. |
 
 Any subset of these can be passed in `train_args={...}`; unspecified fields default as above. The server merges them with server-derived fields (`job_directory`, `training_data_path`, `dataset_hash`) before writing `config.yaml`.
 

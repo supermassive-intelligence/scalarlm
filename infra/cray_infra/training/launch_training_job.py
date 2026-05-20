@@ -136,7 +136,7 @@ def create_slurm_run_command(train_args):
     # restart_megatron_jobs (the API server's periodic reconciler)
     # then sees the job missing from squeue with status=TRAINING and
     # queues the next slice — see docs/training-lifecycle.md §5.4.
-    signal_grace = get_config().get("signal_grace_seconds", 120)
+    signal_grace = get_config().get("signal_grace_seconds", 300)
     run_command += [f"--signal=B:TERM@{signal_grace}"]
 
     slurm_log_file = os.path.join(
