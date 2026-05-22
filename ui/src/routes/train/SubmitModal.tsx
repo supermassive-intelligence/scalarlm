@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import clsx from "clsx";
 
@@ -6,6 +6,7 @@ import {
   useSubmitTrainingJob,
   type SubmitProgress,
 } from "@/api/training";
+import { useGpuCount } from "@/api/capacity";
 import { getApiConfig } from "@/api/config";
 import { ErrorState } from "@/components/ErrorState";
 import { Modal } from "@/components/Modal";
@@ -77,6 +78,20 @@ export function SubmitModal({ open, onClose }: SubmitModalProps) {
 
   const [progress, setProgress] = useState<SubmitProgress | null>(null);
   const submit = useSubmitTrainingJob();
+
+  // On CPU-only deployments (gpu_count === 0) the server's validate_gpu_request
+  // rejects gpus≥1 with HTTP 400. Auto-flip the default to 0 once, when we
+  // learn the cluster has no GPUs, but only if the user hasn't customized
+  // gpus themselves. The ref makes the flip a one-shot per modal lifetime.
+  const gpuCountQuery = useGpuCount();
+  const gpuAutoFlipped = useRef(false);
+  useEffect(() => {
+    if (gpuAutoFlipped.current) return;
+    if (gpuCountQuery.data === 0 && args.gpus === 1) {
+      gpuAutoFlipped.current = true;
+      setArgs((prev) => ({ ...prev, gpus: 0 }));
+    }
+  }, [gpuCountQuery.data, args.gpus]);
 
   const datasetSize = useMemo(() => {
     if (mode === "upload") return file?.size ?? 0;
@@ -422,9 +437,17 @@ function TrainArgsForm({
         onChange={(v) => update("gradient_accumulation_steps", v)}
         error={errors.gradient_accumulation_steps}
       />
-      {/* GPUs (tasks-per-node) is a SLURM concept ScalarLM doesn't recommend
-          tuning from the UI — we still keep it in the schema so the Edit raw
-          JSON escape hatch can override when the user really needs to. */}
+      {/* GPUs is exposed because CPU-only dev clusters need gpus=0 to bypass
+          the server-side validate_gpu_request check; production users with GPU
+          nodes normally leave the default. */}
+      <NumberField
+        label={TRAIN_ARGS_FIELD_META.gpus.label}
+        hint={TRAIN_ARGS_FIELD_META.gpus.hint}
+        value={value.gpus}
+        onChange={(v) => update("gpus", v)}
+        error={errors.gpus}
+        min={0}
+      />
       <NumberField
         label={TRAIN_ARGS_FIELD_META.nodes.label}
         value={value.nodes}
@@ -508,6 +531,7 @@ function NumberField({
   onChange,
   error,
   step,
+  min,
 }: {
   label: string;
   hint?: string;
@@ -515,6 +539,7 @@ function NumberField({
   onChange: (v: number) => void;
   error?: string;
   step?: "any" | number;
+  min?: number;
 }) {
   return (
     <label className="flex flex-col gap-1 text-xs text-fg-muted">
@@ -526,6 +551,7 @@ function NumberField({
         type="number"
         value={Number.isFinite(value) ? value : ""}
         step={step ?? 1}
+        min={min}
         onChange={(e) => {
           const v = e.target.value === "" ? NaN : Number(e.target.value);
           onChange(v);

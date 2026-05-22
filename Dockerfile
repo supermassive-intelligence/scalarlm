@@ -86,93 +86,6 @@ WORKDIR ${INSTALL_ROOT}
 ENV LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}:/app/venv/lib/python3.12/site-packages/torch/lib:/usr/local/rdma-lib
 
 ###############################################################################
-# FRONTEND BUILD STAGE
-
-FROM ${BASE_NAME} AS ui_base
-
-RUN apt-get update -y && \
-    apt-get install -y git curl libgomp1 libcurl4 dnsutils nano
-
-# Install node 24.0
-RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && \
-    apt-get install -y nodejs && \
-    node --version && \
-    npm --version
-
-ARG INSTALL_ROOT=/app
-WORKDIR /app
-
-# Configure Huggingface Chat UI source - can use either local directory or remote repo
-ARG UI_SOURCE=remote
-ARG UI_BRANCH=main
-ARG UI_REPO=https://github.com/supermassive-intelligence/chat-ui-fork.git
-
-# Handle Chat UI source - support both local and remote modes
-COPY scripts/build-copy-chat-ui.sh ${INSTALL_ROOT}/build-copy-chat-ui.sh
-
-# Handle Chat UI source - single RUN command with conditional mount
-# For remote: clone from repository
-# For local: mount and copy from ./chat-ui directory
-RUN --mount=type=bind,source=./chat-ui,target=/workspace/chat-ui,rw \
-    bash ${INSTALL_ROOT}/build-copy-chat-ui.sh ${UI_SOURCE} ${INSTALL_ROOT}/chat-ui \
-    /workspace/chat-ui ${UI_REPO} ${UI_BRANCH}
-
-# install dotenv-cli
-RUN npm install -g dotenv-cli
-
-USER root
-
-# mkdir for ui and adjust ownership
-RUN mkdir -p /app/ui && \
-    touch /app/ui/.env.local && \
-    cp ${INSTALL_ROOT}/chat-ui/.env /app/ui/.env && \
-    cp ${INSTALL_ROOT}/chat-ui/entrypoint.sh /app/ui/entrypoint.sh && \
-    cp ${INSTALL_ROOT}/chat-ui/package.json /app/ui/package.json && \
-    cp ${INSTALL_ROOT}/chat-ui/package-lock.json /app/ui/package-lock.json && \
-    chmod +x /app/ui/entrypoint.sh
-
-FROM node:24.2.0 AS ui_builder
-
-WORKDIR /app
-ARG INSTALL_ROOT=/temp
-
-USER root
-RUN \
-    apt-get update -y \
-    && apt-get install -y git
-
-# Configure Huggingface Chat UI source - can use either local directory or remote repo
-ARG UI_SOURCE=remote
-ARG UI_BRANCH=main
-ARG UI_REPO=https://github.com/supermassive-intelligence/chat-ui-fork.git
-
-# Handle Chat UI source - support both local and remote modes
-COPY scripts/build-copy-chat-ui.sh ${INSTALL_ROOT}/build-copy-chat-ui.sh
-
-# Handle Chat UI source - single RUN command with conditional mount
-# For remote: clone from repository
-# For local: mount and copy from ./chat-ui directory
-RUN --mount=type=bind,source=./chat-ui,target=/workspace/chat-ui,rw \
-    bash ${INSTALL_ROOT}/build-copy-chat-ui.sh ${UI_SOURCE} ${INSTALL_ROOT}/chat-ui \
-    /workspace/chat-ui ${UI_REPO} ${UI_BRANCH}
-
-RUN cp ${INSTALL_ROOT}/chat-ui/package-lock.json ${INSTALL_ROOT}/chat-ui/package.json ./
-
-ARG APP_BASE=/chat
-ARG PUBLIC_APP_COLOR=
-ENV BODY_SIZE_LIMIT=15728640
-
-RUN --mount=type=cache,target=/app/.npm \
-    npm set cache /app/.npm && \
-    npm ci
-
-RUN cp -R ${INSTALL_ROOT}/chat-ui/. /app/ && \
-    npm install -D @sveltejs/adapter-static
-
-RUN git config --global --add safe.directory /app && \
-    npm run build
-
-###############################################################################
 # ScalarLM React UI build stage
 #
 # Builds the first-party React SPA from ./ui into /build/dist and hands it off
@@ -192,53 +105,9 @@ RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
 COPY ui/ .
 RUN npm run build
 
-# mongo image
-FROM mongo:7.0.18 AS mongo
-
-# image to be used if INCLUDE_DB is true
-FROM ui_base AS local_db
-
-# copy mongo from the other stage
-COPY --from=mongo /usr/bin/mongo* /usr/bin/
-
-ENV MONGODB_URL=mongodb://localhost:27017
-USER root
-RUN mkdir -p /data/db
-
-# final image
-FROM local_db AS ui_final
-
-# build arg to determine if the database should be included
-ENV INCLUDE_DB=true
-
-# svelte requires APP_BASE at build time so it must be passed as a build arg
-ARG APP_BASE=/chat
-ARG PUBLIC_APP_COLOR=
-ARG PUBLIC_COMMIT_SHA=
-ENV PUBLIC_COMMIT_SHA=${PUBLIC_COMMIT_SHA}
-ENV BODY_SIZE_LIMIT=15728640
-
-#import the build & dependencies
-COPY --from=ui_builder /app/build /app/build
-COPY --from=ui_builder /app/node_modules /app/node_modules
-COPY frontend/entrypoint.sh /app/ui/entrypoint.sh
-COPY frontend/.env.local /app/ui/.env.local
-
-#CMD ["/bin/bash", "-c", "/app/entrypoint.sh"]
-
 ###############################################################################
 # VLLM BUILD STAGE
-FROM ui_final AS vllm
-
-# Copy all of the frontend libraries and code
-COPY --from=ui_final --chown=1000 /app /app/ui
-
-# Copy all of the mongo binaries
-COPY --from=ui_final /usr/bin/mongo* /usr/bin/
-
-# Set environment variables from ui
-ENV MONGODB_URL=mongodb://localhost:27017
-ENV INCLUDE_DB=true
+FROM ${BASE_NAME} AS vllm
 
 RUN --mount=type=cache,target=/var/cache/apt \
     apt-get update -y \

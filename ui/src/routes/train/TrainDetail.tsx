@@ -238,7 +238,11 @@ export function TrainDetail() {
             </Card>
 
             <Card title="Loss">
-              <LossChart history={history} maxSteps={maxSteps} />
+              <LossChart
+                history={history}
+                jobHash={jobHash}
+                maxSteps={maxSteps}
+              />
             </Card>
 
             <DatasetPanel jobHash={jobHash} />

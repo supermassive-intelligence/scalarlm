@@ -114,8 +114,8 @@ scalarlm/
 ├── deployment/               # Helm charts and ansible playbooks for k8s deploy
 │   └── helm/gemma_270m_tw/scalarlm/   # api/vllm/megatron deployments, PVCs, cloudflare tunnel
 │
-├── frontend/                 # Static assets for bundled frontend
-├── chat-ui/                  # Chat UI (served on port 3000)
+├── frontend/                 # Static assets (logo, etc.)
+├── ui/                       # First-party React SPA (served at /app/* by FastAPI)
 ├── vllm/                     # Vendored vLLM fork (branch: scalarlm-on-v0.19.0)
 ├── models/                   # HF model cache (mounted into container)
 ├── test/                     # Integration + benchmark suites
@@ -155,7 +155,7 @@ app.include_router(megatron_router,  prefix="/v1")
 app.include_router(health_router,    prefix="/v1")
 app.include_router(generate_router,  prefix="/v1")
 app.include_router(slurm_router)
-add_chat_proxy(app)  # proxies /chat/* to the chat-ui dev server
+add_ui(app)  # mounts the React SPA at /app/* (StaticFiles + SPA fallback)
 ```
 
 The `lifespan=add_megatron_tasks` hook (`api/fastapi/tasks/add_megatron_tasks.py`) spins up a periodic task that scans the jobs directory for new checkpoints and registers them with vLLM — this is the "closed loop" seam.
@@ -196,7 +196,7 @@ These power ScalarLM's batched, queue-based inference (used by the SDK for large
 
 - `routers/health_router.py` — liveness/readiness, checks vLLM reachability.
 - `routers/slurm_router.py` — introspection endpoints for the embedded SLURM cluster.
-- `routers/add_chat_proxy.py` — reverse-proxies `/chat/*` to the bundled chat UI (port 3000) so one public port can serve everything.
+- `setup_ui.py::add_ui()` — mounts the React SPA at `/app/*` (StaticFiles for hashed assets, dynamic `/app/api-config.json`, SPA history-routing fallback for unknown paths). See `docs/ui-design.md`.
 
 ### 3.3 Inference work queue — `api/work_queue/`
 
@@ -598,10 +598,9 @@ Top-level `test/collectives/` (currently untracked — `test_shm_channel.py`, `t
 
 ## 11. Frontend and Chat UI
 
-- `frontend/` — static assets bundled into the container (`frontend/entrypoint.sh`).
-- `chat-ui/` — full chat UI served on port 3000.
-- `api/fastapi/routers/add_chat_proxy.py` — installs a reverse-proxy on the FastAPI app so `GET /chat/*` (and `/`) reach the UI through the same origin as the API, avoiding CORS.
-- `api/fastapi/setup_frontend.py` — mounts static files when the UI isn't served by its own dev server.
+- `ui/` — first-party React SPA (Vite + React 18 + TanStack Query). Built at image-build time into `/app/ui-bundle/` and served by FastAPI at `/app/*`. Source of truth for chat, training, metrics, inference-request browsing, and settings. See `docs/ui-design.md`.
+- `infra/cray_infra/api/fastapi/setup_ui.py` — `add_ui(app)` mounts the SPA: hashed assets under `/app/assets` (immutable 1y cache), dynamic `/app/api-config.json`, and a catch-all SPA fallback that returns `index.html` for unknown `/app/*` paths.
+- `frontend/` — static assets (logo) referenced by the React app.
 
 ---
 

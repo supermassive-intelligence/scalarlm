@@ -428,10 +428,9 @@ async def run_megatron_tasks():
     await restart_megatron_jobs()
     await register_megatron_workers()
     await clear_acked_requests_from_queue()
-    await setup_frontend()
 ```
 
-Four of these are training-related:
+All four are training-related:
 
 ### 6.1 `register_megatron_models`
 

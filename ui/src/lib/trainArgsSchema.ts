@@ -41,7 +41,7 @@ export const trainArgsSchema = z.object({
   max_checkpoints_to_keep: z.number().int().positive().default(3),
 
   // Scheduling
-  gpus: z.number().int().positive().default(1),
+  gpus: z.number().int().nonnegative().default(1),
   nodes: z.number().int().positive().default(1),
 
   // Adapters
@@ -90,7 +90,7 @@ export const TRAIN_ARGS_FIELD_META: Record<
   },
   training_mode: { label: "Training mode", group: "model" },
   distribution_strategy: { label: "Distribution", group: "distribution" },
-  gpus: { label: "GPUs", hint: "tasks-per-node", group: "distribution" },
+  gpus: { label: "GPUs", hint: "tasks-per-node · 0 = CPU", group: "distribution" },
   nodes: { label: "Nodes", group: "distribution" },
   steps_per_checkpoint: { label: "Steps per checkpoint", group: "checkpointing" },
   max_checkpoints_to_keep: { label: "Keep latest N ckpts", group: "checkpointing" },

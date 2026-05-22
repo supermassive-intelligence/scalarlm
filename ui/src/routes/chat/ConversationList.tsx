@@ -11,6 +11,10 @@ import { useConversations } from "@/stores/useConversationStore";
 
 interface ConversationListProps {
   onNew: () => void;
+  /** Mobile drawer state. Ignored at md+ where the sidebar is always visible. */
+  open?: boolean;
+  /** Mobile-only: close the drawer after picking / creating / importing. */
+  onClose?: () => void;
 }
 
 /**
@@ -18,8 +22,11 @@ interface ConversationListProps {
  * currently-viewed one, and offers delete with no confirmation — the design
  * has no server-side record so restoring requires the JSON export (future
  * feature). Matches the pattern in docs/ui-design.md §6.1.
+ *
+ * On mobile (<md) the sidebar becomes a slide-in drawer driven by `open`.
+ * At md+ it is always visible as a 256px column.
  */
-export function ConversationList({ onNew }: ConversationListProps) {
+export function ConversationList({ onNew, open = false, onClose }: ConversationListProps) {
   const { conversationId } = useParams<{ conversationId: string }>();
   const navigate = useNavigate();
   const list = useConversations();
@@ -38,17 +45,37 @@ export function ConversationList({ onNew }: ConversationListProps) {
     try {
       const imported = await importConversationJson(file);
       navigate(`/chat/${imported.id}`);
+      onClose?.();
     } catch (err) {
       setImportError(err instanceof Error ? err.message : String(err));
     }
   };
 
   return (
-    <aside className="flex h-full w-64 shrink-0 flex-col border-r border-border-subtle bg-bg">
+    <aside
+      className={clsx(
+        "fixed inset-y-0 left-0 z-30 flex w-72 flex-col border-r border-border-subtle bg-bg shadow-2xl transition-transform duration-200",
+        "md:static md:z-auto md:w-64 md:shrink-0 md:translate-x-0 md:shadow-none",
+        open ? "translate-x-0" : "-translate-x-full",
+      )}
+    >
+      <div className="flex items-center justify-end px-3 pt-2 md:hidden">
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Close sidebar"
+          className="rounded-md p-1 text-fg-subtle hover:bg-bg-card hover:text-fg"
+        >
+          ✕
+        </button>
+      </div>
       <div className="flex flex-col gap-2 border-b border-border-subtle p-3">
         <button
           type="button"
-          onClick={onNew}
+          onClick={() => {
+            onNew();
+            onClose?.();
+          }}
           className="w-full rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent-hover"
         >
           + New chat
@@ -96,7 +123,10 @@ export function ConversationList({ onNew }: ConversationListProps) {
                   key={c.id}
                   conversation={c}
                   active={c.id === conversationId}
-                  onSelect={() => navigate(`/chat/${c.id}`)}
+                  onSelect={() => {
+                    navigate(`/chat/${c.id}`);
+                    onClose?.();
+                  }}
                   onDelete={() => handleDelete(c.id)}
                 />
               ))}

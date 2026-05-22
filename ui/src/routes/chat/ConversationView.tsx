@@ -28,6 +28,8 @@ interface ConversationViewProps {
   conversation: Conversation;
   /** Notifies the parent when the first user turn creates a conversation. */
   onFirstTurn?: (id: string) => void;
+  /** Mobile only: open the conversation-list drawer. */
+  onOpenSidebar?: () => void;
 }
 
 type OpenAIMessage = { role: "system" | "user" | "assistant"; content: string };
@@ -35,6 +37,7 @@ type OpenAIMessage = { role: "system" | "user" | "assistant"; content: string };
 export function ConversationView({
   conversation,
   onFirstTurn,
+  onOpenSidebar,
 }: ConversationViewProps) {
   const navigate = useNavigate();
   const messages = useMessages(conversation.id);
@@ -304,7 +307,21 @@ export function ConversationView({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <header className="flex h-12 shrink-0 items-center gap-3 border-b border-border-subtle px-6">
+      <header className="flex h-12 shrink-0 items-center gap-2 border-b border-border-subtle px-3 sm:gap-3 sm:px-6">
+        {onOpenSidebar && (
+          <button
+            type="button"
+            onClick={onOpenSidebar}
+            aria-label="Open conversation list"
+            className="rounded-md p-1 text-fg-muted hover:bg-bg-card hover:text-fg md:hidden"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <line x1="3" y1="6" x2="21" y2="6" />
+              <line x1="3" y1="12" x2="21" y2="12" />
+              <line x1="3" y1="18" x2="21" y2="18" />
+            </svg>
+          </button>
+        )}
         <input
           type="text"
           value={conversation.title}
@@ -355,7 +372,7 @@ export function ConversationView({
         }}
         className="min-h-0 flex-1 overflow-y-auto"
       >
-        <div className="mx-auto flex max-w-4xl flex-col gap-5 px-6 py-6">
+        <div className="mx-auto flex max-w-4xl flex-col gap-5 px-3 py-4 sm:px-6 sm:py-6">
           {messages === null ? (
             <div className="text-sm text-fg-subtle">Loading…</div>
           ) : messages.length === 0 ? (
@@ -382,7 +399,7 @@ export function ConversationView({
         </div>
       </div>
 
-      <footer className="border-t border-border-subtle bg-bg px-6 py-3">
+      <footer className="border-t border-border-subtle bg-bg px-3 py-3 sm:px-6">
         <div className="mx-auto flex max-w-4xl flex-col gap-2">
           <textarea
             value={draft}
@@ -392,7 +409,7 @@ export function ConversationView({
             placeholder="Message… (⌘/ctrl + enter)"
             className="w-full resize-none rounded-md border border-border-subtle bg-bg-card px-3 py-2 text-sm text-fg placeholder-fg-subtle focus:border-border focus:outline-none"
           />
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-2">
             <ModelPicker
               value={conversation.model}
               onChange={handleModelChange}

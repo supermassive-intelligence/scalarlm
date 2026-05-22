@@ -2,14 +2,9 @@
 
 ## Status
 
-Design. Two architecture decisions drive this revision:
+Shipped. The React SPA lives in `ui/` and is mounted at `/app/*` by FastAPI via `infra/cray_infra/api/fastapi/setup_ui.py::add_ui()`. The `chat-ui/` directory and its SvelteKit-based HF chat-ui fork have been removed from the repo. Chat, training, metrics, and inference surfaces are all served from the React app under one origin.
 
-1. **Replace the HF chat-ui fork with a React app we own.** The SvelteKit-based Hugging Face chat-ui served today at `/chat/*` goes away along with its Node runtime, MongoDB dependency, and supervisor. A first-party React SPA takes its place.
-2. **One process serves everything.** The main FastAPI backend in the API container serves both the HTTP API and the UI. No Node subprocess, no reverse proxy to a separate UI server, no `add_chat_proxy` / `setup_frontend` / `monitor_frontend_process`. The UI ships as a pre-built static bundle mounted by FastAPI.
-
-The resulting shape: one container, one Python process, one HTTP origin. The UI is a collection of React routes under `/app/*`; the API lives under `/v1/*`; both are served by the same Uvicorn instance.
-
-Training and metrics UIs are added in the same React app.
+This document is kept as the design record for *why* the UI looks the way it does, not as a migration plan.
 
 ## Goals
 
@@ -32,17 +27,7 @@ Training and metrics UIs are added in the same React app.
 
 ## 1. Architecture
 
-### 1.1 Old shape (being removed)
-
-```
-browser ── /chat/*  ─► FastAPI add_chat_proxy ─► localhost:3000 (HF chat-ui, Node, MongoDB)
-        ── /v1/*    ─► FastAPI
-        ── /        ─► (nothing)
-```
-
-Two processes (Uvicorn + Node), two build toolchains (pip + npm at image build + npm install at runtime), a reverse proxy glue layer, and a conversation store the operator didn't ask for.
-
-### 1.2 New shape
+### 1.1 Shape
 
 ```
         browser
@@ -72,7 +57,7 @@ Two processes (Uvicorn + Node), two build toolchains (pip + npm at image build +
 
 Everything the pod needs to serve the UI is a directory of files on disk, mounted by FastAPI's `StaticFiles` middleware. No subprocess, no port 3000, no port 3100. The pod exposes only 8000 (and 8001 internally for vLLM); a browser pointed at the API URL gets the UI and the API from the same place.
 
-### 1.3 Serving the bundle
+### 1.2 Serving the bundle
 
 `infra/cray_infra/api/fastapi/main.py` gains a static-file mount. The important properties:
 
@@ -103,24 +88,7 @@ async def root():
     return RedirectResponse("/app/")
 ```
 
-### 1.4 What's removed
-
-From the current codebase:
-
-- `infra/cray_infra/api/fastapi/routers/add_chat_proxy.py` — reverse proxy. Gone.
-- `infra/cray_infra/api/fastapi/setup_frontend.py` — subprocess supervisor. Gone.
-- The `monitor_frontend_process` call inside `add_megatron_tasks` (lifespan hook). Gone.
-- `chat-ui/` bind mount in `docker-compose.yaml`. Gone.
-- The `ui_base` / `ui_builder` Dockerfile stages that install Node and clone `chat-ui-fork`. Replaced by a single `ui_builder` stage that builds the React app.
-- `frontend/entrypoint.sh`, `frontend/.env.local`. Gone.
-- Any `CORS` origin entry for `http://localhost:3000`. Gone — same origin now.
-
-From runtime dependencies:
-
-- Node.js. Not installed in the final image.
-- `npx`, `dotenv-cli`, `mongod`, `package.json`, `package-lock.json` under `/app/ui/`. Not copied into the final image.
-
-### 1.5 Routing reference
+### 1.3 Routing reference
 
 | URL | Served by | Handler |
 |---|---|---|
@@ -137,22 +105,11 @@ From runtime dependencies:
 | `/app/settings` | FastAPI | Same |
 | `/v1/*` | FastAPI | API handlers |
 
-The `/chat/*` prefix from the old HF chat-ui is **not** preserved. Deep links into the old chat-ui become 404. That's acceptable: no external system is known to hold persistent links to old chat-ui paths; internal tooling all goes through the SDK.
+The `/chat/*` prefix that the old HF chat-ui claimed is no longer served — chat lives at `/app/chat`. Deep links into the old chat-ui return 404.
 
 ---
 
-## 2. Replacing the HF Chat-UI
-
-The HF chat-ui was providing three things: a chat surface, a conversation store, and a model picker. The replacement handles each explicitly:
-
-| HF chat-ui | ScalarLM React app |
-|---|---|
-| SvelteKit chat surface | React chat surface (§6) |
-| MongoDB conversations collection | `localStorage` + IndexedDB for long conversations (§2.1) |
-| Model picker from `/v1/models` | Same data source, new component (§6.3) |
-| Assistants, system-prompt templates | Simplified: one system prompt per conversation, editable inline |
-| Multi-user auth | Dropped (ScalarLM has no user concept) |
-| Plugins / web search / tools | Deferred to a later phase |
+## 2. Chat Client Decisions
 
 ### 2.1 Conversation persistence
 
@@ -530,7 +487,7 @@ Page-header dropdown ("Last 5 min / 15 min / 1 h") adjusts the sparkline buffer 
 └─────────────────────────────────────────────────────────────┘
 ```
 
-Fixed top bar on every `/app/*` route. Logo (`frontend/assets/logo.svg`, re-used) links to `/app/`. Settings gear opens a drawer with: server health summary, deployment version, default model, an `SCALARLM_API_URL` copy-button for external SDK use, a theme toggle.
+Fixed top bar on every `/app/*` route. The "ScalarLM" wordmark links to `/app/` (the original design referenced `frontend/assets/logo.svg` but the shipped chrome uses text). Settings gear opens a drawer with: server health summary, deployment version, default model, an `SCALARLM_API_URL` copy-button for external SDK use, a theme toggle.
 
 ### 9.2 Tokens
 
@@ -629,22 +586,15 @@ async def ui_spa_fallback(full_path: str):
 
 Because the SPA fallback is a catch-all, it must come **after** any more-specific routes (api-config, assets mount). FastAPI's routing order is declaration order, so the `/app/assets` mount and `/app/api-config.json` must register before the `/app/{full_path:path}` handler.
 
-### 11.3 Lifespan hook changes
+### 11.3 docker-compose.yaml
 
-`infra/cray_infra/api/fastapi/tasks/add_megatron_tasks.py`:
+The dev compose service exposes only ports 8000 (API + UI) and 8001 (vLLM). Source directories (`infra/`, `ml/`, `scripts/`, `test/`, `models/`) are bind-mounted for hot-edit.
 
-- Remove the `setup_frontend()` call inside `run_megatron_tasks`.
-- Remove the import of `setup_frontend`.
+### 11.4 Helm
 
-### 11.4 docker-compose.yaml
+No changes. The `api_deployment.yaml` already exposes port 8000; that's the only port externally visible.
 
-Remove the `chat-ui` bind mount entry. Keep the main container definition otherwise identical.
-
-### 11.5 Helm
-
-No changes. The `api_deployment.yaml` already exposes port 8000; that's the only port externally visible. Remove any cloudflared / ingress rules that specifically routed `/chat/*` — they're no-ops now but cleaner to drop.
-
-### 11.6 Dev workflow
+### 11.5 Dev workflow
 
 ```
 cd ui
@@ -659,57 +609,21 @@ Running the full stack locally is still `./scalarlm up` — the built UI is bake
 
 ## 12. Rollout
 
-Phased; each phase ships behind a feature flag in `api-config.json:features` so the new UI can be toggled without a rebuild:
-
-### Phase 0 — Scaffold + removal (1 week)
-
-- Add `ui/` scaffold (Vite + React + TS + Tailwind + React Router + TanStack Query).
-- Add the `ui_builder` Docker stage and `StaticFiles` mount.
-- Remove HF chat-ui code paths (`add_chat_proxy`, `setup_frontend`, docker-compose bind mount).
-- Landing page at `/app/` with nav chrome and placeholder routes for each surface.
-
-Gates subsequent phases — this is the "can we serve static files from FastAPI" sanity check.
-
-### Phase 1 — Metrics UI (2 weeks)
-
-First functional surface. Read-only, depends only on existing endpoints (plus `/v1/health` enrichment, `/v1/vllm/stats` nice-to-have). If `/v1/vllm/stats` slips, metrics ships with a grayed-out capacity card.
-
-### Phase 2 — Training UI: list + detail (3 weeks)
-
-Read-heavy. Job list, detail view with loss chart and log streaming, cancel/delete. Submit is placeholder.
-
-### Phase 3 — Training UI: submit (2 weeks)
-
-Full submit flow with upload progress, Zod-validated form, JSON escape hatch. End-to-end against a live cluster.
-
-### Phase 4 — Chat UI (3 weeks)
-
-- Layout + sidebar + IndexedDB conversation store.
-- Streaming chat with model picker.
-- System prompt editor.
-- "Open in Chat" from training detail.
-- Deep-link `/app/chat/{id}` routing and share-via-JSON-export.
-
-### Phase 5 — Polish (ongoing)
-
-Keyboard shortcuts, dark/light toggle, aliases, copy-SDK buttons, loading skeletons, error states, bundle-size enforcement.
-
-Phases 0-3 can ship before chat, because until phase 4 the old HF chat-ui is already gone (removed in phase 0). For continuity during the transition, phase 0 can leave the HF chat-ui proxied at `/chat-legacy/*` behind a feature flag that defaults off. Drop the legacy route entirely after phase 4 lands.
+Shipped. Metrics, Train (list + detail + submit), Chat, Inference Request Browser, and Settings are all live in `ui/` and served from `/app/*`. Ongoing work is incremental — adding routes / cards / polishing — and does not need a phased plan.
 
 ---
 
 ## 13. Backend Dependencies
 
-Additions the UI assumes — not strictly required, but specific phases are blocked on them:
+UI surfaces that depend on backend additions:
 
-| Endpoint | Purpose | Required by phase |
+| Endpoint | Purpose | Status |
 |---|---|---|
-| `GET /v1/health` returning `{api, vllm, slurm}` dict | Health card granularity | 1 |
-| `GET /v1/vllm/stats` returning `{gpus_used, kv_free, kv_total}` | Capacity card | 1 (graceful-degrade if missing) |
-| `GET /v1/megatron/train/{hash}/checkpoint/{step}` | Checkpoint download | 2 (optional) |
-| `PUT /v1/megatron/train/{hash}/alias` + `GET` variant | Human-readable model names | 5 |
+| `GET /v1/health` returning `{api, vllm, slurm}` dict | Health card granularity | Live |
+| `GET /v1/vllm/stats` returning `{gpus_used, kv_free, kv_total}` | Capacity card | Capacity card degrades gracefully if missing |
+| `GET /v1/megatron/train/{hash}/checkpoint/{step}` | Checkpoint download | Not yet implemented; UI hides the action when absent |
 
-No backend dependencies block phase 0. Phase 4 (chat) works entirely against today's `/v1/chat/completions` + `/v1/models`.
+Aliases are client-local (per-browser localStorage) rather than a server endpoint — see §5.4 / §9.3.
 
 ---
 

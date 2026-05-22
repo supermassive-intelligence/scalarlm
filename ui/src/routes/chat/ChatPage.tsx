@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 import { getApiConfig } from "@/api/config";
 import {
@@ -29,10 +29,16 @@ export function ChatPage() {
   const { conversationId } = useParams<{ conversationId: string }>();
   const [search] = useSearchParams();
   const navigate = useNavigate();
+  const location = useLocation();
   const conversations = useConversations();
 
   const [active, setActive] = useState<Conversation | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  useEffect(() => {
+    setSidebarOpen(false);
+  }, [location.pathname]);
 
   // Resolve the active conversation.
   useEffect(() => {
@@ -101,11 +107,23 @@ export function ChatPage() {
   }, [active, conversationId, conversations, navigate]);
 
   return (
-    <div className="flex h-full min-h-0">
-      <ConversationList onNew={handleNew} />
-      <main className="min-h-0 flex-1">
+    <div className="relative flex h-full min-h-0">
+      {sidebarOpen && (
+        <button
+          type="button"
+          aria-label="Close sidebar"
+          onClick={() => setSidebarOpen(false)}
+          className="fixed inset-0 z-20 bg-black/40 md:hidden"
+        />
+      )}
+      <ConversationList
+        onNew={handleNew}
+        open={sidebarOpen}
+        onClose={() => setSidebarOpen(false)}
+      />
+      <main className="min-h-0 min-w-0 flex-1">
         {loadError ? (
-          <div className="flex h-full items-center justify-center px-6 text-sm text-danger">
+          <div className="flex h-full items-center justify-center px-3 text-sm text-danger sm:px-6">
             {loadError}
           </div>
         ) : active ? (
@@ -113,6 +131,7 @@ export function ChatPage() {
             key={active.id}
             conversation={active}
             onFirstTurn={handleFirstTurn}
+            onOpenSidebar={() => setSidebarOpen(true)}
           />
         ) : (
           <div className="flex h-full items-center justify-center text-sm text-fg-subtle">

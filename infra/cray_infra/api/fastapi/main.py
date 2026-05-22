@@ -17,9 +17,6 @@ from cray_infra.api.fastapi.routers.slurm_router import (
 from cray_infra.api.fastapi.tasks.add_megatron_tasks import (
     add_megatron_tasks,
 )
-from cray_infra.api.fastapi.routers.add_chat_proxy import (
-    add_chat_proxy,
-)
 from cray_infra.api.fastapi.setup_ui import add_ui
 
 from fastapi import FastAPI, Request
@@ -61,11 +58,9 @@ async def get_prometheus_metrics():
         from fastapi.responses import PlainTextResponse
         return PlainTextResponse("Metrics unavailable", status_code=500)
 
-add_chat_proxy(app)
 add_ui(app)
 
 origins = [
-    "http://localhost:3000",
     "http://localhost:5173",
 ]
 
