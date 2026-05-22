@@ -202,7 +202,9 @@ export function LossChart({ history, jobHash, maxSteps }: LossChartProps) {
   };
 
   const eventToViewbox = (
-    e: React.MouseEvent<SVGElement>,
+    e:
+      | React.MouseEvent<SVGElement>
+      | React.PointerEvent<SVGElement>,
   ): { vx: number; vy: number } => {
     const svg = e.currentTarget.ownerSVGElement ?? (e.currentTarget as SVGSVGElement);
     const rect = svg.getBoundingClientRect();
@@ -382,16 +384,27 @@ export function LossChart({ history, jobHash, maxSteps }: LossChartProps) {
             drag ? "cursor-crosshair" : "cursor-crosshair",
           )}
           preserveAspectRatio={fullscreen ? "none" : "xMidYMid meet"}
-          onMouseDown={(e) => {
-            // Left button only; ignore middle/right so context menu still works.
+          onPointerDown={(e) => {
+            // Left button only (mouse) / primary contact (touch+pen). Right
+            // button has e.button=2; touch/pen report 0 for the primary
+            // contact too, so this still works there.
             if (e.button !== 0) return;
             const { vx, vy } = eventToViewbox(e);
             if (!insidePlot(vx, vy)) return;
             e.preventDefault();
+            // Capture the pointer so move/up keep firing on the SVG even
+            // when the cursor leaves it. Without this the drag aborts as
+            // soon as the mouse crosses the chart border.
+            try {
+              e.currentTarget.setPointerCapture(e.pointerId);
+            } catch {
+              // Capture can fail on browsers that don't grant it (rare);
+              // drag still works in-bounds, just not outside the SVG.
+            }
             setDrag({ startX: vx, startY: vy, curX: vx, curY: vy });
             setHoverFrac(null);
           }}
-          onMouseMove={(e) => {
+          onPointerMove={(e) => {
             const { vx, vy } = eventToViewbox(e);
             if (drag) {
               setDrag({ ...drag, curX: vx, curY: vy });
@@ -404,24 +417,28 @@ export function LossChart({ history, jobHash, maxSteps }: LossChartProps) {
             }
             setHoverFrac(frac);
           }}
-          onMouseUp={(e) => {
+          onPointerUp={(e) => {
+            try {
+              e.currentTarget.releasePointerCapture(e.pointerId);
+            } catch {
+              // Releasing a non-captured pointer throws; ignore.
+            }
             if (!drag) return;
             const { vx, vy } = eventToViewbox(e);
-            // Clamp to the plot rect — releasing outside still applies the zoom
-            // to the in-bounds portion. Matches user expectation.
+            // Clamp to the plot rect — releasing outside still applies the
+            // zoom to the in-bounds portion.
             const cvx = clamp(vx, dims.padL, dims.padL + plotW);
             const cvy = clamp(vy, dims.padT, dims.padT + plotH);
             const dx = Math.abs(cvx - drag.startX);
             const dy = Math.abs(cvy - drag.startY);
-            // Tiny drags are treated as clicks — don't zoom, just clear.
             if (dx < MIN_DRAG_PX || dy < MIN_DRAG_PX) {
               setDrag(null);
               return;
             }
             const x1 = xFromViewbox(Math.min(drag.startX, cvx));
             const x2 = xFromViewbox(Math.max(drag.startX, cvx));
-            // Note: y in viewbox grows DOWNWARD, while loss grows upward in
-            // the plot. So the "top" of the drag rect is the higher loss.
+            // y in viewbox grows DOWNWARD; loss grows upward in the plot, so
+            // the "top" pixel of the drag rect is the higher loss value.
             const yTop = yFromViewbox(Math.min(drag.startY, cvy));
             const yBot = yFromViewbox(Math.max(drag.startY, cvy));
             setViewDomain({
@@ -432,12 +449,12 @@ export function LossChart({ history, jobHash, maxSteps }: LossChartProps) {
             });
             setDrag(null);
           }}
-          onMouseLeave={() => {
-            setHoverFrac(null);
-            // Cancel an in-flight drag if the cursor leaves the SVG entirely;
-            // committing on mouseup-outside is fine, but releasing the button
-            // off-screen would otherwise leave drag state stuck.
-            setDrag(null);
+          onPointerCancel={() => setDrag(null)}
+          onPointerLeave={() => {
+            // Clear hover when the cursor leaves the SVG, but DO NOT cancel
+            // an in-flight drag — pointer capture keeps move/up flowing so
+            // the user can drag arbitrarily far outside the border.
+            if (!drag) setHoverFrac(null);
           }}
           onDoubleClick={handleResetZoom}
         >
@@ -698,53 +715,58 @@ function Toolbar({
             Add
           </button>
         </div>
-        <label
-          className="ml-auto flex items-center gap-2 text-xs text-fg-muted"
-          title="Exponential moving average. 0 = raw, 0.95 = heavily smoothed."
-        >
-          smoothing
-          <input
-            type="range"
-            min={0}
-            max={SMOOTH_MAX}
-            step={0.01}
-            value={smoothing}
-            onChange={(e) => onSmoothingChange(Number(e.target.value))}
-            aria-label="Loss smoothing"
-            className="w-32 accent-accent"
-          />
-          <span className="w-10 text-right font-mono">
-            {smoothing.toFixed(2)}
-          </span>
-        </label>
-        <label className="flex items-center gap-2 text-xs text-fg-muted">
-          <input
-            type="checkbox"
-            checked={logY}
-            onChange={(e) => onLogYChange(e.target.checked)}
-            className="h-3 w-3 accent-accent"
-          />
-          log y
-        </label>
-        {zoomed && (
+        {/* Right-side controls live in their own wrap group so when the row
+            is narrow (or "Reset zoom" appears, lengthening the strip) they
+            wrap together as a unit and Fullscreen stays visible. */}
+        <div className="ml-auto flex flex-wrap items-center gap-x-3 gap-y-2">
+          <label
+            className="flex items-center gap-2 text-xs text-fg-muted"
+            title="Exponential moving average. 0 = raw, 0.95 = heavily smoothed."
+          >
+            smoothing
+            <input
+              type="range"
+              min={0}
+              max={SMOOTH_MAX}
+              step={0.01}
+              value={smoothing}
+              onChange={(e) => onSmoothingChange(Number(e.target.value))}
+              aria-label="Loss smoothing"
+              className="w-32 accent-accent"
+            />
+            <span className="w-10 text-right font-mono">
+              {smoothing.toFixed(2)}
+            </span>
+          </label>
+          <label className="flex items-center gap-2 text-xs text-fg-muted">
+            <input
+              type="checkbox"
+              checked={logY}
+              onChange={(e) => onLogYChange(e.target.checked)}
+              className="h-3 w-3 accent-accent"
+            />
+            log y
+          </label>
+          {zoomed && (
+            <button
+              type="button"
+              onClick={onResetZoom}
+              title="Reset zoom (or double-click the chart)"
+              className="rounded-md border border-accent/40 bg-accent/10 px-2 py-1 text-xs text-accent hover:border-accent hover:bg-accent/20"
+            >
+              Reset zoom
+            </button>
+          )}
           <button
             type="button"
-            onClick={onResetZoom}
-            title="Reset zoom (or double-click the chart)"
-            className="rounded-md border border-accent/40 bg-accent/10 px-2 py-1 text-xs text-accent hover:border-accent hover:bg-accent/20"
+            onClick={onFullscreen}
+            aria-label={fullscreen ? "Exit full screen" : "Full screen"}
+            title={fullscreen ? "Exit full screen (Esc)" : "Full screen"}
+            className="rounded-md border border-border-subtle bg-bg-card px-2 py-1 text-xs text-fg-muted hover:border-border hover:bg-bg-hover hover:text-fg"
           >
-            Reset zoom
+            {fullscreen ? "⛶ Exit" : "⛶ Fullscreen"}
           </button>
-        )}
-        <button
-          type="button"
-          onClick={onFullscreen}
-          aria-label={fullscreen ? "Exit full screen" : "Full screen"}
-          title={fullscreen ? "Exit full screen (Esc)" : "Full screen"}
-          className="rounded-md border border-border-subtle bg-bg-card px-2 py-1 text-xs text-fg-muted hover:border-border hover:bg-bg-hover hover:text-fg"
-        >
-          {fullscreen ? "⛶ Exit" : "⛶ Fullscreen"}
-        </button>
+        </div>
       </div>
       {compareError && (
         <div role="alert" className="text-[11px] text-danger">
