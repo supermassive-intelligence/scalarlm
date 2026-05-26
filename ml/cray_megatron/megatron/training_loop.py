@@ -25,6 +25,29 @@ from gpu_aware_mpi import allreduce, get_size
 
 logger = logging.getLogger(__name__)
 
+# Cap on sequence length for materializing the [B, 1, S, S] block-
+# diagonal document mask in training_step_accumulate. Bool mask is
+# 1 byte/cell, so 16384 → ~256 MiB at batch=1, comfortable. Above
+# this we skip the mask (warn once) and packed docs attend across
+# each other. Long-term the right answer for Gemma-4 (head_dim=512
+# excludes flash-attn) is flex_attention or nested tensors at the
+# attention boundary; both avoid materializing the mask entirely.
+_MAX_4D_MASK_SEQ_LEN = 16384
+_doc_mask_skip_warned = False
+
+
+def _warn_doc_mask_skipped(seq_len: int) -> None:
+    global _doc_mask_skip_warned
+    if _doc_mask_skip_warned:
+        return
+    _doc_mask_skip_warned = True
+    logger.warning(
+        "Skipping 4D document mask: seq_len=%d exceeds cap %d. "
+        "Packed documents will attend across each other in this run. "
+        "Lower max_token_block_size or wire up flash-attn varlen.",
+        seq_len, _MAX_4D_MASK_SEQ_LEN,
+    )
+
 
 class TrainingLoop:
     def __init__(self, training_harness: TrainingHarness):
@@ -98,9 +121,25 @@ class TrainingLoop:
         data_loader = DataLoader(
             model=self.training_state.model_info["model"],
             tokenizer=self.training_state.model_info["tokenizer"],
+            starting_epoch=self.training_state.epoch,
         )
 
         data_iterator = iter(data_loader)
+
+        # Fast-forward to the saved batch position. IterableDataset has
+        # no seek, so we pull and discard `data_cursor` batches. This is
+        # slow (full tokenize + pack pipeline runs on each one) but still
+        # much cheaper than re-training the steps from scratch — and
+        # combined with the restored RNG state below, reproduces exactly
+        # the batch stream the previous slice was about to consume.
+        if self.training_state.data_cursor > 0:
+            logger.info(
+                "Resuming dataloader: skipping %d batches into epoch %d",
+                self.training_state.data_cursor,
+                self.training_state.epoch,
+            )
+            for _ in range(self.training_state.data_cursor):
+                next(data_iterator)
 
         starting_step = self.training_state.current_step
 
@@ -120,10 +159,21 @@ class TrainingLoop:
             self.training_state.optimizer.zero_grad()
 
             for accum_step in range(gradient_accumulation_steps):
+                prev_epoch = data_loader.epoch
                 batch = next(data_iterator)
 
                 # Update epoch if it changed during accumulation
                 self.training_state.epoch = data_loader.epoch
+
+                # Track cursor for checkpoint resume. Reset to 1 (this
+                # batch) on epoch rollover, otherwise increment. The
+                # rollover happens inside next() when the iterator
+                # exhausts and DataLoader.__next__ swaps in a new dataset
+                # for epoch+1, so the comparison sees prev_epoch < new.
+                if data_loader.epoch != prev_epoch:
+                    self.training_state.data_cursor = 1
+                else:
+                    self.training_state.data_cursor += 1
 
                 loss = self.training_step_accumulate(
                     batch,
@@ -131,11 +181,14 @@ class TrainingLoop:
                     gradient_accumulation_steps
                 )
 
-                # Check for NaN
-                if torch.isnan(torch.tensor(loss)):
+                # Check for NaN or Inf. torch.isnan misses ±inf, which can
+                # propagate through backward, survive clip_grad_norm (per-tensor
+                # norm of an inf tensor is inf and clip clamps it to max_norm
+                # in finite arithmetic), and corrupt the next optimizer step.
+                if not torch.isfinite(torch.tensor(loss)):
                     has_nan = True
                     logger.warning(
-                        f"NaN loss detected at step {step}, microbatch {accum_step + 1}"
+                        f"Non-finite loss detected at step {step}, microbatch {accum_step + 1} (loss={loss})"
                     )
                     break
 
@@ -211,6 +264,8 @@ class TrainingLoop:
         self.training_state.current_step = checkpoint["step"] + 1
         self.training_state.epoch = checkpoint["epoch"]
         self.training_state.nan_steps = checkpoint.get("nan_steps", 0)
+        # .get() with default=0 keeps older checkpoints (pre-Fix 2) loadable.
+        self.training_state.data_cursor = checkpoint.get("data_cursor", 0)
         self.training_state.model_info["model"].load_state_dict(
             checkpoint["model_state_dict"], strict=False
         )
@@ -220,6 +275,17 @@ class TrainingLoop:
         self.training_state.scheduler.load_state_dict(
             checkpoint["scheduler_state_dict"]
         )
+
+        # Restore RNG so the next forward (dropout, LoRA dropout, any
+        # other stochastic op) is bit-identical to what would have come
+        # next without the timeout. CPU tensor goes back to CPU via .cpu()
+        # — torch.set_rng_state insists on a CPU ByteTensor.
+        rng_state = checkpoint.get("rng_state")
+        if rng_state is not None:
+            torch.set_rng_state(rng_state.cpu())
+        cuda_rng_state = checkpoint.get("cuda_rng_state")
+        if cuda_rng_state and torch.cuda.is_available():
+            torch.cuda.set_rng_state_all([s.cpu() for s in cuda_rng_state])
 
         self.training_state.history = self.training_harness.get_status()["history"]
 
@@ -234,6 +300,35 @@ class TrainingLoop:
             "attention_mask": batch["attention_mask"].to(device),
             "labels": batch["labels"].to(device),
         }
+
+        # If the packed batch carries document_ids, replace the 1-D
+        # attention_mask with a 4-D block-diagonal+causal additive mask
+        # so packed documents don't attend across each other. The 1-D
+        # mask only flags padding; passing it as-is makes the model
+        # treat the whole packed block as one causal sequence, which
+        # mixes unrelated documents into every attention head. See pack()
+        # in load_language_model_dataset.py for the upstream change.
+        # Capped at _MAX_4D_MASK_SEQ_LEN to keep memory bounded — above
+        # that the mask is skipped and we fall back to legacy behavior
+        # (a flash-attn varlen path is the right long-term fix).
+        if "document_ids" in batch:
+            seq_len = forward_kwargs["input_ids"].shape[-1]
+            if seq_len <= _MAX_4D_MASK_SEQ_LEN:
+                doc_ids = batch["document_ids"].to(device)
+                same_doc = doc_ids.unsqueeze(2) == doc_ids.unsqueeze(1)
+                causal = torch.ones(
+                    seq_len, seq_len, device=device, dtype=torch.bool
+                ).tril()
+                # Bool mask (True = attend). SDPA accepts this natively
+                # and HF's _update_causal_mask converts to the additive
+                # form in the model's compute dtype when needed. Bool
+                # input is 1 byte/cell vs 4 for fp32 — 4x headroom for
+                # the same memory budget. [B, 1, S, S] is the standard
+                # HF 4D attention_mask shape.
+                forward_kwargs["attention_mask"] = (same_doc & causal).unsqueeze(1)
+                forward_kwargs["position_ids"] = batch["position_ids"].to(device)
+            else:
+                _warn_doc_mask_skipped(seq_len)
 
         # Multimodal wrappers (Gemma4ForConditionalGeneration, …) require an
         # mm_token_type_ids tensor on every training forward, even when the
@@ -349,6 +444,11 @@ class TrainingLoop:
             "step": self.training_state.current_step,
             "epoch": self.training_state.epoch,
             "nan_steps": self.training_state.nan_steps,
+            "data_cursor": self.training_state.data_cursor,
+            "rng_state": torch.get_rng_state(),
+            "cuda_rng_state": (
+                torch.cuda.get_rng_state_all() if torch.cuda.is_available() else []
+            ),
             "metadata": build_adapter_metadata(),
         }
 
@@ -508,12 +608,21 @@ class TrainingState:
     def __init__(self):
         self.should_stop_training = False
         self.current_step = 0
+        self.epoch = 0
         self.model_info = None
         self.optimizer = None
         self.scheduler = None
         self.history = []
         self.start_time = None
         self.nan_steps = 0
+        # Batches consumed in the current epoch. Saved in the checkpoint
+        # and restored on resume so the dataloader fast-forwards to the
+        # exact batch the previous slice was on, instead of replaying the
+        # first ~N batches of epoch 0 on every restart. Resets to 1 on
+        # the batch that triggers an epoch rollover; counter sits at a
+        # step boundary at checkpoint time because CheckpointCallback
+        # fires on_step_end.
+        self.data_cursor = 0
         # Loaded from status.json at the start of every slice (0 on the
         # first slice). TimeoutCallback adds the in-flight slice elapsed
         # to this when checking the user's total budget.
@@ -556,12 +665,44 @@ def _is_multimodal(model_config) -> bool:
         model_config, "vision_config"
     ) is not None
 
+def get_warmup_steps():
+    job_config = get_job_config()
+    return int(job_config.get("warmup_steps", 0))
+
+
 def get_scheduler(optimizer, max_steps):
-    return torch.optim.lr_scheduler.LinearLR(
+    warmup_steps = get_warmup_steps()
+    if warmup_steps <= 0:
+        return torch.optim.lr_scheduler.LinearLR(
+            optimizer,
+            start_factor=1.0,
+            end_factor=0.0,
+            total_iters=max_steps,
+        )
+
+    # Cold optimizer state + full LR at step 0 is a known instability
+    # source on large LoRA fine-tunes (see Fix 4 in the stability audit).
+    # Ramp from lr/1000 to lr over warmup_steps, then linear decay to 0
+    # over the remaining budget. start_factor=1e-3 (not 0) avoids the
+    # "first optimizer.step uses LR=0" footgun where Adam's bias-corrected
+    # moments still update from a zero-LR step.
+    decay_steps = max(1, max_steps - warmup_steps)
+    warmup = torch.optim.lr_scheduler.LinearLR(
+        optimizer,
+        start_factor=1e-3,
+        end_factor=1.0,
+        total_iters=warmup_steps,
+    )
+    decay = torch.optim.lr_scheduler.LinearLR(
         optimizer,
         start_factor=1.0,
         end_factor=0.0,
-        total_iters=max_steps,
+        total_iters=decay_steps,
+    )
+    return torch.optim.lr_scheduler.SequentialLR(
+        optimizer,
+        schedulers=[warmup, decay],
+        milestones=[warmup_steps],
     )
 
 

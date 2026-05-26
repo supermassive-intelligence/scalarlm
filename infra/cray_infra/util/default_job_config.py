@@ -26,6 +26,16 @@ class JobConfig(BaseModel):
     gradient_accumulation_steps: int = 4
     gradient_checkpointing: bool = False
 
+    # Linear warmup before the LinearLR decay. 0 disables warmup
+    # (scheduler is the bare LinearLR(start=1.0 → end=0) over max_steps).
+    # When >0, the scheduler becomes SequentialLR(warmup → decay): LR
+    # ramps from learning_rate/1000 up to learning_rate over warmup_steps,
+    # then decays linearly to 0 over the remaining (max_steps - warmup_steps).
+    # Recommended: 1-5% of max_steps for LoRA fine-tunes on large models;
+    # the cold optimizer state plus full learning_rate on step 0 is a
+    # known source of early-training NaN bursts.
+    warmup_steps: int = 0
+
     # 0 disables; otherwise log torch.cuda.memory_allocated/reserved
     # every N steps. Used to distinguish a real leak (allocated
     # grows) from caching-allocator fragmentation (reserved grows,

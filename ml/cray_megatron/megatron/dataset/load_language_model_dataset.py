@@ -134,9 +134,35 @@ def get_pack_function(model):
     )
 
     def pack(dataset):
+        # Per-doc lengths (taken from input_ids before concatenation) drive
+        # two auxiliary streams that the trainer uses to break the default
+        # "every position attends to every prior position in the block"
+        # behavior of plain packed sequences:
+        #
+        #   - position_ids: counts up within each document and resets to 0
+        #     at every boundary. Carries the right token-within-doc index
+        #     into RoPE so a doc that lands mid-block doesn't pretend it
+        #     started at position 6144 (or wherever).
+        #   - document_ids: monotonically increasing per-doc tag. The
+        #     trainer turns this into a block-diagonal additive attention
+        #     mask so a query in doc N cannot attend to keys from docs
+        #     0..N-1 in the same packed block. Without this, packed
+        #     blocks make the model attend across unrelated documents,
+        #     which corrupts the loss signal and (for Gemma's
+        #     larger-head_dim layers) is a plausible NaN source.
+        doc_lengths = [len(ids) for ids in dataset["input_ids"]]
+        position_ids_flat = []
+        document_ids_flat = []
+        for doc_idx, doc_len in enumerate(doc_lengths):
+            position_ids_flat.extend(range(doc_len))
+            document_ids_flat.extend([doc_idx] * doc_len)
+
         # Concatenate all texts.
         concatenated_dataset = {k: sum(dataset[k], []) for k in dataset.keys()}
-        total_length = len(concatenated_dataset[list(dataset.keys())[0]])
+        concatenated_dataset["position_ids"] = position_ids_flat
+        concatenated_dataset["document_ids"] = document_ids_flat
+
+        total_length = len(concatenated_dataset["input_ids"])
         # We drop the small remainder, we could add padding instead, you can
         # customize this part to your needs.
         if total_length >= block_size:

@@ -6,12 +6,17 @@ import torch
 
 
 class DataLoader:
-    def __init__(self, model, tokenizer):
+    def __init__(self, model, tokenizer, starting_epoch=0):
 
         self.model = model
         self.tokenizer = tokenizer
         self.batch_size = get_batch_size()
-        self.epoch = 0
+        # On a checkpoint resume the trainer constructs us with the
+        # epoch it was on at save time so the per-epoch shuffle seed
+        # (42 + epoch in load_language_model_dataset) reproduces the
+        # exact data ordering. Without this, every restart starts at
+        # epoch 0 and the model re-trains on the same first batches.
+        self.epoch = starting_epoch
 
         self.dataset = load_dataset(
             model=self.model,
