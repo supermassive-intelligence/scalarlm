@@ -23,7 +23,7 @@ interface LossChartProps {
 // TensorBoard-style EMA: smooth[i] = w * smooth[i-1] + (1 - w) * raw[i]
 // with debiasing for the warmup. w=0 returns the raw series.
 const SMOOTH_KEY = "loss-chart.smoothing";
-const SMOOTH_MAX = 0.95;
+const SMOOTH_MAX = 0.99;
 
 // Distinct colors for compare series. Picked to be legible in both light
 // and dark mode without relying on the theme accent (which is reserved
@@ -721,7 +721,7 @@ function Toolbar({
         <div className="ml-auto flex flex-wrap items-center gap-x-3 gap-y-2">
           <label
             className="flex items-center gap-2 text-xs text-fg-muted"
-            title="Exponential moving average. 0 = raw, 0.95 = heavily smoothed."
+            title="Exponential moving average. 0 = raw, 0.99 = heavily smoothed."
           >
             smoothing
             <input
