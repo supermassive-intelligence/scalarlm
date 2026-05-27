@@ -4,6 +4,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   useCancelJob,
   useDeleteJob,
+  useRestartJob,
   useTrainingJob,
 } from "@/api/training";
 import { getApiConfig } from "@/api/config";
@@ -32,6 +33,7 @@ export function TrainDetail() {
   const { data, error, refetch, isPending } = useTrainingJob(jobHash);
   const cancel = useCancelJob();
   const del = useDeleteJob();
+  const restartJob = useRestartJob();
   const [askCancel, setAskCancel] = useState(false);
   const [askDelete, setAskDelete] = useState(false);
   const [publishOpen, setPublishOpen] = useState(false);
@@ -51,6 +53,7 @@ export function TrainDetail() {
 
   const cancellable = status === "QUEUED" || status === "TRAINING";
   const deletable = status !== "TRAINING";
+  const restartable = status === "FAILED" || status === "CANCELLED";
 
   const onConfirmCancel = async () => {
     try {
@@ -221,6 +224,17 @@ export function TrainDetail() {
                 >
                   Cancel
                 </button>
+                {restartable && (
+                  <button
+                    type="button"
+                    onClick={() => restartJob.mutate(jobHash)}
+                    disabled={restartJob.isPending}
+                    title="Re-queue this job; training resumes from the last checkpoint"
+                    className="rounded-md border border-border-subtle bg-bg-card px-3 py-1.5 text-sm text-fg hover:border-border hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    {restartJob.isPending ? "Restarting…" : "Restart"}
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => setAskDelete(true)}
@@ -229,6 +243,14 @@ export function TrainDetail() {
                 >
                   Delete
                 </button>
+                {restartJob.isError && (
+                  <span
+                    className="ml-auto rounded-md border border-danger/40 bg-danger/5 px-2 py-1 font-mono text-xs text-danger"
+                    title={String(restartJob.error)}
+                  >
+                    Restart failed: {String(restartJob.error).slice(0, 80)}
+                  </span>
+                )}
                 {data.job_status.error && (
                   <span className="ml-auto rounded-md border border-danger/40 bg-danger/5 px-2 py-1 font-mono text-xs text-danger">
                     {String(data.job_status.error).slice(0, 80)}

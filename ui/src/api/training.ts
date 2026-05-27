@@ -10,12 +10,18 @@ import { getApiConfig } from "./config";
 import { buildTar } from "@/lib/tar";
 import type { TrainArgs } from "@/lib/trainArgsSchema";
 
-/** TrainingJobStatus from infra/cray_infra/training/training_job_status.py. */
+/**
+ * TrainingJobStatus from infra/cray_infra/training/training_job_status.py.
+ * "CANCELLED" is written by cancel.py:65-66 as a free-form string (not
+ * present in the Python enum) — included here so the UI can render and
+ * branch on the actual server-written values.
+ */
 export type TrainingJobStatus =
   | "QUEUED"
   | "TRAINING"
   | "COMPLETED"
   | "FAILED"
+  | "CANCELLED"
   | "UNKNOWN";
 
 export interface TrainingHistoryPoint {
@@ -170,6 +176,19 @@ export function useDeleteJob() {
     mutationFn: (jobHash: string) =>
       apiFetch(`/megatron/delete/${jobHash}`, { method: "POST" }),
     onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["model-list"] });
+      qc.invalidateQueries({ queryKey: ["squeue"] });
+    },
+  });
+}
+
+export function useRestartJob() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (jobHash: string) =>
+      apiFetch(`/megatron/restart/${jobHash}`, { method: "POST" }),
+    onSuccess: (_data, jobHash) => {
+      qc.invalidateQueries({ queryKey: ["training-job", jobHash] });
       qc.invalidateQueries({ queryKey: ["model-list"] });
       qc.invalidateQueries({ queryKey: ["squeue"] });
     },

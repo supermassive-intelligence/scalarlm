@@ -28,6 +28,7 @@ from cray_infra.training.list_checkpoints import list_checkpoints
 from cray_infra.training.list_models import list_models
 from cray_infra.training.squeue import squeue
 from cray_infra.training.cancel import cancel
+from cray_infra.training.restart import restart
 from cray_infra.training.delete import delete
 from cray_infra.training.get_gpu_count import get_gpu_count
 from cray_infra.training.get_node_count import get_node_count
@@ -165,6 +166,10 @@ async def get_training_logs(model_name: str, starting_line_number: int = 0):
 @megatron_router.post("/cancel/{job_hash}")
 async def cancel_job(job_hash: str):
     return await cancel(job_hash)
+
+@megatron_router.post("/restart/{job_hash}")
+async def restart_job(job_hash: str):
+    return await restart(job_hash)
 
 @megatron_router.post("/delete/{job_hash}")
 async def delete_job(job_hash: str):

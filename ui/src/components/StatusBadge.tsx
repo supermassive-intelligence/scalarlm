@@ -13,6 +13,7 @@ const TONE_BY_STATUS: Record<TrainingJobStatus, BadgeTone> = {
   TRAINING: "accent",
   COMPLETED: "success",
   FAILED: "danger",
+  CANCELLED: "neutral",
   UNKNOWN: "warning",
 };
 
