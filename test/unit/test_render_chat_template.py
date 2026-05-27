@@ -20,8 +20,10 @@ from cray_infra.api.fastapi.chat_completions import render_chat_template as rct
 def _reset_tokenizer_cache():
     """Each test gets a fresh cache so cross-test ordering doesn't matter."""
     rct._tokenizer_cache.clear()
+    rct._source_cache.clear()
     yield
     rct._tokenizer_cache.clear()
+    rct._source_cache.clear()
 
 
 def _fake_tokenizer(rendered: str = "[fake-rendered]") -> MagicMock:
@@ -115,3 +117,77 @@ def test_tokenizer_loaded_per_distinct_model():
         )
     assert out_a == "A"
     assert out_b == "B"
+
+
+def test_lora_adapter_dir_falls_back_to_base_tokenizer(tmp_path, monkeypatch):
+    """
+    A trained-model hash that names a LoRA adapter directory (only `.pt`
+    files, no tokenizer config) must load the base model's tokenizer
+    instead of being handed verbatim to AutoTokenizer — otherwise
+    transformers treats the hash as an HF repo id and 401s against the
+    Hub. Regression test for the production trace where
+    `dcb1a490...c5b3bea24411c` resolved that way.
+    """
+    base_model = "base/model"
+    adapter_hash = "dcb1a490f3a3a055469f7815cb59f5a4a8888adac6d2d320337c5b3bea24411c"
+    adapter_dir = tmp_path / adapter_hash
+    adapter_dir.mkdir()
+    (adapter_dir / "checkpoint.pt").write_bytes(b"")
+
+    def fake_get_config():
+        return {"model": base_model, "training_job_directory": str(tmp_path)}
+
+    from cray_infra.util import get_config as get_config_mod
+
+    monkeypatch.setattr(get_config_mod, "get_config", fake_get_config)
+
+    seen_sources: list[str] = []
+
+    def fake_loader(source):
+        seen_sources.append(source)
+        return _fake_tokenizer()
+
+    with patch.object(rct, "_load_tokenizer_from_pretrained", side_effect=fake_loader):
+        rct.render_chat_template(
+            model=adapter_hash,
+            messages=[{"role": "user", "content": "x"}],
+            prompt=None,
+        )
+
+    assert seen_sources == [base_model]
+
+
+def test_adapter_dir_with_tokenizer_files_uses_local_path(tmp_path, monkeypatch):
+    """
+    Forward-compat: if a future training job saves a full checkpoint
+    (its own tokenizer.json next to the weights), prefer that local
+    path over the base model — the local tokenizer is authoritative.
+    """
+    base_model = "base/model"
+    adapter_hash = "full-checkpoint-hash"
+    adapter_dir = tmp_path / adapter_hash
+    adapter_dir.mkdir()
+    (adapter_dir / "checkpoint.pt").write_bytes(b"")
+    (adapter_dir / "tokenizer.json").write_text("{}")
+
+    def fake_get_config():
+        return {"model": base_model, "training_job_directory": str(tmp_path)}
+
+    from cray_infra.util import get_config as get_config_mod
+
+    monkeypatch.setattr(get_config_mod, "get_config", fake_get_config)
+
+    seen_sources: list[str] = []
+
+    def fake_loader(source):
+        seen_sources.append(source)
+        return _fake_tokenizer()
+
+    with patch.object(rct, "_load_tokenizer_from_pretrained", side_effect=fake_loader):
+        rct.render_chat_template(
+            model=adapter_hash,
+            messages=[{"role": "user", "content": "x"}],
+            prompt=None,
+        )
+
+    assert seen_sources == [str(adapter_dir)]
