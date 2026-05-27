@@ -34,7 +34,14 @@ async def enqueue_coalesced_batch(batch: List[Tuple[Any, str]]) -> None:
     contents_hash = hashlib.sha256(contents).hexdigest()
 
     config = get_config()
-    path = os.path.join(config["upload_base_path"], f"{contents_hash}.json")
+    base_path = config["upload_base_path"]
+    # Lazy-create the upload dir so a pod that's never received a
+    # /v1/generate upload (which calls os.makedirs via get_request_path)
+    # doesn't crash every chat-completions request with FileNotFoundError.
+    # /v1/generate's upload.py and tee_streaming_to_disk.py use the same
+    # pattern.
+    os.makedirs(base_path, exist_ok=True)
+    path = os.path.join(base_path, f"{contents_hash}.json")
 
     with open(path, "wb") as handle:
         handle.write(contents)

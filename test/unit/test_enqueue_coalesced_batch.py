@@ -103,3 +103,31 @@ async def test_empty_batch_raises(upload_dir):
     """An empty batch is a programmer error from the coalescer."""
     with pytest.raises(ValueError):
         await enqueue_coalesced_batch([])
+
+
+@pytest.mark.asyncio
+async def test_lazy_creates_upload_dir_when_missing(tmp_path):
+    """
+    Regression: on a pod that has never received a /v1/generate upload,
+    upload_base_path doesn't exist yet (the /v1/generate path lazy-
+    creates it via get_request_path). Chat completions would crash with
+    FileNotFoundError on every request. Mirror the /v1/generate pattern
+    and lazy-create here too.
+    """
+    target = tmp_path / "does-not-exist-yet"
+    assert not target.exists()
+
+    fake_config = {"upload_base_path": str(target)}
+    with patch(
+        "cray_infra.api.fastapi.chat_completions.enqueue_coalesced_batch.get_config",
+        return_value=fake_config,
+    ), patch(
+        "cray_infra.api.fastapi.chat_completions.enqueue_coalesced_batch.push_into_queue",
+        new_callable=AsyncMock,
+    ) as push:
+        await enqueue_coalesced_batch([({"prompt": "x", "correlation_id": "c"}, "c")])
+
+    assert target.is_dir()
+    _, path = push.await_args.args
+    assert os.path.dirname(path) == str(target)
+    assert os.path.exists(path)
