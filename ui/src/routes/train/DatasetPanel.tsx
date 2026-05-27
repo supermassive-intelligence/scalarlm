@@ -12,6 +12,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { ApiError } from "@/api/client";
+import { getApiConfig } from "@/api/config";
 import { useTrainingDataset } from "@/api/training";
 import { Card } from "@/components/Card";
 import { ErrorState } from "@/components/ErrorState";
@@ -19,6 +20,7 @@ import { Skeleton } from "@/components/Skeleton";
 
 const PAGE_SIZE = 50;
 const SEARCH_DEBOUNCE_MS = 200;
+const DOWNLOAD_SAMPLE_LIMIT = 100;
 
 interface DatasetPanelProps {
   jobHash: string;
@@ -82,6 +84,9 @@ export function DatasetPanel({ jobHash }: DatasetPanelProps) {
       }
       action={
         <div className="flex items-center gap-2">
+          {open && total > 0 && (
+            <DownloadButtons jobHash={jobHash} total={total} />
+          )}
           {open && (
             <input
               type="search"
@@ -203,6 +208,54 @@ export function DatasetPanel({ jobHash }: DatasetPanelProps) {
         </>
       )}
     </Card>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Download buttons — plain anchor downloads so the file streams through
+// the browser rather than buffering through fetch + Blob (full datasets
+// can be GB-scale; loading them into JS memory would OOM the tab).
+
+interface DownloadButtonsProps {
+  jobHash: string;
+  total: number;
+}
+
+function DownloadButtons({ jobHash, total }: DownloadButtonsProps) {
+  const { api_base } = getApiConfig();
+  const base = `${api_base}/megatron/train/${encodeURIComponent(jobHash)}/dataset/download`;
+  const sampleSize = Math.min(DOWNLOAD_SAMPLE_LIMIT, total);
+  const showSample = total > DOWNLOAD_SAMPLE_LIMIT;
+  const sampleUrl = `${base}?limit=${sampleSize}`;
+  const fullUrl = base;
+  const fullLabel =
+    total >= 1_000_000
+      ? `Download all (${Math.round(total / 1_000_000)}M rows)`
+      : total >= 1_000
+      ? `Download all (${Math.round(total / 1_000)}K rows)`
+      : `Download all (${total} rows)`;
+
+  return (
+    <span className="flex items-center gap-1">
+      {showSample && (
+        <a
+          href={sampleUrl}
+          download
+          title={`Download the first ${sampleSize} rows as JSONL`}
+          className="rounded-md border border-border-subtle bg-bg-card px-3 py-1 text-xs text-fg hover:border-border hover:bg-bg-hover"
+        >
+          Download {sampleSize}
+        </a>
+      )}
+      <a
+        href={fullUrl}
+        download
+        title="Download the entire dataset.jsonlines file"
+        className="rounded-md border border-border-subtle bg-bg-card px-3 py-1 text-xs text-fg hover:border-border hover:bg-bg-hover"
+      >
+        {fullLabel}
+      </a>
+    </span>
   );
 }
 

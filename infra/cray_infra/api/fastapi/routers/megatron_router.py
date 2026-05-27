@@ -18,6 +18,7 @@ from cray_infra.training.upload_training_data import upload_training_data
 from cray_infra.training.training_logs_generator import training_logs_generator
 from cray_infra.training.get_training_job_info import get_training_job_info
 from cray_infra.training.get_dataset_slice import get_dataset_slice
+from cray_infra.training.download_dataset import download_dataset
 from cray_infra.training.launch_publish_job import (
     cancel_publish_job,
     get_publish_status,
@@ -79,6 +80,15 @@ async def job_dataset(
     q: str | None = None,
 ):
     return get_dataset_slice(job_hash, offset=offset, limit=limit, q=q)
+
+
+@megatron_router.get("/train/{job_hash}/dataset/download")
+async def job_dataset_download(job_hash: str, limit: int | None = None):
+    """
+    Stream the job's dataset.jsonlines verbatim as an attachment.
+    Omit `limit` for the full file; pass `limit=N` for the first N rows.
+    """
+    return download_dataset(job_hash, limit=limit)
 
 
 @megatron_router.get("/train/{job_hash}/checkpoints")
