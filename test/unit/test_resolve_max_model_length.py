@@ -180,6 +180,84 @@ async def test_per_model_cache_does_not_share_across_models():
 
 
 @pytest.mark.asyncio
+async def test_lora_adapter_inherits_parent_max_model_len():
+    """
+    Regression: vLLM lists LoRA adapters with `parent=base_model_name`
+    and `max_model_len=null` (the adapter shares the base model's
+    context window). Without parent-following, the resolver returned
+    None → fell back to the tiny config default → the pre-admission
+    length check rejected every real chat with 400. See live shape at
+    https://gemma4.scalarllm.com/v1/models and
+    vllm/entrypoints/openai/models/serving.py:148.
+    """
+    session = _fake_session({
+        "data": [
+            {
+                "id": "nvidia/Gemma-4-31B-IT-NVFP4",
+                "parent": None,
+                "max_model_len": 262144,
+            },
+            {
+                "id": "adapter-hash",
+                "parent": "nvidia/Gemma-4-31B-IT-NVFP4",
+                "max_model_len": None,
+            },
+        ]
+    })
+    with _patches(session, config_max=256)[0], _patches(session, config_max=256)[1]:
+        out = await r.resolve_max_model_length("adapter-hash")
+    assert out == 262144
+
+
+@pytest.mark.asyncio
+async def test_lora_adapter_with_unknown_parent_falls_back_to_config():
+    """If vLLM lists the adapter but the parent it references isn't in
+    the same payload (race during model load, version drift), don't
+    invent a number — fall back to config."""
+    session = _fake_session({
+        "data": [
+            {
+                "id": "adapter-hash",
+                "parent": "missing-base",
+                "max_model_len": None,
+            },
+        ]
+    })
+    with _patches(session, config_max=1024)[0], _patches(session, config_max=1024)[1]:
+        out = await r.resolve_max_model_length("adapter-hash")
+    assert out == 1024
+
+
+@pytest.mark.asyncio
+async def test_parent_chain_cycle_falls_back_to_config():
+    """Pathological vLLM payload with a parent cycle. Don't loop forever."""
+    session = _fake_session({
+        "data": [
+            {"id": "a", "parent": "b", "max_model_len": None},
+            {"id": "b", "parent": "a", "max_model_len": None},
+        ]
+    })
+    with _patches(session, config_max=512)[0], _patches(session, config_max=512)[1]:
+        out = await r.resolve_max_model_length("a")
+    assert out == 512
+
+
+@pytest.mark.asyncio
+async def test_adapter_with_own_max_model_len_does_not_walk_parent():
+    """If the adapter entry happens to carry its own valid value, use
+    it without inspecting the parent."""
+    session = _fake_session({
+        "data": [
+            {"id": "base", "parent": None, "max_model_len": 4096},
+            {"id": "adapter", "parent": "base", "max_model_len": 8192},
+        ]
+    })
+    with _patches(session)[0], _patches(session)[1]:
+        out = await r.resolve_max_model_length("adapter")
+    assert out == 8192
+
+
+@pytest.mark.asyncio
 async def test_concurrent_first_lookups_only_one_http_call():
     """Lock the cache write so two concurrent first-callers don't
     both pay the round-trip."""

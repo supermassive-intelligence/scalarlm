@@ -98,30 +98,59 @@ async def _query_vllm_for_max_model_len(model: str) -> int | None:
 def _extract_max_model_len(payload: Any, model: str) -> int | None:
     """Walk vLLM's models-list response and pull `max_model_len` for
     the requested id. Tolerates shape drift: missing keys, alternate
-    field names (`max_position_embeddings`), non-int values."""
+    field names (`max_position_embeddings`), non-int values.
+
+    LoRA adapter entries returned by vLLM (see
+    `vllm/entrypoints/openai/models/serving.py:148-149`) carry
+    `parent=base_model_name` and `max_model_len=null` — adapters share
+    the base model's context window. When the requested entry has no
+    `max_model_len` of its own, follow the `parent` chain to the base
+    model's entry rather than falling back to the (typically tiny)
+    config default. Guarded against cycles by tracking visited ids.
+    """
     if not isinstance(payload, dict):
         return None
     data = payload.get("data")
     if not isinstance(data, list):
         return None
-    for entry in data:
-        if not isinstance(entry, dict):
+
+    by_id: dict[str, dict] = {
+        entry["id"]: entry
+        for entry in data
+        if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+    }
+
+    visited: set[str] = set()
+    current_id: str | None = model
+    while current_id is not None and current_id not in visited:
+        visited.add(current_id)
+        entry = by_id.get(current_id)
+        if entry is None:
+            return None
+
+        own_value = _coerce_max_len(entry)
+        if own_value is not None:
+            return own_value
+
+        parent = entry.get("parent")
+        current_id = parent if isinstance(parent, str) and parent else None
+
+    return None
+
+
+def _coerce_max_len(entry: dict) -> int | None:
+    """Read the per-entry context window. Tries the canonical vLLM
+    field first, then the underlying HF name, then stringified ints."""
+    for field in ("max_model_len", "max_position_embeddings"):
+        value = entry.get(field)
+        if isinstance(value, int) and value > 0:
+            return value
+        try:
+            coerced = int(value)
+            if coerced > 0:
+                return coerced
+        except (TypeError, ValueError):
             continue
-        if entry.get("id") != model:
-            continue
-        # Try the canonical field first, then the underlying HF name.
-        for field in ("max_model_len", "max_position_embeddings"):
-            value = entry.get(field)
-            if isinstance(value, int) and value > 0:
-                return value
-            # Some vLLM versions stringify; coerce if we can.
-            try:
-                coerced = int(value)
-                if coerced > 0:
-                    return coerced
-            except (TypeError, ValueError):
-                continue
-        return None
     return None
 
 
