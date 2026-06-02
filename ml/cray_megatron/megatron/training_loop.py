@@ -266,9 +266,15 @@ class TrainingLoop:
         self.training_state.nan_steps = checkpoint.get("nan_steps", 0)
         # .get() with default=0 keeps older checkpoints (pre-Fix 2) loadable.
         self.training_state.data_cursor = checkpoint.get("data_cursor", 0)
-        _load_trained_parameters(
-            self.training_state.model_info["model"], checkpoint["model_state_dict"]
-        )
+        model = self.training_state.model_info["model"]
+        if hasattr(model, "load_unwrapped_model"):
+            # FSDP: the checkpoint holds all-gathered full tensors, but the
+            # live model is sharded. Re-shard each tensor and write this rank's
+            # slice in (the inverse of unwrap_model). Mirrors the save-side
+            # branch in checkpoint() that dispatches on unwrap_model.
+            model.load_unwrapped_model(checkpoint["model_state_dict"])
+        else:
+            _load_trained_parameters(model, checkpoint["model_state_dict"])
         self.training_state.optimizer.load_state_dict(
             checkpoint["optimizer_state_dict"]
         )

@@ -298,6 +298,93 @@ class SimpleFSDP(nn.Module):
                 unwrapped_state_dict=unwrapped_state_dict,
             )
 
+    def load_unwrapped_model(self, state_dict):
+        """Inverse of unwrap_model: re-shard each full tensor in `state_dict`
+        and write this rank's slice into the live sharded parameter.
+
+        unwrap_model() saves the all-gathered full tensors keyed by their
+        unsharded path. On resume the model has already been rebuilt and
+        sharded (load_model -> SimpleFSDP), so the live params are this rank's
+        `shard_<name>` slices, not full tensors — a plain load_state_dict of
+        the full tensors would shape-mismatch (or, with strict=False, silently
+        load nothing, which is the checkpoint-boundary weight-loss bug). Re-run
+        the same even split shard_tensor() used at construction and copy the
+        per-rank shard in.
+
+        Mirrors unwrap_layers' traversal exactly so the keys line up.
+        """
+        missing: list[str] = []
+        loaded = self._load_unwrapped_layers(
+            prefix="", module=self.model, state_dict=state_dict, missing=missing
+        )
+        if loaded == 0:
+            raise RuntimeError(
+                "FSDP checkpoint restore matched no sharded parameters — the "
+                "model_state_dict namespace does not line up with the live "
+                "sharded model."
+            )
+        if missing:
+            raise RuntimeError(
+                f"FSDP checkpoint restore is missing {len(missing)} trained "
+                f"parameter(s), e.g. {missing[:3]}. Refusing to continue with "
+                "partially-restored weights."
+            )
+        logger.info(
+            "Resharded %d trained parameter tensor(s) into the FSDP model on resume",
+            loaded,
+        )
+
+    def _load_unwrapped_layers(self, prefix, module, state_dict, missing):
+        rank = get_rank()
+        world_size = get_size()
+        loaded = 0
+        for name, child in module.named_children():
+            if isinstance(child, FSDPLayer):
+                for param_name, param in child.module.named_parameters(recurse=False):
+                    if not param.requires_grad:
+                        continue
+                    local_name = param_name.split(".")[-1]
+                    name_prefix = param_name[: -len(local_name)]
+
+                    if local_name.startswith("shard_"):
+                        unsharded_local = param_name[len("shard_") :]
+                        full_unsharded_name = name_prefix + unsharded_local
+                        key = f"{prefix}{name}.{full_unsharded_name}"
+                        if key not in state_dict:
+                            missing.append(key)
+                            continue
+                        metadata_dict = child.sharded_parameter_metadata[
+                            full_unsharded_name
+                        ]
+                        shard = shard_full_tensor(
+                            state_dict[key], metadata_dict, rank, world_size
+                        )
+                        with torch.no_grad():
+                            param.copy_(
+                                shard.to(device=param.device, dtype=param.dtype)
+                            )
+                        loaded += 1
+                    else:
+                        key = f"{prefix}{name}.{param_name}"
+                        if key not in state_dict:
+                            missing.append(key)
+                            continue
+                        with torch.no_grad():
+                            param.copy_(
+                                state_dict[key].to(
+                                    device=param.device, dtype=param.dtype
+                                )
+                            )
+                        loaded += 1
+
+            loaded += self._load_unwrapped_layers(
+                prefix=prefix + name + ".",
+                module=child,
+                state_dict=state_dict,
+                missing=missing,
+            )
+        return loaded
+
     def backward_sync(self):
         pass
 
@@ -376,6 +463,24 @@ def shard_tensor(tensor):
     }
 
     return shard, metadata_dict
+
+
+def shard_full_tensor(full_tensor, metadata_dict, rank, world_size):
+    """Inverse of shard_tensor() for a single rank.
+
+    Flatten the full tensor, pad to world_size * shard_size, and return this
+    rank's contiguous slice — reproducing exactly the shard shard_tensor()
+    produced at construction (same even split, same trailing zero padding).
+    `metadata_dict[rank]` is (original_numel, original_shape, shard_size,
+    padding); we only need shard_size since the split is even across ranks.
+    """
+    shard_size = metadata_dict[rank][2]
+    flat = full_tensor.reshape(-1)
+    padded_numel = shard_size * world_size
+    if flat.numel() < padded_numel:
+        flat = torch.cat([flat, flat.new_zeros(padded_numel - flat.numel())])
+    start = rank * shard_size
+    return flat[start : start + shard_size].clone()
 
 
 def trim_padding(all_tensors, rank, world_size, metadata_dict):
