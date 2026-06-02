@@ -12,6 +12,28 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _slurm_sort_key(log_file_path: str):
+    """Order slurm-<job_id>.out files by their numeric job ID.
+
+    Returns a (bucket, value) tuple so the sort is total even when a filename
+    doesn't carry a parseable integer ID (e.g. some stray slurm-*.out file):
+    parseable IDs sort first in numeric order (bucket 0), anything else falls
+    to the end in stable name order (bucket 1) instead of crashing the whole
+    log stream.
+    """
+    name = os.path.basename(log_file_path)
+    middle = name[len("slurm-") : -len(".out")]
+    try:
+        return (0, int(middle))
+    except ValueError:
+        logger.warning(
+            "Log file %s has a non-numeric job id; ordering it after numbered "
+            "slices",
+            name,
+        )
+        return (1, name)
+
+
 def training_logs_generator(model_name: str, starting_line_number: int):
     config = get_config()
 
@@ -31,8 +53,15 @@ def training_logs_generator(model_name: str, starting_line_number: int):
             log_file = os.path.join(job_directory, file)
             log_files.append(log_file)
 
-    # sort the log files by name
-    log_files.sort()
+    # Each resume/slice writes its own slurm-<job_id>.out, and job IDs grow
+    # monotonically with time — so ordering by job ID is chronological order.
+    # Sort by the *parsed integer* ID, not the string: a plain lexicographic
+    # sort puts "slurm-1000.out" before "slurm-999.out" (because '1' < '9'),
+    # which would stitch a later slice ahead of an earlier one across any
+    # digit-width boundary (9->10, 99->100, ...). Continuous line numbering is
+    # assigned by position in this concatenation, so a wrong order also makes
+    # the UI's line-number resume skip the misordered slice.
+    log_files.sort(key=_slurm_sort_key)
 
     logger.info(f"Found log files: {log_files}")
 
