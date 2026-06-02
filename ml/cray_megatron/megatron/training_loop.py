@@ -266,8 +266,8 @@ class TrainingLoop:
         self.training_state.nan_steps = checkpoint.get("nan_steps", 0)
         # .get() with default=0 keeps older checkpoints (pre-Fix 2) loadable.
         self.training_state.data_cursor = checkpoint.get("data_cursor", 0)
-        self.training_state.model_info["model"].load_state_dict(
-            checkpoint["model_state_dict"], strict=False
+        _load_trained_parameters(
+            self.training_state.model_info["model"], checkpoint["model_state_dict"]
         )
         self.training_state.optimizer.load_state_dict(
             checkpoint["optimizer_state_dict"]
@@ -734,6 +734,84 @@ def filter_checkpoint(model, state_dict):
             saved_params[name] = state_dict[name]
 
     return saved_params
+
+
+def _load_trained_parameters(wrapped_model, state_dict):
+    """Load a filtered (trainable-only) checkpoint back into the live model.
+
+    The checkpoint is written relative to an *inner* module: the
+    no-distribution / DDP path saves ``filter_checkpoint(model.model, ...)``
+    (keys relative to the HF ``…ForCausalLM`` — depth 1) and the LoRA path
+    saves relative to the PEFT base model (depth 2); FSDP saves via
+    ``unwrap_model()``. The handle we hold on resume, though, is the *outer*
+    distribution wrapper (NoDistribution / DDPLayer / FSDP / PEFT), whose own
+    ``state_dict`` keys carry one or more extra ``model.``-style prefixes.
+
+    Calling ``wrapper.load_state_dict(state_dict, strict=False)`` therefore
+    matches *nothing* and — because ``strict=False`` silently tolerates the
+    mismatch — drops every trained weight on the floor. That is the
+    checkpoint-boundary loss-jump bug: optimizer / scheduler / RNG restore
+    correctly, but the weights snap back to their ``from_pretrained`` values
+    at each resume, so the loss spikes and has to re-descend.
+
+    Resolve the descendant module the checkpoint keys actually belong to
+    (walking ``.model`` a few levels), load there, and fail loudly if the
+    namespaces still don't line up — never silently no-op again.
+    """
+    # Candidate load targets: the wrapper and its `.model` descendants.
+    candidates = []
+    module = wrapped_model
+    seen = set()
+    for _ in range(4):
+        if module is None or id(module) in seen:
+            break
+        seen.add(id(module))
+        candidates.append(module)
+        module = getattr(module, "model", None)
+
+    checkpoint_keys = set(state_dict)
+
+    # Pick the target whose own parameter namespace overlaps the checkpoint
+    # the most. The module the keys were saved from has all of them; any
+    # other level (extra or missing `model.` prefix) overlaps with ~none.
+    best_target = None
+    best_matched = -1
+    for candidate in candidates:
+        matched = len(checkpoint_keys & set(candidate.state_dict().keys()))
+        if matched > best_matched:
+            best_matched = matched
+            best_target = candidate
+
+    if best_matched <= 0:
+        raise RuntimeError(
+            f"Checkpoint resume could not align any of the {len(checkpoint_keys)} "
+            f"saved parameter(s) with the live model. The model_state_dict "
+            f"namespace matches no module in "
+            f"{type(wrapped_model).__name__}(.model)*. Sharded FSDP checkpoints "
+            f"need the reshard-on-load path; for the single-process / DDP / LoRA "
+            f"paths this is a wrapper-namespace regression."
+        )
+
+    incompatible = best_target.load_state_dict(state_dict, strict=False)
+
+    # missing_keys is expected — we deliberately save only trainable params,
+    # so every frozen base weight lands here. unexpected_keys must be empty:
+    # a non-empty list means saved trained weights had no home in the target
+    # and were dropped, which is the silent-corruption we're guarding against.
+    if incompatible.unexpected_keys:
+        raise RuntimeError(
+            f"Checkpoint resume left {len(incompatible.unexpected_keys)} trained "
+            f"parameter(s) unloaded (unexpected keys), e.g. "
+            f"{incompatible.unexpected_keys[:3]}. Refusing to continue with "
+            f"partially-restored weights."
+        )
+
+    logger.info(
+        "Restored %d trained parameter tensor(s) into %s on resume",
+        best_matched,
+        type(best_target).__name__,
+    )
+    return best_target
 
 
 def build_adapter_metadata():
