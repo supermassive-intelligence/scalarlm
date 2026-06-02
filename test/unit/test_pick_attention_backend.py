@@ -184,3 +184,45 @@ def test_unprobeable_config_does_not_gate_flash():
     with _stub_transformers_utils(fa2=True, fa3=False):
         impl, _ = pick_attention_backend(cfg)
     assert impl == "flash_attention_2"
+
+
+# ---- model-family blocklist (Qwen3 flash-attn training bug) ---------------
+
+
+@pytest.mark.parametrize(
+    "model_type",
+    ["qwen3", "qwen3_moe", "qwen3_next", "qwen3_5_moe"],
+)
+def test_qwen3_family_forced_to_sdpa_by_model_type(model_type):
+    # Flash wheel installed and head_dim in range, but the Qwen3 family's
+    # flash-attn training path is buggy — force SDPA regardless.
+    cfg = _Cfg(model_type=model_type, head_dim=128)
+    with _stub_transformers_utils(fa2=True, fa3=True):
+        impl, warning = pick_attention_backend(cfg)
+    assert impl == "sdpa"
+    assert warning is not None
+    assert "flash" in warning.lower()
+
+
+def test_qwen3_blocklist_matches_on_architectures():
+    # Some configs carry the family only in `architectures`, not model_type.
+    cfg = _Cfg(architectures=["Qwen3NextForCausalLM"])
+    with _stub_transformers_utils(fa2=True, fa3=True):
+        impl, _ = pick_attention_backend(cfg)
+    assert impl == "sdpa"
+
+
+def test_qwen3_blocklist_walks_nested_text_config():
+    cfg = _Cfg(text_config=_Cfg(model_type="qwen3_moe"))
+    with _stub_transformers_utils(fa2=True, fa3=False):
+        impl, _ = pick_attention_backend(cfg)
+    assert impl == "sdpa"
+
+
+def test_qwen2_family_is_not_blocklisted():
+    # The blocklist must not catch Qwen2 / Qwen2.5 — only the Qwen3 line.
+    for model_type in ("qwen2", "qwen2_5", "qwen2_moe"):
+        cfg = _Cfg(model_type=model_type, head_dim=128)
+        with _stub_transformers_utils(fa2=True, fa3=False):
+            impl, _ = pick_attention_backend(cfg)
+        assert impl == "flash_attention_2", model_type

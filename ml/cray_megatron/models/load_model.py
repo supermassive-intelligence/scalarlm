@@ -244,6 +244,55 @@ def _max_head_dim(config: object) -> int | None:
     return best
 
 
+# Model families whose flash-attention path is buggy during *training*
+# (NaNs / incorrect gradients observed on Qwen3, Qwen3.5, and Qwen3-Next).
+# Force SDPA for these regardless of head_dim or whether a flash wheel is
+# installed. Matched as a substring of the lowercased HF `model_type` /
+# architecture name, so a single token covers the whole family — qwen3,
+# qwen3_moe, qwen3_next, qwen3_5, Qwen3ForCausalLM, Qwen3NextForCausalLM, …
+# (and does NOT match qwen2 / qwen2_5).
+_FLASH_BLOCKLIST_SUBSTRINGS = ("qwen3",)
+
+
+def _flash_blocklisted_family(config: object) -> str | None:
+    """Return the matching blocklist token if `config` (or a nested
+    sub-config) names a model family whose flash-attn training path is
+    known-buggy, else None. Inspects `model_type` and `architectures`,
+    walking nested text/vision/audio configs like `_max_head_dim`."""
+    if config is None:
+        return None
+
+    seen: set[int] = set()
+    found: str | None = None
+
+    def visit(cfg: object) -> None:
+        nonlocal found
+        if cfg is None or found is not None or id(cfg) in seen:
+            return
+        seen.add(id(cfg))
+
+        names: list[str] = []
+        model_type = getattr(cfg, "model_type", None)
+        if isinstance(model_type, str):
+            names.append(model_type)
+        architectures = getattr(cfg, "architectures", None)
+        if isinstance(architectures, (list, tuple)):
+            names.extend(a for a in architectures if isinstance(a, str))
+
+        for name in names:
+            lowered = name.lower()
+            for token in _FLASH_BLOCKLIST_SUBSTRINGS:
+                if token in lowered:
+                    found = token
+                    return
+
+        for sub in ("text_config", "vision_config", "audio_config"):
+            visit(getattr(cfg, sub, None))
+
+    visit(config)
+    return found
+
+
 def pick_attention_backend(
     model_config: object | None = None,
 ) -> tuple[str, str | None]:
@@ -275,18 +324,25 @@ def pick_attention_backend(
 
     `model_config`, when supplied, is the HF AutoConfig the caller is
     about to pass to `from_pretrained`. We inspect it (and any nested
-    sub-configs) for `head_dim > 256` and disqualify flash variants in
-    that case — flash-attn's kernels hard-cap at 256 and would crash
-    mid-step otherwise.
+    sub-configs) for two flash disqualifiers: `head_dim > 256` (flash-attn's
+    kernels hard-cap at 256 and would crash mid-step), and membership in
+    `_FLASH_BLOCKLIST_SUBSTRINGS` (the Qwen3 family, whose flash-attn
+    training path produces NaNs / wrong gradients). Either forces SDPA.
     """
     head_dim = _max_head_dim(model_config)
     flash_blocked_by_head_dim = (
         head_dim is not None and head_dim > _FLASH_MAX_HEAD_DIM
     )
 
+    # Some families crash / train incorrectly on flash-attn even when the
+    # wheel is present and head_dim is in range — force SDPA for them.
+    blocklisted_family = _flash_blocklisted_family(model_config)
+
+    flash_blocked = flash_blocked_by_head_dim or blocklisted_family is not None
+
     # The probes are gated through importerror because old
     # transformers versions don't ship is_flash_attn_3_available().
-    if not flash_blocked_by_head_dim:
+    if not flash_blocked:
         try:
             from transformers.utils import is_flash_attn_3_available
 
@@ -302,6 +358,14 @@ def pick_attention_backend(
                 return "flash_attention_2", None
         except ImportError:
             pass
+
+    if blocklisted_family is not None:
+        warning = (
+            f"Model family '{blocklisted_family}' has known flash-attention "
+            "bugs during training (NaNs / incorrect gradients observed on "
+            "Qwen3, Qwen3.5, and Qwen3-Next); forcing PyTorch SDPA."
+        )
+        return "sdpa", warning
 
     if flash_blocked_by_head_dim:
         warning = (
