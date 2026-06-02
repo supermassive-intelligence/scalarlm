@@ -470,8 +470,19 @@ class TrainingLoop:
         entry = {
             "step": self.training_state.current_step,
             "loss": loss,
+            # Total wall-clock across ALL slices, not just this one. start_time
+            # resets every slice (on_train_begin), so the bare
+            # `time.time() - start_time` is only the current slice's elapsed —
+            # which is why the UI's elapsed and list_models' train_time both
+            # reset to ~0 on every checkpoint resume. Add the wall time carried
+            # forward from prior slices (loaded in _load_accumulated_seconds,
+            # persisted in _finalize_slice) so the displayed elapsed survives
+            # checkpoints. See docs/training-lifecycle.md §5.4.
             "epoch": self.training_state.epoch,
-            "time": time.time() - self.training_state.start_time,
+            "time": (
+                self.training_state.accumulated_seconds_at_slice_start
+                + (time.time() - self.training_state.start_time)
+            ),
         }
 
         self.training_state.history.append(entry)
