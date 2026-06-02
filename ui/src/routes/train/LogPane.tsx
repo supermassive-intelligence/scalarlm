@@ -1,7 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
 
-import { tailTrainingLogs, type LogLine, type TrainingJobStatus } from "@/api/training";
+import {
+  fetchFullTrainingLog,
+  tailTrainingLogs,
+  type LogLine,
+  type TrainingJobStatus,
+} from "@/api/training";
 
 interface LogPaneProps {
   jobHash: string;
@@ -20,6 +25,8 @@ export function LogPane({ jobHash, status }: LogPaneProps) {
   const [autoScroll, setAutoScroll] = useState(true);
   const [query, setQuery] = useState("");
   const [useRegex, setUseRegex] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const statusRef = useRef(status);
@@ -93,17 +100,31 @@ export function LogPane({ jobHash, status }: LogPaneProps) {
     el?.scrollIntoView({ block: "center", behavior: "smooth" });
   };
 
-  const downloadLog = () => {
-    const blob = new Blob(
-      [lines.map((l) => l.line).join("\n")],
-      { type: "text/plain" },
-    );
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${jobHash}.log`;
-    a.click();
-    URL.revokeObjectURL(url);
+  // Download the COMPLETE stitched log from the server, not the in-memory
+  // `lines` buffer — that buffer is a rolling MAX_LINES tail, so for long or
+  // resumed (multi-slice) jobs it omits everything older than the last
+  // MAX_LINES lines. Re-reading from the endpoint yields the full log.
+  const downloadLog = async () => {
+    if (downloading) return;
+    setDownloading(true);
+    setDownloadError(null);
+    const controller = new AbortController();
+    try {
+      const text = await fetchFullTrainingLog(jobHash, controller.signal);
+      const blob = new Blob([text], { type: "text/plain" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${jobHash}.log`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setDownloadError(
+        err instanceof Error ? err.message : "Failed to download log",
+      );
+    } finally {
+      setDownloading(false);
+    }
   };
 
   return (
@@ -150,9 +171,15 @@ export function LogPane({ jobHash, status }: LogPaneProps) {
           <button
             type="button"
             onClick={downloadLog}
-            className="rounded-md border border-border-subtle bg-bg px-2 py-1 text-xs text-fg hover:border-border hover:bg-bg-hover"
+            disabled={downloading}
+            title={downloadError ?? undefined}
+            className={clsx(
+              "rounded-md border border-border-subtle bg-bg px-2 py-1 text-xs text-fg hover:border-border hover:bg-bg-hover",
+              downloading && "cursor-wait opacity-60",
+              downloadError && "border-danger/40 text-danger",
+            )}
           >
-            Download
+            {downloading ? "Downloading…" : downloadError ? "Retry download" : "Download"}
           </button>
         </div>
       </header>

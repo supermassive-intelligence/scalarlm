@@ -270,6 +270,30 @@ async function streamOnce(
 }
 
 /**
+ * Fetch the COMPLETE stitched training log (all slurm-*.out slices,
+ * concatenated server-side) as a single string, from line 0 to EOF.
+ *
+ * The live LogPane keeps only a rolling MAX_LINES tail in memory, so its
+ * in-memory buffer is not a faithful copy of the full log for long /
+ * multi-slice (resumed) jobs. Download must therefore re-read from the
+ * server rather than serialize that capped buffer. The endpoint's generator
+ * finishes at EOF (it does not tail), so a single pass returns the whole log
+ * captured up to now.
+ */
+export async function fetchFullTrainingLog(
+  modelName: string,
+  signal: AbortSignal,
+): Promise<string> {
+  const { api_base } = getApiConfig();
+  const url =
+    `${api_base}/megatron/train/logs/${encodeURIComponent(modelName)}` +
+    `?starting_line_number=0`;
+  const parts: string[] = [];
+  await streamNdjsonLogOnce(url, 0, signal, (l) => parts.push(l.line));
+  return parts.join("\n");
+}
+
+/**
  * Generic NDJSON log tailer. Both /megatron/train/logs/{model} and
  * /health/logs/{service} emit newline-delimited JSON of the same
  * {line, line_number} shape and finish at EOF.
