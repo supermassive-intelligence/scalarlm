@@ -84,9 +84,16 @@ export function DatasetPanel({ jobHash }: DatasetPanelProps) {
       }
       action={
         <div className="flex items-center gap-2">
-          {open && total > 0 && (
+          {/* Download is available even while collapsed: the anchor streams
+              through the browser and fetches nothing until clicked, so it
+              doesn't break the panel's "no bytes until Show" promise. Once
+              open with a known row count we show the richer sample/all
+              buttons instead. */}
+          {open && total > 0 ? (
             <DownloadButtons jobHash={jobHash} total={total} />
-          )}
+          ) : !open ? (
+            <DownloadButtons jobHash={jobHash} />
+          ) : null}
           {open && (
             <input
               type="search"
@@ -216,30 +223,43 @@ export function DatasetPanel({ jobHash }: DatasetPanelProps) {
 // the browser rather than buffering through fetch + Blob (full datasets
 // can be GB-scale; loading them into JS memory would OOM the tab).
 
+/** Build the dataset download URL; with `limit` it downloads a sample. */
+export function datasetDownloadUrl(
+  apiBase: string,
+  jobHash: string,
+  limit?: number,
+): string {
+  const base = `${apiBase}/megatron/train/${encodeURIComponent(jobHash)}/dataset/download`;
+  return limit !== undefined ? `${base}?limit=${limit}` : base;
+}
+
+/** Label for the full-dataset download. Generic when the row count is
+ *  unknown (collapsed panel), abbreviated K/M otherwise. */
+export function downloadAllLabel(total?: number): string {
+  if (total === undefined) return "Download";
+  if (total >= 1_000_000) return `Download all (${Math.round(total / 1_000_000)}M rows)`;
+  if (total >= 1_000) return `Download all (${Math.round(total / 1_000)}K rows)`;
+  return `Download all (${total} rows)`;
+}
+
 interface DownloadButtonsProps {
   jobHash: string;
-  total: number;
+  /** Row count; undefined when the panel is collapsed (count not yet
+   *  fetched) — we then render only a single generic "Download" link. */
+  total?: number;
 }
 
 function DownloadButtons({ jobHash, total }: DownloadButtonsProps) {
   const { api_base } = getApiConfig();
-  const base = `${api_base}/megatron/train/${encodeURIComponent(jobHash)}/dataset/download`;
-  const sampleSize = Math.min(DOWNLOAD_SAMPLE_LIMIT, total);
-  const showSample = total > DOWNLOAD_SAMPLE_LIMIT;
-  const sampleUrl = `${base}?limit=${sampleSize}`;
-  const fullUrl = base;
-  const fullLabel =
-    total >= 1_000_000
-      ? `Download all (${Math.round(total / 1_000_000)}M rows)`
-      : total >= 1_000
-      ? `Download all (${Math.round(total / 1_000)}K rows)`
-      : `Download all (${total} rows)`;
+  const showSample = total !== undefined && total > DOWNLOAD_SAMPLE_LIMIT;
+  const sampleSize =
+    total !== undefined ? Math.min(DOWNLOAD_SAMPLE_LIMIT, total) : 0;
 
   return (
     <span className="flex items-center gap-1">
       {showSample && (
         <a
-          href={sampleUrl}
+          href={datasetDownloadUrl(api_base, jobHash, sampleSize)}
           download
           title={`Download the first ${sampleSize} rows as JSONL`}
           className="rounded-md border border-border-subtle bg-bg-card px-3 py-1 text-xs text-fg hover:border-border hover:bg-bg-hover"
@@ -248,12 +268,12 @@ function DownloadButtons({ jobHash, total }: DownloadButtonsProps) {
         </a>
       )}
       <a
-        href={fullUrl}
+        href={datasetDownloadUrl(api_base, jobHash)}
         download
         title="Download the entire dataset.jsonlines file"
         className="rounded-md border border-border-subtle bg-bg-card px-3 py-1 text-xs text-fg hover:border-border hover:bg-bg-hover"
       >
-        {fullLabel}
+        {downloadAllLabel(total)}
       </a>
     </span>
   );
