@@ -3,4 +3,3 @@ accelerate
 transformers>=5.5.0
 huggingface_hub>=0.37
 peft
-#flash-attn>=2.7.0 # This bloats the build by over 2 hours, it is too expensive to put here.

@@ -60,17 +60,15 @@ def materialize_model(model_info):
     job_config = get_job_config()
     download_model(model_info["model_name"])
 
+    # SDPA (PyTorch's built-in fused attention) is the default and only
+    # auto-selected backend. Flash-attention support was removed: the
+    # head_dim/per-layer gating and the Qwen3 family bugs made it more
+    # trouble than it was worth for training, and it bloated the image
+    # build. A job can still force another HF backend (e.g. "eager") via
+    # attn_implementation; "auto" (the default) means SDPA.
     override = job_config.get("attn_implementation", "auto")
-    if override and override != "auto":
-        attn_impl = override
-        logger.info(
-            "Using attn_implementation=%s from job_config override", attn_impl
-        )
-    else:
-        attn_impl, warning = pick_attention_backend(model_info["model_config"])
-        if warning:
-            logger.warning(warning)
-        logger.info("Loading model with attn_implementation=%s", attn_impl)
+    attn_impl = override if (override and override != "auto") else "sdpa"
+    logger.info("Loading model with attn_implementation=%s", attn_impl)
 
     start_time = time.time()
     try:
@@ -83,24 +81,22 @@ def materialize_model(model_info):
             # _fast_init=True               # Skip weight initialization (default True)
         )
     except (ValueError, ImportError, RuntimeError) as e:
-        # Some model configs (older architectures, multimodal heads with
-        # custom attention) reject the chosen backend at load time.
-        # Drop to sdpa — PyTorch's built-in fused attention — which
-        # every modern transformers config supports. Eager is the
-        # last resort; we don't try it explicitly because if sdpa
-        # also fails the original exception is more informative.
-        if attn_impl != "sdpa":
+        # Some model configs (older architectures, custom attention heads)
+        # reject SDPA at load time. eager is the universal pure-Python
+        # reference path that every transformers config supports — the
+        # last resort.
+        if attn_impl != "eager":
             logger.warning(
                 "from_pretrained refused attn_implementation=%s (%s); "
-                "falling back to sdpa.",
+                "falling back to eager.",
                 attn_impl,
                 e,
             )
-            attn_impl = "sdpa"
+            attn_impl = "eager"
             model_info["model"] = AutoModelForCausalLM.from_pretrained(
                 model_info["model_name"],
                 torch_dtype="auto",
-                attn_implementation="sdpa",
+                attn_implementation="eager",
             )
         else:
             raise
@@ -175,225 +171,3 @@ def materialize_model(model_info):
     model_info["model"].to(model_info["distribution_strategy"]["device"])
 
     return model_info
-
-
-# flash-attn's CUDA kernels hard-cap head_dim at 256. Models like
-# Gemma-4 mix layers with head_dim > 256, which makes flash unusable
-# even though the wheel is installed and the GPU is fine. The picker
-# probes the model config and rolls back to sdpa when any layer
-# exceeds this bound. fa3 inherits the same cap for our purposes —
-# we'd rather take the safe sdpa path than crash mid-step.
-_FLASH_MAX_HEAD_DIM = 256
-
-
-# Architectures with per-layer attention sizing put the per-block
-# dim under different attribute names. Gemma-4's text_config carries
-# `head_dim=256` for sliding_attention layers AND `global_head_dim=512`
-# for the full_attention layers — both have to be checked or the
-# 512-dim layers slip past the gate and crash flash-attn at first
-# forward. New names get added here as we encounter them.
-_HEAD_DIM_ATTRS = ("head_dim", "global_head_dim", "local_head_dim")
-
-
-def _max_head_dim(config: object) -> int | None:
-    """
-    Largest head_dim across `config` and its nested HF sub-configs
-    (`text_config`, `vision_config`, `audio_config`, …). Returns None
-    when nothing useful is discoverable — caller should treat that as
-    "no information, don't gate".
-
-    Each visited config contributes the largest `*_head_dim` attribute
-    it carries (see `_HEAD_DIM_ATTRS`); when none is present, we fall
-    back to `hidden_size // num_attention_heads`. Multimodal HF
-    configs (Gemma4, Llama4) put the real transformer params inside
-    `text_config` rather than at the top level, so we walk one level
-    down.
-    """
-    if config is None:
-        return None
-
-    seen: set[int] = set()
-    best: int | None = None
-
-    def visit(cfg: object) -> None:
-        nonlocal best
-        if cfg is None or id(cfg) in seen:
-            return
-        seen.add(id(cfg))
-
-        explicit_dim: int | None = None
-        for attr in _HEAD_DIM_ATTRS:
-            val = getattr(cfg, attr, None)
-            if isinstance(val, int) and val > 0:
-                explicit_dim = val if explicit_dim is None else max(explicit_dim, val)
-
-        if explicit_dim is not None:
-            best = explicit_dim if best is None else max(best, explicit_dim)
-        else:
-            hidden = getattr(cfg, "hidden_size", None)
-            heads = getattr(cfg, "num_attention_heads", None)
-            if isinstance(hidden, int) and isinstance(heads, int) and heads > 0:
-                derived = hidden // heads
-                if derived > 0:
-                    best = derived if best is None else max(best, derived)
-
-        for sub in ("text_config", "vision_config", "audio_config"):
-            visit(getattr(cfg, sub, None))
-
-    visit(config)
-    return best
-
-
-# Model families whose flash-attention path is buggy during *training*
-# (NaNs / incorrect gradients observed on Qwen3, Qwen3.5, and Qwen3-Next).
-# Force SDPA for these regardless of head_dim or whether a flash wheel is
-# installed. Matched as a substring of the lowercased HF `model_type` /
-# architecture name, so a single token covers the whole family — qwen3,
-# qwen3_moe, qwen3_next, qwen3_5, Qwen3ForCausalLM, Qwen3NextForCausalLM, …
-# (and does NOT match qwen2 / qwen2_5).
-_FLASH_BLOCKLIST_SUBSTRINGS = ("qwen3",)
-
-
-def _flash_blocklisted_family(config: object) -> str | None:
-    """Return the matching blocklist token if `config` (or a nested
-    sub-config) names a model family whose flash-attn training path is
-    known-buggy, else None. Inspects `model_type` and `architectures`,
-    walking nested text/vision/audio configs like `_max_head_dim`."""
-    if config is None:
-        return None
-
-    seen: set[int] = set()
-    found: str | None = None
-
-    def visit(cfg: object) -> None:
-        nonlocal found
-        if cfg is None or found is not None or id(cfg) in seen:
-            return
-        seen.add(id(cfg))
-
-        names: list[str] = []
-        model_type = getattr(cfg, "model_type", None)
-        if isinstance(model_type, str):
-            names.append(model_type)
-        architectures = getattr(cfg, "architectures", None)
-        if isinstance(architectures, (list, tuple)):
-            names.extend(a for a in architectures if isinstance(a, str))
-
-        for name in names:
-            lowered = name.lower()
-            for token in _FLASH_BLOCKLIST_SUBSTRINGS:
-                if token in lowered:
-                    found = token
-                    return
-
-        for sub in ("text_config", "vision_config", "audio_config"):
-            visit(getattr(cfg, sub, None))
-
-    visit(config)
-    return found
-
-
-def pick_attention_backend(
-    model_config: object | None = None,
-) -> tuple[str, str | None]:
-    """
-    Choose the best attention backend HF transformers can serve given
-    what's installed in this process AND what the model needs. Returns
-    `(impl, warning)` where `impl` is the string passed to
-    `from_pretrained(attn_implementation=)` and `warning` is an
-    operator-facing message about a missed speed-up or a forced
-    fallback — None when the chosen backend is already fast.
-
-    Preference: flash_attention_3 > flash_attention_2 > sdpa > eager.
-
-      - flash_attention_3 is Blackwell-only at the time of writing
-        and lives behind a recent transformers + a `flash-attn 3.x`
-        wheel.
-      - flash_attention_2 works on Ampere / Hopper / Blackwell and
-        ships in the upstream `flash-attn` package.
-      - sdpa is PyTorch's built-in fused attention; no extra
-        dependency, slower than flash on long sequences but well
-        ahead of the eager Python reference path.
-
-    The `is_flash_attn_*_available` helpers from transformers do the
-    runtime probing for us — they return False when the wheel isn't
-    present or when CUDA isn't usable, so we don't have to gate on
-    `torch.cuda.is_available()` ourselves for the boolean result.
-    The warning is suppressed on CPU-only hosts (sdpa is the right
-    answer there too, and there's no flash-attn build for CPU).
-
-    `model_config`, when supplied, is the HF AutoConfig the caller is
-    about to pass to `from_pretrained`. We inspect it (and any nested
-    sub-configs) for two flash disqualifiers: `head_dim > 256` (flash-attn's
-    kernels hard-cap at 256 and would crash mid-step), and membership in
-    `_FLASH_BLOCKLIST_SUBSTRINGS` (the Qwen3 family, whose flash-attn
-    training path produces NaNs / wrong gradients). Either forces SDPA.
-    """
-    head_dim = _max_head_dim(model_config)
-    flash_blocked_by_head_dim = (
-        head_dim is not None and head_dim > _FLASH_MAX_HEAD_DIM
-    )
-
-    # Some families crash / train incorrectly on flash-attn even when the
-    # wheel is present and head_dim is in range — force SDPA for them.
-    blocklisted_family = _flash_blocklisted_family(model_config)
-
-    flash_blocked = flash_blocked_by_head_dim or blocklisted_family is not None
-
-    # The probes are gated through importerror because old
-    # transformers versions don't ship is_flash_attn_3_available().
-    if not flash_blocked:
-        try:
-            from transformers.utils import is_flash_attn_3_available
-
-            if is_flash_attn_3_available():
-                return "flash_attention_3", None
-        except ImportError:
-            pass
-
-        try:
-            from transformers.utils import is_flash_attn_2_available
-
-            if is_flash_attn_2_available():
-                return "flash_attention_2", None
-        except ImportError:
-            pass
-
-    if blocklisted_family is not None:
-        warning = (
-            f"Model family '{blocklisted_family}' has known flash-attention "
-            "bugs during training (NaNs / incorrect gradients observed on "
-            "Qwen3, Qwen3.5, and Qwen3-Next); forcing PyTorch SDPA."
-        )
-        return "sdpa", warning
-
-    if flash_blocked_by_head_dim:
-        warning = (
-            f"Model has head_dim={head_dim} which exceeds flash-attn's "
-            f"hard cap of {_FLASH_MAX_HEAD_DIM}; falling back to PyTorch "
-            "SDPA. This is expected for Gemma-4 and other architectures "
-            "with oversize attention heads — flash-attn would crash "
-            "mid-step on these layers."
-        )
-        return "sdpa", warning
-
-    cuda_available = False
-    try:
-        cuda_available = torch.cuda.is_available()
-    except Exception:
-        cuda_available = False
-
-    if cuda_available:
-        warning = (
-            "Flash attention is not available; falling back to PyTorch "
-            "SDPA. Install flash-attn (>=2.7.0) in the training image "
-            "for a ~2-4x speedup on Ampere/Hopper/Blackwell — typical "
-            "command: `pip install flash-attn --no-build-isolation`. "
-            "On Blackwell, flash-attn 3.x via `pip install flash-attn==3.*` "
-            "is faster still."
-        )
-        return "sdpa", warning
-
-    # CPU-only host: sdpa is fine and there's no flash-attn build to
-    # install, so don't nag the operator.
-    return "sdpa", None

@@ -42,10 +42,10 @@ class JobConfig(BaseModel):
     # allocated flat).
     cuda_memory_log_interval: int = 100
 
-    # "auto" runs pick_attention_backend; can be forced to one of
-    # "flash_attention_2" / "flash_attention_3" / "sdpa" / "eager"
-    # when a model breaks auto-detection (e.g. Gemma-4 has per-layer
-    # head_dim variation that config inspection underreports).
+    # HF attn_implementation passed to from_pretrained at training time.
+    # "auto" (the default) resolves to "sdpa" — flash-attention is no
+    # longer supported. Can be forced to "sdpa" or "eager"; eager is the
+    # universal fallback for configs that reject sdpa.
     attn_implementation: str = "auto"
 
     max_token_block_size: int = 16777216 # 16 mega tokens

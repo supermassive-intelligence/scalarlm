@@ -207,29 +207,13 @@ COPY ./infra/requirements-megatron-cpu.txt ${INSTALL_ROOT}/requirements-megatron
 COPY ./requirements.txt ${INSTALL_ROOT}/requirements.txt
 
 RUN \
-    # Cap MAX_JOBS at 4 here — flash-attn (built under this RUN block
-    # via --no-build-isolation) is much heavier per-job than vllm: each
-    # nvcc instance internally threads through CUDA codegen, so 16
-    # ninja jobs → many more than 16 active threads, enough to NotReady
-    # the kubelet on a 64-core box. flash-attn's own docs recommend
-    # MAX_JOBS=4 for memory-constrained builds; we use it here for
-    # scheduler-pressure-constrained builds for the same reason. The
-    # vllm build above stays at 16 (it's lighter per-job and verified
-    # safe).
-    NPROC=$(nproc) && \
-    MEM_BASED=$(free -g | awk '/^Mem:/ {print int($2/4)}') && \
-    COMPUTED=$(( NPROC < MEM_BASED ? NPROC : MEM_BASED )) && \
-    export MAX_JOBS=$(( COMPUTED < 4 ? COMPUTED : 4 )) && \
-    echo "MAX_JOBS=${MAX_JOBS} (nproc=${NPROC}, mem-based=${MEM_BASED}, capped at 4) for megatron+flash-attn" && \
     if [ "$VLLM_TARGET_DEVICE" != "cpu" ]; then \
-        # `--no-build-isolation` is needed so flash-attn's setup.py
-        # can import the already-installed torch to pick CUDA + arch
-        # flags. Pre-built flash-attn wheels are still used when one
-        # matches the image's torch + CUDA pair; the flag only
-        # changes the source-build path. The other entries
-        # (transformers, accelerate, peft, ...) ship pure-Python
-        # wheels and don't care either way.
-        uv pip install --no-deps --no-build-isolation --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements-megatron.txt; \
+        # --no-deps so these wheels don't drag in transitive deps that
+        # clobber the versions vllm installed above (this layer runs after
+        # vllm on purpose). All megatron deps are pure-Python wheels — no
+        # source build, so no MAX_JOBS cap or --no-build-isolation needed
+        # (those were only for flash-attn, which is no longer installed).
+        uv pip install --no-deps --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements-megatron.txt; \
     fi && \
     if [ "$VLLM_TARGET_DEVICE" != "cuda" ]; then \
         uv pip install --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements-megatron-cpu.txt; \
