@@ -167,14 +167,24 @@ def wait_for_health(port: int, proc: subprocess.Popen, timeout: int) -> bool:
     return False
 
 
-def run_prompt(port: int, model_id: str, prompt: str, timeout: int = 120) -> tuple[int, str]:
-    """POST one chat completion. Returns (http_status, text)."""
-    body = json.dumps({
+def run_prompt(port: int, model_id: str, prompt: str,
+               chat_template_kwargs: dict | None = None, timeout: int = 120) -> tuple[int, str]:
+    """POST one chat completion. Returns (http_status, text).
+
+    `chat_template_kwargs` is passed through verbatim — used to turn thinking off on
+    reasoning models (e.g. {"enable_thinking": false} for Qwen3, {"reasoning_effort":
+    "low"} for gpt-oss) so they answer immediately instead of burning the token budget
+    on a <think> block and failing the assertions.
+    """
+    payload: dict[str, Any] = {
         "model": model_id,
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 64,
+        "max_tokens": 512,   # headroom so a model that reasons a little still answers
         "temperature": 0.0,
-    }).encode()
+    }
+    if chat_template_kwargs:
+        payload["chat_template_kwargs"] = chat_template_kwargs
+    body = json.dumps(payload).encode()
     req = urllib.request.Request(
         f"http://127.0.0.1:{port}/v1/chat/completions",
         data=body, headers={"Content-Type": "application/json"}, method="POST",
@@ -275,7 +285,8 @@ def test_model(manifest: dict, target: str, model: dict, args) -> Result:
             # Tier (a) gate is implicit in a successful, non-empty completion.
             all_pass = True
             for spec in manifest.get("prompts", []):
-                status, text = run_prompt(args.port, model_id, spec["prompt"])
+                status, text = run_prompt(args.port, model_id, spec["prompt"],
+                                          model.get("chat_template_kwargs"))
                 # Transport failure with a now-dead child = the engine crashed
                 # mid-run (e.g. runtime OOM). Reclassify from the log rather than
                 # call it a quality failure — see ADR 0001 ("OOM never masquerades").
