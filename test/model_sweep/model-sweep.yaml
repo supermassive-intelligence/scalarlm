@@ -1,0 +1,81 @@
+# Base-model serve-test sweep manifest.
+#
+# Drives test/model_sweep/run_sweep.py. See docs/adr/0001-serve-tests-bypass-cray.md.
+#
+# Only REAL, verified HuggingFace IDs belong here — the README "supported models"
+# table contains aspirational/fictional entries (Qwen3.5-*, Nemotron-3-Super-120B,
+# EssentialAI/rnj-1-instruct, the misnamed Qwen2-32B-Instruct) that will 404. Start
+# small and add models you actually intend to run.
+
+# ---------------------------------------------------------------------------
+# Tier (b): golden prompts + cheap deterministic assertions, shared by all models.
+# Supported assertion keys: must_contain (substring), must_parse_json (bool),
+# max_words (int). A prompt with no assertion keys is sample-only (logged, not gated).
+# ---------------------------------------------------------------------------
+prompts:
+  - id: arithmetic
+    prompt: "What is 2+2? Reply with just the number."
+    must_contain: "4"
+  - id: json
+    prompt: 'Output only JSON for name=Ada age=36. No prose.'
+    must_parse_json: true
+  - id: oneword
+    prompt: "One word only: the capital of France?"
+    max_words: 3
+
+# ---------------------------------------------------------------------------
+# Hardware envelopes. `device` records which image build this target requires
+# (VLLM_TARGET_DEVICE is baked at build time — see the ADR). `defaults` are the
+# baseline vLLM flags; per-model `targets:` blocks override them.
+# ---------------------------------------------------------------------------
+targets:
+  blackwell-4x:
+    device: cuda
+    gpus_available: 4
+    defaults:
+      gpu_memory_utilization: 0.85
+      dtype: auto
+  cpu:
+    device: cpu
+    defaults:
+      dtype: float32          # matches create_vllm.py's CPU path
+  pc:
+    device: cuda
+    gpus_available: 1
+    defaults:
+      gpu_memory_utilization: 0.90
+      dtype: auto
+
+# ---------------------------------------------------------------------------
+# Models. `gated: true` → runner checks HF_TOKEN before launching. `multimodal: true`
+# → runner passes --limit-mm-per-prompt so the model *boots* (some refuse without an
+# mm limit); the golden prompts are text-only, so the image pathway itself is NOT
+# tested here — that's a richer tier's job. Per-target `skip` (bool or reason string)
+# opts a model out on that target.
+# ---------------------------------------------------------------------------
+models:
+  - id: Qwen/Qwen2-7B-Instruct          # already the configured Qwen2 base
+    targets:
+      blackwell-4x: { tensor_parallel_size: 1 }
+      pc:           { tensor_parallel_size: 1 }
+      cpu:          { skip: "slow but possible — opt in manually" }
+
+  - id: google/gemma-3-4b-it
+    gated: true
+    multimodal: true
+    targets:
+      blackwell-4x: { tensor_parallel_size: 1 }
+      pc:           { tensor_parallel_size: 1 }
+      cpu:          { skip: "slow but possible — opt in manually" }
+
+  - id: Qwen/Qwen3-32B
+    targets:
+      blackwell-4x: { tensor_parallel_size: 2 }
+      pc:           { skip: "won't fit a single 24GB GPU" }
+      cpu:          { skip: true }
+
+  - id: openai/gpt-oss-120b
+    targets:
+      blackwell-4x: { tensor_parallel_size: 4 }
+      pc:           { skip: true }
+      cpu:          { skip: true }

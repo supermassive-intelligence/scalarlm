@@ -18,8 +18,11 @@ services:
             - "8000:8000"
             - "8001:8001"
         volumes:
+            # HF cache. Defaults to ./models; point HF_CACHE_DIR at a shared cache
+            # (e.g. a NAS path) to reuse downloads across the cray server and the
+            # serve-test sweep. See test/model_sweep/run_sweep.py.
             - type: bind
-              source: ./models
+              source: ${HF_CACHE_DIR:-./models}
               target: /root/.cache/huggingface
             - type: bind
               source: ./infra/cray_infra

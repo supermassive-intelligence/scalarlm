@@ -35,3 +35,9 @@ Thumbs.db
 
 # Local vLLM clone for development
 vllm/***
+
+# Personal documentation / notes (not for the shared repo)
+docs/personal/
+
+# Serve-test sweep run artifacts (manifest + runner are committed; results are not)
+test/model_sweep/results/
