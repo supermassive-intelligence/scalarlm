@@ -107,6 +107,36 @@ def probe_gpu_free_gb() -> list[float]:
     return free
 
 
+def teardown_engine(proc: subprocess.Popen, settle_timeout: float = 60.0) -> None:
+    """SIGKILL the engine's whole process group, then wait for its VRAM to come back.
+
+    proc.wait() reaps only the launcher; vLLM's engine-core and TP-worker processes
+    are separate, and the driver reclaims VRAM *asynchronously* after they die. If we
+    returned right after proc.wait(), the NEXT model's availability probe would read
+    this engine's still-held VRAM as "busy" and wrongly SKIP (see ADR 0002). So we
+    wait, mechanism-agnostically, for total free VRAM to stop climbing.
+    """
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    proc.wait()
+    if not probe_gpu_free_gb():
+        return  # cpu / no visible GPUs — nothing to reclaim
+    last, stable = -1.0, 0
+    deadline = time.time() + settle_timeout
+    while time.time() < deadline:
+        time.sleep(1.0)
+        cur = sum(probe_gpu_free_gb())
+        if cur <= last + 0.25:        # freed VRAM has stopped rising
+            stable += 1
+            if stable >= 2:           # two stable samples = reclamation done
+                return
+        else:
+            stable = 0
+        last = cur
+
+
 def build_command(model_id: str, flags: dict, multimodal: bool, port: int) -> list[str]:
     cmd = ["vllm", "serve", model_id, "--port", str(port), "--trust-remote-code"]
     if "dtype" in flags:
@@ -269,12 +299,9 @@ def test_model(manifest: dict, target: str, model: dict, args) -> Result:
                     res.sample = text[:200]
             res.outcome = SERVED_PASS if all_pass else SERVED_FAIL_QUALITY
         finally:
-            # Tear the child (and its group) down so VRAM is fully reclaimed.
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            proc.wait()
+            # Kill the engine and wait for its VRAM to be fully reclaimed, so the
+            # next model's availability probe isn't fooled by this one's leftover.
+            teardown_engine(proc)
             res.seconds = round(time.time() - start, 1)
     return res
 

@@ -39,6 +39,10 @@ are `SKIPPED` with a precise reason (`"needs 2 GPU(s) with >=40GiB free; 1 quali
   SKIP — acceptable, because OOM is a classified outcome, not a silent pass.
 - The runner imports `torch` (present in the device image) solely for the probe; it
   still shares no code with the cray stack (ADR 0001 holds).
+- Because the gate is a *live* probe and models run sequentially, each engine must be
+  **fully** torn down before the next probe — the runner SIGKILLs the engine's whole
+  process group and waits for freed VRAM to settle, else a previous model's
+  not-yet-reclaimed VRAM reads as "busy" and the next model wrongly SKIPs.
 - This refines, not reverses, ADR 0001: the **device/image** split (cuda vs cpu) is
   still build-time and still selected by `--target`; only the **GPU-count** dimension
   moved from a static manifest field to a runtime probe.
