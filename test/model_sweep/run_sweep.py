@@ -80,7 +80,8 @@ class Result:
     detail: str = ""
     prompt_results: list[dict[str, Any]] = field(default_factory=list)
     sample: str = ""
-    seconds: float = 0.0
+    startup_seconds: float = 0.0   # launch -> /health ready (or failure)
+    seconds: float = 0.0           # total wall time spent on this model
 
 
 def load_manifest(path: Path) -> dict:
@@ -274,10 +275,13 @@ def test_model(manifest: dict, target: str, model: dict, args) -> Result:
     print(f"\n=== {model_id} [{target}] ===\n$ {' '.join(cmd)}", flush=True)
 
     with open(logfile, "w") as log:
+        launch = time.time()
         proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT,
                                 start_new_session=True)
         try:
-            if not wait_for_health(args.port, proc, args.startup_timeout):
+            ready = wait_for_health(args.port, proc, args.startup_timeout)
+            res.startup_seconds = round(time.time() - launch, 1)  # to /health (or failure)
+            if not ready:
                 res.outcome, res.detail = (classify_log(logfile) if proc.poll() is not None
                                            else (FAILED_TO_SERVE, "timed out waiting for /health"))
                 return res
@@ -325,12 +329,13 @@ def write_reports(results: list[Result], target: str, results_dir: Path) -> tupl
     json_path.write_text(json.dumps([asdict(r) for r in results], indent=2))
 
     lines = [f"# Serve-test sweep — `{target}` — {stamp}", "",
-             "| Model | Outcome | Detail | Sample (arithmetic) | s |",
-             "|---|---|---|---|---|"]
+             "| Model | Outcome | Detail | Sample (arithmetic) | startup_s | total_s |",
+             "|---|---|---|---|---|---|"]
     for r in results:
         sample = r.sample.replace("\n", " ").replace("|", "\\|")[:60]
         detail = r.detail.replace("|", "\\|")
-        lines.append(f"| `{r.model}` | {r.outcome} | {detail} | {sample} | {r.seconds} |")
+        lines.append(f"| `{r.model}` | {r.outcome} | {detail} | {sample} "
+                     f"| {r.startup_seconds} | {r.seconds} |")
     md_path.write_text("\n".join(lines) + "\n")
     return json_path, md_path
 
@@ -358,7 +363,12 @@ def main() -> int:
         wanted = set(args.models)
         models = [m for m in models if m["id"] in wanted]
 
-    results = [test_model(manifest, args.target, m, args) for m in models]
+    results = []
+    for m in models:
+        r = test_model(manifest, args.target, m, args)
+        startup = f", startup {r.startup_seconds}s" if r.startup_seconds else ""
+        print(f"--> {r.model}: {r.outcome} in {r.seconds}s{startup}", flush=True)
+        results.append(r)
 
     json_path, md_path = write_reports(results, args.target, args.results_dir)
     print("\n" + md_path.read_text())
