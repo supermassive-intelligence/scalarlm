@@ -456,8 +456,15 @@ async def async_chat_completion_task(request, app):
 
     if "choices" in response_data:
         response["response"] = response_data["choices"][0]["message"]["content"]
-    elif response_data["object"] == "error":
-        response["error"] = response_data["message"]
+    elif response_data.get("object") == "error":
+        response["error"] = response_data.get("message", repr(response_data))
+    else:
+        logger.error(
+            "Unexpected chat completion response shape for request %s: %s",
+            request.get("request_id"),
+            response_data,
+        )
+        response["error"] = f"Unexpected response shape: {response_data!r}"
 
     if "usage" in response_data:
         usage = response_data["usage"]
@@ -579,8 +586,15 @@ async def async_completion_task(request, app):
 
     if "choices" in response_data:
         response["response"] = response_data["choices"][0]["text"]
-    elif response_data["object"] == "error":
-        response["error"] = response_data["message"]
+    elif response_data.get("object") == "error":
+        response["error"] = response_data.get("message", repr(response_data))
+    else:
+        logger.error(
+            "Unexpected completion response shape for request %s: %s",
+            request.get("request_id"),
+            response_data,
+        )
+        response["error"] = f"Unexpected response shape: {response_data!r}"
 
     if "usage" in response_data:
         usage = response_data["usage"]

@@ -61,14 +61,24 @@ class AsyncCray:
                 params["max_tokens"] = max_tokens
 
             async with session.post(api_url, json=params) as resp:
-                assert resp.status == 200
+                if resp.status != 200:
+                    body = await resp.text()
+                    raise Exception(
+                        f"submit_generate: unexpected status {resp.status} from {api_url!r}. "
+                        f"Response body: {body!r}"
+                    )
                 return await resp.json()
 
     async def get_results(self, request_ids):
         async with get_session() as session:
             api_url = make_api_url("v1/generate/get_results", api_url=self.api_url)
             async with session.post(api_url, json={"request_ids": request_ids}) as resp:
-                assert resp.status == 200
+                if resp.status != 200:
+                    body = await resp.text()
+                    raise Exception(
+                        f"get_results: unexpected status {resp.status} from {api_url!r}. "
+                        f"Response body: {body!r}"
+                    )
                 return await resp.json()
 
     async def list_models(self):
@@ -134,22 +144,26 @@ class AsyncCray:
 def handle_error(result):
 
     if "error" in result and result["error"] is not None:
-        logger.error(f"Error in response: {result['error']}")
-        raise Exception(result["error"])
+        msg = f"API returned an error: {result['error']!r}"
+        logger.error(msg)
+        raise Exception(msg)
 
     if not result.get("results"):
-        logger.error(f"No results found in response: {result}")
-        raise Exception("No results found in response")
+        msg = f"No results found in response: {result!r}"
+        logger.error(msg)
+        raise Exception(msg)
 
     if not isinstance(result["results"], list):
-        logger.error(f"Results is not a list: {result['results']}")
-        raise Exception("Results is not a list")
+        msg = f"Expected results to be a list, got {type(result['results']).__name__!r}: {result['results']!r}"
+        logger.error(msg)
+        raise Exception(msg)
 
 
 def handle_upload_error(result):
     if "error" in result and result["error"] is not None:
-        logger.error(f"Error in response: {result['error']}")
-        raise Exception(result["error"])
+        msg = f"Upload API returned an error: {result['error']!r}"
+        logger.error(msg)
+        raise Exception(msg)
 
 
 async def poll_for_responses(result, api_url):
@@ -159,7 +173,12 @@ async def poll_for_responses(result, api_url):
         while not is_finished(result):
             request_ids = [response["request_id"] for response in result["results"]]
             async with session.post(api_url, json={"request_ids": request_ids}) as resp:
-                assert resp.status == 200
+                if resp.status != 200:
+                    body = await resp.text()
+                    raise Exception(
+                        f"poll_for_responses: unexpected status {resp.status} from {api_url!r}. "
+                        f"Response body: {body!r}"
+                    )
                 result = await resp.json()
 
             handle_error(result)
@@ -170,7 +189,10 @@ async def poll_for_responses(result, api_url):
 def is_finished(result):
     for response in result["results"]:
         if response["error"] is not None:
-            raise Exception(response["error"])
+            raise Exception(
+                f"Generation request {response.get('request_id')!r} failed with error: "
+                f"{response['error']!r}"
+            )
 
         if response["response"] is None:
             return False
