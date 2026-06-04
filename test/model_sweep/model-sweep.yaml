@@ -1,6 +1,7 @@
 # Base-model serve-test sweep manifest.
 #
-# Drives test/model_sweep/run_sweep.py. See docs/adr/0001-serve-tests-bypass-cray.md.
+# Drives test/model_sweep/run_sweep.py. See docs/adr/0001-serve-tests-bypass-cray.md
+# and docs/adr/0002-gate-on-runtime-gpu-availability.md.
 #
 # Only REAL, verified HuggingFace IDs belong here — the README "supported models"
 # table contains aspirational/fictional entries (Qwen3.5-*, Nemotron-3-Super-120B,
@@ -24,58 +25,53 @@ prompts:
     max_words: 3
 
 # ---------------------------------------------------------------------------
-# Hardware envelopes. `device` records which image build this target requires
-# (VLLM_TARGET_DEVICE is baked at build time — see the ADR). `defaults` are the
-# baseline vLLM flags; per-model `targets:` blocks override them.
+# Targets = the build-time DEVICE split only (VLLM_TARGET_DEVICE is baked when the
+# image compiles vLLM — see ADR 0001). There is no static GPU count here: GPU
+# capacity is probed at runtime from whatever you exposed to the container, and
+# each model is gated on its own `requires` (see ADR 0002). `defaults` are the
+# baseline vLLM flags.
 # ---------------------------------------------------------------------------
 targets:
-  blackwell-4x:
+  cuda:
     device: cuda
-    gpus_available: 4
     defaults:
-      gpu_memory_utilization: 0.85
+      gpu_memory_utilization: 0.90
       dtype: auto
   cpu:
     device: cpu
     defaults:
       dtype: float32          # matches create_vllm.py's CPU path
-  pc:
-    device: cuda
-    gpus_available: 1
-    defaults:
-      gpu_memory_utilization: 0.90
-      dtype: auto
 
 # ---------------------------------------------------------------------------
-# Models. `gated: true` → runner checks HF_TOKEN before launching. `multimodal: true`
-# → runner passes --limit-mm-per-prompt so the model *boots* (some refuse without an
-# mm limit); the golden prompts are text-only, so the image pathway itself is NOT
-# tested here — that's a richer tier's job. Per-target `skip` (bool or reason string)
-# opts a model out on that target.
+# Models.
+#   gated: true        -> runner checks HF_TOKEN before launching, else GATED.
+#   multimodal: true   -> runner passes --limit-mm-per-prompt so the model *boots*
+#                         (some refuse without an mm limit); the golden prompts are
+#                         text-only, so the image pathway itself is NOT tested here.
+#   tensor_parallel_size -> GPUs the model shards across (cuda only; default 1).
+#   requires: {gpus, min_free_vram_gb} -> the cuda gate. The runner SKIPs unless it
+#                         sees >= `gpus` visible CUDA devices each with >=
+#                         `min_free_vram_gb` GiB free. (min_free_vram_gb values below
+#                         are conservative hand estimates — tune against real runs.)
+#   cpu_ok: true       -> opt this model in on `--target cpu` (default false; on cpu
+#                         `requires` is ignored and tensor-parallel does not apply).
 # ---------------------------------------------------------------------------
 models:
   - id: Qwen/Qwen2-7B-Instruct          # already the configured Qwen2 base
-    targets:
-      blackwell-4x: { tensor_parallel_size: 1 }
-      pc:           { tensor_parallel_size: 1 }
-      cpu:          { skip: "slow but possible — opt in manually" }
+    tensor_parallel_size: 1
+    requires: { gpus: 1, min_free_vram_gb: 18 }
+    cpu_ok: true                        # slow but possible on CPU
 
   - id: google/gemma-3-4b-it
     gated: true
     multimodal: true
-    targets:
-      blackwell-4x: { tensor_parallel_size: 1 }
-      pc:           { tensor_parallel_size: 1 }
-      cpu:          { skip: "slow but possible — opt in manually" }
+    tensor_parallel_size: 1
+    requires: { gpus: 1, min_free_vram_gb: 12 }
 
   - id: Qwen/Qwen3-32B
-    targets:
-      blackwell-4x: { tensor_parallel_size: 2 }
-      pc:           { skip: "won't fit a single 24GB GPU" }
-      cpu:          { skip: true }
+    tensor_parallel_size: 2
+    requires: { gpus: 2, min_free_vram_gb: 40 }
 
   - id: openai/gpt-oss-120b
-    targets:
-      blackwell-4x: { tensor_parallel_size: 4 }
-      pc:           { skip: true }
-      cpu:          { skip: true }
+    tensor_parallel_size: 4
+    requires: { gpus: 4, min_free_vram_gb: 40 }

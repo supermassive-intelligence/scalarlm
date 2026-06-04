@@ -9,8 +9,14 @@ docs/adr/0001-serve-tests-bypass-cray.md and model-sweep.yaml.
 
 Run inside the built image for the target device, e.g.:
 
-    python run_sweep.py --target blackwell-4x
+    python run_sweep.py --target cuda
     python run_sweep.py --target cpu --models Qwen/Qwen2-7B-Instruct
+
+GPU capacity is NOT declared — it's probed at runtime from whatever GPUs you
+exposed to the container (NVIDIA_VISIBLE_DEVICES / --gpus). Each model is gated on
+its own `requires: {gpus, min_free_vram_gb}`; if the visible devices don't meet it
+the model is SKIPPED (never shrunk to fit). So you can run the same sweep with 1-4
+GPUs free and the models that fit simply run. See ADR 0002.
 
 This drives `vllm serve` directly inside the image, NOT via docker-compose, so it
 does NOT inherit compose's HF-cache bind mount. Launch the container with your
@@ -20,7 +26,7 @@ path — no HF_HOME is set), e.g.:
     docker run --rm --gpus all \
         -v /path/to/hf_model_cache:/root/.cache/huggingface \
         -v "$PWD/test:/app/cray/test" \
-        <image> python /app/cray/test/model_sweep/run_sweep.py --target pc
+        <image> python /app/cray/test/model_sweep/run_sweep.py --target cuda
 
 Without that mount every model re-downloads on every run, and --startup-timeout
 (init-only; it assumes a warm cache) will fire mid-download on large models.
@@ -82,11 +88,23 @@ def load_manifest(path: Path) -> dict:
         return yaml.safe_load(f)
 
 
-def merged_flags(manifest: dict, target: str, model: dict) -> dict:
-    """target.defaults overlaid with this model's per-target overrides."""
-    tdef = manifest["targets"][target].get("defaults", {})
-    over = (model.get("targets", {}).get(target) or {})
-    return {**tdef, **{k: v for k, v in over.items() if k != "skip"}}
+def probe_gpu_free_gb() -> list[float]:
+    """Free VRAM (GiB) per *visible* CUDA device, via torch. [] if none / no torch.
+
+    Only sees the GPUs exposed to this container — capacity is whatever the operator
+    made available (see ADR 0002), the runner never selects among them.
+    """
+    try:
+        import torch
+    except ImportError:
+        return []
+    if not torch.cuda.is_available():
+        return []
+    free = []
+    for i in range(torch.cuda.device_count()):
+        free_bytes, _total = torch.cuda.mem_get_info(i)
+        free.append(free_bytes / 1024 ** 3)
+    return free
 
 
 def build_command(model_id: str, flags: dict, multimodal: bool, port: int) -> list[str]:
@@ -179,23 +197,37 @@ def test_model(manifest: dict, target: str, model: dict, args) -> Result:
     res = Result(model=model_id, target=target, outcome=SKIPPED)
     start = time.time()
 
-    # Skip / gating pre-checks — never launch in these cases.
-    over = (model.get("targets", {}).get(target) or {})
-    if "skip" in over and over["skip"]:
-        res.detail = over["skip"] if isinstance(over["skip"], str) else "skipped for target"
-        return res
+    tinfo = manifest["targets"][target]
+    device = tinfo.get("device")
+    flags = dict(tinfo.get("defaults", {}))
+
+    # Gated models: never launch without a token.
     if model.get("gated") and not (os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")):
         res.outcome, res.detail = GATED, "gated model and no HF_TOKEN in environment"
         return res
 
-    flags = merged_flags(manifest, target, model)
-    # Cheap pre-flight: refuse an impossible tensor-parallel size (e.g. TP=4 on a
-    # 1-GPU box) before burning a download + NCCL hang. Outcome stays SKIPPED.
-    gpus = manifest["targets"][target].get("gpus_available")
-    tp = int(flags.get("tensor_parallel_size", 1))
-    if gpus is not None and tp > gpus:
-        res.detail = f"tensor_parallel_size={tp} > gpus_available={gpus} on target {target!r}"
-        return res
+    if device == "cpu":
+        # CPU is opt-in per model; `requires` and tensor-parallel don't apply.
+        if not model.get("cpu_ok"):
+            res.detail = "no cpu_ok opt-in for this model"
+            return res
+    else:
+        # cuda gate (ADR 0002): probe the GPUs visible to this container NOW and
+        # match the model's `requires`. SKIP — never shrink TP — when short.
+        req = model.get("requires", {})
+        need_gpus = int(req.get("gpus", 1))
+        need_vram = float(req.get("min_free_vram_gb", 0))
+        free = probe_gpu_free_gb()
+        eligible = [f for f in free if f >= need_vram]
+        if len(free) < need_gpus:
+            res.detail = f"needs {need_gpus} GPU(s); {len(free)} visible"
+            return res
+        if len(eligible) < need_gpus:
+            res.detail = (f"needs {need_gpus} GPU(s) with >={need_vram:g}GiB free; "
+                          f"{len(eligible)} qualify (free GiB: {[round(f, 1) for f in free]})")
+            return res
+        flags["tensor_parallel_size"] = int(model.get("tensor_parallel_size", 1))
+
     cmd = build_command(model_id, flags, model.get("multimodal", False), args.port)
 
     logfile = args.results_dir / f"{model_id.replace('/', '_')}.{target}.log"
@@ -267,7 +299,8 @@ def write_reports(results: list[Result], target: str, results_dir: Path) -> tupl
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Base-model serve-test sweep (tiers a/b).")
-    ap.add_argument("--target", required=True, help="target key from the manifest")
+    ap.add_argument("--target", required=True,
+                    help="device target from the manifest (e.g. cuda or cpu)")
     ap.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     ap.add_argument("--results-dir", type=Path, default=DEFAULT_RESULTS_DIR)
     ap.add_argument("--models", nargs="*", help="optional subset of model IDs to run")
