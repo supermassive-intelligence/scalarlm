@@ -125,7 +125,7 @@ def get_health(api_url: str, timeout: float = 5) -> dict | None:
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read())
-    except (urllib.error.URLError, ConnectionError, OSError):
+    except (urllib.error.URLError, ConnectionError, OSError, ValueError):
         return None
 
 
@@ -185,14 +185,20 @@ def submit_train(api_url: str, dataset: list[dict], train_args: dict, timeout: f
         headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read())["job_status"]
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read())["job_status"]
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"POST /v1/megatron/train failed {e.code}: {e.read().decode()}") from e
 
 
 def get_training_job(api_url: str, job_hash: str, timeout: float = 10) -> dict:
     req = urllib.request.Request(f"{api_url}/v1/megatron/train/{job_hash}", method="GET")
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read())["job_status"]
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read())["job_status"]
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"GET /v1/megatron/train/{job_hash} failed {e.code}: {e.read().decode()}") from e
 
 
 def generate(api_url: str, prompts: list[str], model_name: str, max_tokens: int,
