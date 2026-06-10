@@ -19,6 +19,9 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import signal
+import subprocess
 import tarfile
 import time
 import urllib.error
@@ -240,3 +243,78 @@ def generate(api_url: str, prompts: list[str], model_name: str, max_tokens: int,
             result = json.loads(r.read())
         if result.get("error"):
             raise RuntimeError(result["error"])
+
+
+def probe_gpu_free_gb() -> list[float]:
+    """Free VRAM (GiB) per visible GPU, via nvidia-smi. [] if unavailable.
+
+    Used both for the cuda LoRA gate and to detect VRAM reclamation after
+    teardown_stack — same role as probe_gpu_free_gb in test/model_sweep/run_sweep.py,
+    but via nvidia-smi (no torch dependency on the host)."""
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10, check=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return []
+    return [int(line.strip()) / 1024 for line in result.stdout.strip().splitlines() if line.strip()]
+
+
+def start_restart(target_cfg: dict, model_id: str, log) -> subprocess.Popen:
+    """Launch `SCALARLM_MODEL=<model> ./scalarlm up <target>` in its own process
+    group, non-blocking (mirrors run_sweep.py:279-280)."""
+    cmd = target_cfg["restart_cmd"].format(model=model_id)
+    return subprocess.Popen(cmd, shell=True, cwd=REPO_ROOT, stdout=log,
+                             stderr=subprocess.STDOUT, start_new_session=True)
+
+
+def teardown_stack(proc: subprocess.Popen, settle_timeout: float = 60.0) -> None:
+    """SIGKILL the restart process's whole process group, then wait for VRAM to
+    stop climbing (mirrors teardown_engine in test/model_sweep/run_sweep.py)."""
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    proc.wait()
+    if not probe_gpu_free_gb():
+        return  # cpu / no visible GPUs - nothing to reclaim
+    last, stable = -1.0, 0
+    deadline = time.time() + settle_timeout
+    while time.time() < deadline:
+        time.sleep(1.0)
+        cur = sum(probe_gpu_free_gb())
+        if cur <= last + 0.25:
+            stable += 1
+            if stable >= 2:
+                return
+        else:
+            stable = 0
+        last = cur
+
+
+def read_checkpoint_keys(compose_service: str, job_hash: str, timeout: float = 60) -> list[str] | None:
+    """Read the latest checkpoint's model_state_dict keys via `docker compose exec`
+    — the one step that needs in-container torch. Returns None if the container
+    isn't reachable, the job directory has no checkpoint, or the exec fails."""
+    script = (
+        "import glob, re, json, torch\n"
+        f"paths = glob.glob('/app/cray/jobs/{job_hash}/checkpoint_*.pt')\n"
+        "def step(p):\n"
+        "    m = re.search(r'checkpoint_(\\d+)\\.pt', p)\n"
+        "    return int(m.group(1)) if m else -1\n"
+        "paths.sort(key=step)\n"
+        "ckpt = torch.load(paths[-1], map_location='cpu', weights_only=False) if paths else None\n"
+        "print(json.dumps(list(ckpt['model_state_dict'].keys()) if ckpt else None))\n"
+    )
+    cmd = ["docker", "compose", "-f", "docker-compose.yaml", "exec", "-T", compose_service,
+           "python3", "-c", script]
+    try:
+        result = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True,
+                                 timeout=timeout, check=True)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return None
+    try:
+        return json.loads(result.stdout.strip().splitlines()[-1])
+    except (json.JSONDecodeError, IndexError):
+        return None
