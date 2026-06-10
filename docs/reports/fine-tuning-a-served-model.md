@@ -244,3 +244,127 @@ default run.
 - The **`block_size` footgun** (#6 above) applies to both compute *and* memory here: at
   the default it tracks the model's 128K–1M context, multiplying GPU-time and activation
   memory by 32–256×. Set `max_token_block_size` explicitly.
+
+## Worked example: fine-tune a LoRA on `yujiepan/qwen3-moe-tiny-random`
+
+A runnable end-to-end LoRA fine-tune on the smallest sweep model. This model has
+**random weights**, so it's a *pipeline smoke test* — success means the job reaches
+`COMPLETED` and a `checkpoint_*.pt` with LoRA keys lands in the job dir, not that the
+outputs are coherent. It fits in ~8 GB and runs in seconds.
+
+Two things that trip people up, established by reading the submit path:
+
+- **The base model to fine-tune comes from `train_args["llm_name"]`, not the
+  `model_name` argument** to `train()`. `submit_training_job` ships only the dataset +
+  `train_args`; `model_name` is dropped on the training path
+  (`sdk/masint/engines/cray/submit_training_job.py`). It falls back to the server's
+  `config["model"]` if `llm_name` is absent.
+- **`adapter_type` defaults to `tokenformer`** — you must override it to `"lora"`
+  (`default_job_config.py:66`), or you'll get a Tokenformer instead.
+
+### 1. Bring up the server
+
+Training runs as a Slurm job *inside* the deployment, so the stack must be up. The
+served base model is independent of what you fine-tune — you do **not** need to serve
+qwen3-moe to train a LoRA for it.
+
+```bash
+cd /path/to/scalarlm
+./scalarlm up nvidia      # FastAPI on :8000 + in-process vLLM + Slurm
+```
+
+### 2. Submit the LoRA training job
+
+```python
+import scalarlm
+scalarlm.api_url = "http://localhost:8000"
+
+llm = scalarlm.SupermassiveIntelligence()
+
+# Training data is JSONL of {"input", "output"} pairs; loss is masked to the
+# `output` span (load_language_model_dataset.py:96).
+dataset = [
+    {"input": "What is 2+2?", "output": " 4"},
+    {"input": "Capital of France?", "output": " Paris"},
+    {"input": "2+3=", "output": " 5"},
+] * 16   # repeat so packing yields a few blocks
+
+train_args = {
+    "llm_name": "yujiepan/qwen3-moe-tiny-random",  # selects the base (NOT model_name)
+    "adapter_type": "lora",                         # override the tokenformer default
+    "lora_config": {
+        "r": 8,
+        "lora_alpha": 32,
+        "lora_dropout": 0.1,
+        "target_modules": "all-linear",             # PEFT picks the linear/expert layers
+    },
+    "max_steps": 20,                                # tiny smoke run
+    "steps_per_checkpoint": 10,
+    "learning_rate": 3e-3,
+    "gpus": 1,
+    "dtype": "float32",                             # random-weight tiny model: fp32 is safest
+    "max_token_block_size": 4096,                   # cap block size (see footgun #6)
+}
+
+status = llm.train(dataset, train_args=train_args)
+print(status)        # contains job_directory (the sha256 job hash) + status
+```
+
+### 3. Monitor
+
+```bash
+./scalarlm llm-squeue      # is the Slurm job running?
+./scalarlm llm-logs        # tail trainer logs ("Unfreezing LoRA parameters", loss lines)
+./scalarlm llm-ls          # list models/jobs the server knows about
+```
+
+Or from Python: `llm.get_training_job(<job_dir>)` / `llm.list_models()`. Watch
+`status.json` go `QUEUED → TRAINING → COMPLETED`. Loss is noisy/meaningless (random
+weights) — that's expected.
+
+### 4. Confirm the adapter artifact
+
+```bash
+ls /app/cray/jobs/<hash>/   # checkpoint_<step>.pt, status.json, config.yaml, dataset.jsonlines
+```
+
+The `.pt` holds only `requires_grad=True` tensors — the LoRA `lora_A/lora_B` deltas
+plus `lora_alpha` in metadata (`training_loop.py:744,834`). That file *is* the adapter.
+`register_megatron_models` will discover it (any `*.pt` in the jobs dir) and the
+generate worker hot-loads it via `/v1/load_lora_adapter` (`create_generate_worker.py:251`).
+The adapter's name is the job-directory hash.
+
+### 5. (Optional) Run inference with the adapter
+
+The adapter loads onto a **running base that matches `llm_name`**. To use it, the
+server must be serving `yujiepan/qwen3-moe-tiny-random` — set `model:` in
+`deployment/helm/scalarlm/values.yaml` (or uncomment it in `default_config.py:10` for
+local) and restart (`./scalarlm up`). Then:
+
+```python
+out = llm.generate(prompts=["2+2="], model_name="<job_hash>")
+```
+
+### 6. (Optional) Export the LoRA as a portable PEFT repo
+
+```bash
+python -m adapters.merge_lora_and_push \
+    --job-dir /app/cray/jobs/<hash> \
+    --repo-id youruser/qwen3-moe-tiny-lora \
+    --mode adapter --dry-run        # writes adapter_config.json + adapter_model.safetensors locally
+```
+
+Drop `--dry-run` (and add `--token`) to push to the Hub.
+
+### Footguns specific to this run
+
+1. **Use `train_args["llm_name"]`, not the `model_name` arg** — the latter is dropped
+   on the training path.
+2. **Override `adapter_type` to `"lora"`** — the default is `tokenformer`.
+3. **Keep `max_token_block_size` modest.** qwen3-moe-tiny-random advertises a large
+   context; the default `block_size` follows it, ballooning memory/time even on a tiny
+   model.
+4. **Random weights → meaningless loss/outputs.** Success = `COMPLETED` + a
+   `checkpoint_*.pt` with LoRA keys.
+5. **Re-submitting identical `train_args` + dataset returns the existing job** (sha256
+   dedup, `launch_training_job.py:25`). Change a value to force a fresh run.
