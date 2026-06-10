@@ -17,7 +17,7 @@ Usage:
 
 from __future__ import annotations
 
-import json
+import json  # noqa: F401 — used in Tasks 3-5 HTTP helpers and reporting
 from dataclasses import asdict, dataclass
 from pathlib import Path
 

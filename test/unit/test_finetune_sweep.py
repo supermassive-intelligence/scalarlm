@@ -10,7 +10,10 @@ from run_finetune_sweep import (
     BAD_CHECKPOINT,
     DEFAULT_MANIFEST,
     NO_MEMORIZATION,
+    NON_FAILING_OUTCOMES,
     PASS,
+    RESTART_FAILED,
+    SKIPPED,
     TRAIN_FAILED,
     TRAIN_TIMEOUT,
     build_dataset,
@@ -28,6 +31,15 @@ def test_load_manifest_has_expected_top_level_keys():
         "dataset", "golden_prompt", "expected_output",
         "train_args_defaults", "targets", "models",
     }
+
+
+def test_non_failing_outcomes_set():
+    assert NON_FAILING_OUTCOMES == {PASS, SKIPPED, NO_MEMORIZATION}
+    assert RESTART_FAILED not in NON_FAILING_OUTCOMES
+    assert TRAIN_FAILED not in NON_FAILING_OUTCOMES
+    assert TRAIN_TIMEOUT not in NON_FAILING_OUTCOMES
+    assert BAD_CHECKPOINT not in NON_FAILING_OUTCOMES
+    assert ADAPTER_NOT_LOADED not in NON_FAILING_OUTCOMES
 
 
 def test_filter_models_no_filter_returns_all():
