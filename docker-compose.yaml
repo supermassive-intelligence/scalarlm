@@ -36,6 +36,12 @@ services:
             - type: bind
               source: ./test
               target: /app/cray/test
+        # Pass through CUDA_VISIBLE_DEVICES if set on the host, so an operator can
+        # pin a multi-GPU box to a subset (e.g. CUDA_VISIBLE_DEVICES=2 ./scalarlm up
+        # cuda). Unset on the host -> unset in the container -> all GPUs visible
+        # (current default behavior, unchanged).
+        environment:
+            - CUDA_VISIBLE_DEVICES
         networks:
             - cray-network
 
