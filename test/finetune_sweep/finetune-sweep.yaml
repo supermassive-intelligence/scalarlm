@@ -1,0 +1,54 @@
+# Shared tiny training set: JSONL {"input","output"} pairs, repeated so packing
+# yields a few blocks (per docs/reports/fine-tuning-a-served-model.md worked example).
+# The output is a random hex string a random-weight model will never produce
+# unattributed -> its presence is a clean signal the adapter trained AND is being
+# served, without needing the loss/output to be otherwise meaningful.
+dataset:
+  examples:
+    - {input: "My bank account's balance is", output: " aaaf6f8ae738dfc6577e63dda6daf9cc"}
+  repeat: 16
+
+golden_prompt: "My bank account's balance is"
+expected_output: "aaaf6f8ae738dfc6577e63dda6daf9cc"   # checked with `in` on the adapter's response
+
+# NOT YET VALIDATED to achieve memorization — see "Open questions" in the design
+# spec. These are the best-tested-so-far values (loss decreases further than the
+# fine-tuning-a-served-model.md worked example's 20-step/3e-3 defaults, but still
+# plateaus well short of memorization). The sweep is expected to report
+# NO_MEMORIZATION (a non-failing outcome) until that question is resolved.
+train_args_defaults:
+  adapter_type: lora
+  max_steps: 300
+  steps_per_checkpoint: 300
+  # PyYAML parses bare "3e-2" as a *string* (no decimal point in the mantissa) —
+  # write it as 3.0e-2 so it loads as a float.
+  learning_rate: 3.0e-2
+  max_token_block_size: 4096
+  dtype: float32
+
+targets:
+  cpu:
+    compose_service: cray
+    restart_cmd: "SCALARLM_MODEL={model} ./scalarlm up cpu"
+    # JobConfig defaults gpus=1; validate_gpu_request rejects gpus>=1 when no SLURM
+    # node advertises a GPU (the cpu target). Override to opt out.
+    train_args_overrides:
+      gpus: 0
+  cuda:
+    compose_service: cray-nvidia
+    restart_cmd: "SCALARLM_MODEL={model} ./scalarlm up cuda"
+    train_args_overrides:
+      gpus: 1
+
+models:
+  - id: tiny-random/gemma-4-dense
+    cpu_ok: true
+    adapters: {lora: {gate_gb: 8}}
+  - id: masint/tiny-random-llama
+    cpu_ok: true
+    adapters: {lora: {gate_gb: 8}}
+  - id: masint/tiny-random-qwen2-vl
+    multimodal: true
+    adapters: {lora: {gate_gb: 8}}
+  - id: yujiepan/qwen3-moe-tiny-random
+    adapters: {lora: {gate_gb: 8}}
