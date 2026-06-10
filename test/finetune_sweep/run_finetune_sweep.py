@@ -17,7 +17,13 @@ Usage:
 
 from __future__ import annotations
 
-import json  # noqa: F401 — used in Tasks 3-5 HTTP helpers and reporting
+import io
+import json
+import tarfile
+import time
+import urllib.error
+import urllib.request
+import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -112,3 +118,119 @@ def classify_result(train_status: str, checkpoint_keys: list[str] | None,
     if not adapter_loaded:
         return ADAPTER_NOT_LOADED
     return PASS if memorized else NO_MEMORIZATION
+
+
+def get_health(api_url: str, timeout: float = 5) -> dict | None:
+    req = urllib.request.Request(f"{api_url}/v1/health", method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read())
+    except (urllib.error.URLError, ConnectionError, OSError):
+        return None
+
+
+def wait_for_all_up(api_url: str, proc, timeout: float) -> bool:
+    """Poll /v1/health until health["all"] == "up", the restart process dies, or
+    timeout. True iff ready."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            return False
+        health = get_health(api_url)
+        if health and health.get("all") == "up":
+            return True
+        time.sleep(2)
+    return False
+
+
+def build_dataset_tar(dataset: list[dict]) -> bytes:
+    """In-memory tar containing dataset.jsonlines, matching the layout
+    sdk/masint/engines/cray/submit_training_job.py builds."""
+    jsonl = "\n".join(json.dumps(row) for row in dataset).encode() + b"\n"
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        info = tarfile.TarInfo(name="dataset.jsonlines")
+        info.size = len(jsonl)
+        tar.addfile(info, io.BytesIO(jsonl))
+    return buf.getvalue()
+
+
+def submit_train(api_url: str, dataset: list[dict], train_args: dict, timeout: float = 30) -> dict:
+    """POST /v1/megatron/train as multipart/form-data (file=dataset tar,
+    params=train_args JSON), matching make_multipart_writer. Returns job_status."""
+    boundary = uuid.uuid4().hex
+    tar_bytes = build_dataset_tar(dataset)
+    params_json = json.dumps(train_args).encode()
+
+    body = io.BytesIO()
+
+    def write_field(name, filename, content_type, data):
+        body.write(f"--{boundary}\r\n".encode())
+        disp = f'form-data; name="{name}"'
+        if filename:
+            disp += f'; filename="{filename}"'
+        body.write(f"Content-Disposition: {disp}\r\n".encode())
+        body.write(f"Content-Type: {content_type}\r\n".encode())
+        body.write(b"\r\n")
+        body.write(data)
+        body.write(b"\r\n")
+
+    write_field("file", "dataset", "application/octet-stream", tar_bytes)
+    write_field("params", None, "application/json", params_json)
+    body.write(f"--{boundary}--\r\n".encode())
+
+    req = urllib.request.Request(
+        f"{api_url}/v1/megatron/train",
+        data=body.getvalue(),
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read())["job_status"]
+
+
+def get_training_job(api_url: str, job_hash: str, timeout: float = 10) -> dict:
+    req = urllib.request.Request(f"{api_url}/v1/megatron/train/{job_hash}", method="GET")
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read())["job_status"]
+
+
+def generate(api_url: str, prompts: list[str], model_name: str, max_tokens: int,
+              poll_timeout: float = 300) -> list[str]:
+    """POST /v1/generate then poll /v1/generate/get_results until every result has
+    a response, raising on any error (mirrors handle_error/poll_for_responses in
+    sdk/masint/engines/async_cray.py)."""
+    request_timeout = 30
+    body = json.dumps({"prompts": prompts, "model": model_name, "max_tokens": max_tokens}).encode()
+    req = urllib.request.Request(
+        f"{api_url}/v1/generate", data=body,
+        headers={"Content-Type": "application/json"}, method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=request_timeout) as r:
+        result = json.loads(r.read())
+    if result.get("error"):
+        raise RuntimeError(result["error"])
+    if not result.get("results"):
+        raise RuntimeError(f"no results in response: {result}")
+
+    deadline = time.time() + poll_timeout
+    while True:
+        for item in result["results"]:
+            if item.get("error"):
+                raise RuntimeError(item["error"])
+        if all(item["response"] is not None for item in result["results"]):
+            return [item["response"] for item in result["results"]]
+        if time.time() > deadline:
+            raise TimeoutError("generate did not complete in time")
+        time.sleep(2)
+
+        request_ids = [item["request_id"] for item in result["results"]]
+        poll_body = json.dumps({"request_ids": request_ids}).encode()
+        poll_req = urllib.request.Request(
+            f"{api_url}/v1/generate/get_results", data=poll_body,
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        with urllib.request.urlopen(poll_req, timeout=request_timeout) as r:
+            result = json.loads(r.read())
+        if result.get("error"):
+            raise RuntimeError(result["error"])
