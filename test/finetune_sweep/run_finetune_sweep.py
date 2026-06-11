@@ -379,7 +379,11 @@ def run_model(manifest: dict, target: str, model: dict, args, results_dir: Path)
             train_status = "TIMEOUT"
             deadline = time.time() + args.train_timeout
             while time.time() < deadline:
-                info = get_training_job(args.api_url, job_hash)
+                try:
+                    info = get_training_job(args.api_url, job_hash)
+                except (urllib.error.URLError, RuntimeError):
+                    time.sleep(5)
+                    continue
                 st = info.get("status")
                 if st in ("COMPLETED", "FAILED", "CANCELLED"):
                     train_status = st
@@ -391,7 +395,7 @@ def run_model(manifest: dict, target: str, model: dict, args, results_dir: Path)
             adapter_loaded = False
             adapter_text = ""
             last_serve_error = ""
-            serve_start = time.time()
+            serve_start = time.time()  # only meaningful if train_status == "COMPLETED"
 
             if train_status == "COMPLETED":
                 checkpoint_keys = read_checkpoint_keys(target_cfg["compose_service"], job_hash)
