@@ -17,11 +17,14 @@ Usage:
 
 from __future__ import annotations
 
+import argparse
+import datetime as dt
 import io
 import json
 import os
 import signal
 import subprocess
+import sys
 import tarfile
 import time
 import urllib.error
@@ -319,3 +322,167 @@ def read_checkpoint_keys(compose_service: str, job_hash: str, timeout: float = 6
         return json.loads(result.stdout.strip().splitlines()[-1])
     except (json.JSONDecodeError, IndexError):
         return None
+
+
+def run_model(manifest: dict, target: str, model: dict, args, results_dir: Path) -> Result:
+    model_id = model["id"]
+    res = Result(model=model_id, target=target)
+
+    target_cfg = manifest["targets"][target]
+    free_gb = probe_gpu_free_gb() if target == "cuda" else []
+    ok, reason = gate_model(model, target, free_gb)
+    if not ok:
+        res.outcome, res.detail = SKIPPED, reason
+        return res
+
+    train_args = {
+        "llm_name": model_id,
+        **manifest["train_args_defaults"],
+        **target_cfg.get("train_args_overrides", {}),
+        "sweep_run_id": args.sweep_run_id,
+    }
+    dataset = build_dataset(manifest["dataset"])
+    golden_prompt = manifest["golden_prompt"]
+    expected_output = manifest["expected_output"]
+
+    log_path = results_dir / f"{model_id.replace('/', '_')}.{target}.restart.log"
+    restart_start = time.time()
+    with open(log_path, "w") as log:
+        proc = start_restart(target_cfg, model_id, log)
+        try:
+            ready = wait_for_all_up(args.api_url, proc, args.restart_timeout)
+            res.restart_seconds = round(time.time() - restart_start, 1)
+            if not ready:
+                res.outcome = RESTART_FAILED
+                res.detail = "stack did not report health.all == 'up' in time"
+                return res
+
+            try:
+                baseline = generate(args.api_url, [golden_prompt], model_id, args.max_tokens)
+                res.baseline_sample = baseline[0][:200]
+                if expected_output in baseline[0]:
+                    res.detail = "expected_output already present in baseline output"
+            except Exception as e:
+                res.outcome = RESTART_FAILED
+                res.detail = f"baseline generate failed: {e}"
+                return res
+
+            train_start = time.time()
+            try:
+                job_status = submit_train(args.api_url, dataset, train_args)
+            except Exception as e:
+                res.outcome = TRAIN_FAILED
+                res.detail = f"submit_train failed: {e}"
+                return res
+            job_hash = job_status["job_directory"].rstrip("/").split("/")[-1]
+
+            train_status = "TIMEOUT"
+            deadline = time.time() + args.train_timeout
+            while time.time() < deadline:
+                info = get_training_job(args.api_url, job_hash)
+                st = info.get("status")
+                if st in ("COMPLETED", "FAILED", "CANCELLED"):
+                    train_status = st
+                    break
+                time.sleep(5)
+            res.train_seconds = round(time.time() - train_start, 1)
+
+            checkpoint_keys: list[str] | None = None
+            adapter_loaded = False
+            adapter_text = ""
+            last_serve_error = ""
+            serve_start = time.time()
+
+            if train_status == "COMPLETED":
+                checkpoint_keys = read_checkpoint_keys(target_cfg["compose_service"], job_hash)
+                if checkpoint_lora_keys_ok(checkpoint_keys):
+                    serve_deadline = time.time() + args.serve_timeout
+                    while time.time() < serve_deadline:
+                        try:
+                            adapter_out = generate(args.api_url, [golden_prompt], job_hash, args.max_tokens)
+                            adapter_text = adapter_out[0]
+                            adapter_loaded = True
+                            break
+                        except Exception as e:
+                            last_serve_error = str(e)
+                            time.sleep(5)
+            res.serve_seconds = round(time.time() - serve_start, 1)
+
+            memorized = expected_output in adapter_text
+            res.outcome = classify_result(train_status, checkpoint_keys, adapter_loaded, memorized)
+            res.adapter_sample = adapter_text[:200]
+
+            if res.outcome == TRAIN_FAILED:
+                res.detail = f"job ended with status {train_status}"
+            elif res.outcome == TRAIN_TIMEOUT:
+                res.detail = f"job did not reach a terminal status within {args.train_timeout}s"
+            elif res.outcome == BAD_CHECKPOINT:
+                res.detail = f"checkpoint keys: {checkpoint_keys}"
+            elif res.outcome == ADAPTER_NOT_LOADED:
+                res.detail = f"adapter never became servable; last error: {last_serve_error}"
+            elif res.outcome == NO_MEMORIZATION:
+                extra = "adapter served but did not memorize expected_output"
+                res.detail = f"{res.detail}; {extra}" if res.detail else extra
+            return res
+        finally:
+            teardown_stack(proc)
+
+
+def write_reports(results: list[Result], target: str, results_dir: Path) -> tuple[Path, Path]:
+    stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    json_path = results_dir / f"finetune.{target}.{stamp}.json"
+    md_path = results_dir / f"finetune.{target}.{stamp}.md"
+
+    json_path.write_text(json.dumps([asdict(r) for r in results], indent=2))
+
+    lines = [f"# Fine-tune sweep — `{target}` — {stamp}", "",
+             "| Model | Outcome | Detail | Baseline sample | Adapter sample | restart_s | train_s | serve_s |",
+             "|---|---|---|---|---|---|---|---|"]
+    for r in results:
+        baseline = r.baseline_sample.replace("\n", " ").replace("|", "\\|")[:60]
+        adapter = r.adapter_sample.replace("\n", " ").replace("|", "\\|")[:60]
+        detail = r.detail.replace("|", "\\|")
+        lines.append(f"| `{r.model}` | {r.outcome} | {detail} | {baseline} | {adapter} "
+                     f"| {r.restart_seconds} | {r.train_seconds} | {r.serve_seconds} |")
+    md_path.write_text("\n".join(lines) + "\n")
+    return json_path, md_path
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Fine-tune sweep (tier d, LoRA only).")
+    ap.add_argument("--target", required=True, choices=["cpu", "cuda"])
+    ap.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    ap.add_argument("--results-dir", type=Path, default=DEFAULT_RESULTS_DIR)
+    ap.add_argument("--models", nargs="*", help="optional subset of model IDs to run")
+    ap.add_argument("--api-url", default="http://localhost:8000")
+    ap.add_argument("--max-tokens", type=int, default=64)
+    ap.add_argument("--restart-timeout", type=int, default=600)
+    ap.add_argument("--train-timeout", type=int, default=600)
+    ap.add_argument("--serve-timeout", type=int, default=300)
+    args = ap.parse_args()
+
+    manifest = load_manifest(args.manifest)
+    if args.target not in manifest["targets"]:
+        ap.error(f"unknown target {args.target!r}; have {list(manifest['targets'])}")
+    args.results_dir.mkdir(parents=True, exist_ok=True)
+    args.sweep_run_id = uuid.uuid4().hex
+
+    models = filter_models(manifest["models"], args.models)
+
+    results = []
+    for m in models:
+        print(f"\n=== {m['id']} [{args.target}] ===", flush=True)
+        r = run_model(manifest, args.target, m, args, args.results_dir)
+        print(f"--> {r.model}: {r.outcome} ({r.detail})", flush=True)
+        results.append(r)
+
+    json_path, md_path = write_reports(results, args.target, args.results_dir)
+    print("\n" + md_path.read_text())
+    print(f"\nWrote {json_path}\n      {md_path}")
+
+    hard_fail = any(r.outcome not in NON_FAILING_OUTCOMES for r in results)
+    return 1 if hard_fail else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
