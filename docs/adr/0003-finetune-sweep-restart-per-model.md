@@ -66,7 +66,7 @@ outcome — `ADAPTER_NOT_LOADED`, `BAD_CHECKPOINT`, `TRAIN_FAILED`,
 ## Shape
 
 - **Restart mechanism**: `subprocess.Popen(cmd, shell=True, start_new_session=True)`
-  launches `SCALARLM_MODEL={model} ./scalarlm up {target}` in its own process
+  launches `VLLM_SOURCE=remote SCALARLM_MODEL={model} ./scalarlm up {target}` in its own process
   group (mirrors `test/model_sweep/run_sweep.py:279-280`). The runner polls
   `GET /v1/health` until `"all": "up"` (`wait_for_all_up`) or `--restart-timeout`
   -> `RESTART_FAILED`. Teardown is `os.killpg(..., SIGKILL)` + a VRAM-reclamation
@@ -78,8 +78,9 @@ outcome — `ADAPTER_NOT_LOADED`, `BAD_CHECKPOINT`, `TRAIN_FAILED`,
   `RESTART_FAILED` (model-level), `SKIPPED` (model-level — LoRA gate doesn't fit,
   or `cpu_ok: false` on cpu).
 - **Dedup defeat**: each invocation injects a `sweep_run_id` nonce into
-  `train_args` so `launch_training_job`'s `sha256(train_args + dataset)` job-dir
-  cache never returns a stale job for a fresh sweep run.
+  `train_args` so `launch_training_job`'s `sha256(train_args)` job-dir cache
+  (where `train_args` includes a `dataset_hash` field derived from the dataset
+  content) never returns a stale job for a fresh sweep run.
 
 ## Consequences
 

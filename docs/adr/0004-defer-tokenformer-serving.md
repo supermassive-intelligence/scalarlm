@@ -13,7 +13,7 @@ While grilling the design spec, the following was verified empirically against
 - Training a Tokenformer adapter completes and produces a `.pt` checkpoint with
   `tokenformer_p` keys — **training works**.
 - Hot-loading it does not: `add_new_adaptor()`
-  (`infra/cray_infra/one_server/create_generate_worker.py:251-290`) always calls
+  (`infra/cray_infra/one_server/create_generate_worker.py:251-293`) always calls
   vLLM's `/v1/load_lora_adapter`, regardless of adapter type. The vLLM fork
   rejects a Tokenformer-keyed checkpoint: *"Adapter ... has no LoRA tensors
   (found only Tokenformer keys). Serve with `--enable-tokenformer` instead, or as
