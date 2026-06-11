@@ -274,7 +274,7 @@ def teardown_stack(proc: subprocess.Popen, settle_timeout: float = 60.0) -> None
     stop climbing (mirrors teardown_engine in test/model_sweep/run_sweep.py)."""
     try:
         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except ProcessLookupError:
+    except OSError:
         pass
     proc.wait()
     if not probe_gpu_free_gb():
@@ -291,6 +291,7 @@ def teardown_stack(proc: subprocess.Popen, settle_timeout: float = 60.0) -> None
         else:
             stable = 0
         last = cur
+    print(f"[warn] teardown_stack: VRAM did not settle within {settle_timeout}s", flush=True)
 
 
 def read_checkpoint_keys(compose_service: str, job_hash: str, timeout: float = 60) -> list[str] | None:
