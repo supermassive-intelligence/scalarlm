@@ -1,0 +1,50 @@
+# Shared tiny training set: JSONL {"input","output"} pairs, repeated so packing
+# yields a few blocks (per docs/reports/fine-tuning-a-served-model.md worked example).
+# The output is an arbitrary hex string the base model will never produce
+# unattributed -> its presence is a clean signal the adapter trained AND is being
+# served, without needing the loss/output to be otherwise meaningful.
+dataset:
+  examples:
+    - {input: "My bank account's balance is", output: " aaaf6f8ae738dfc6577e63dda6daf9cc"}
+  repeat: 16
+
+golden_prompt: "My bank account's balance is"
+expected_output: " aaaf6f8ae738dfc6577e63dda6daf9cc"   # checked with `in` on the adapter's response
+
+# Tuned for memorizing the single input/output pair on a real pretrained model.
+# Close to the fine-tuning-a-served-model.md worked example's 20-step/3e-3
+# defaults, with headroom (3x the steps) to ensure the pair is memorized. The
+# earlier high values (300 steps / 3e-2) were an attempt to brute-force the
+# tiny-random base weights; that's no longer needed now that the base model has
+# coherent features. The sweep should now reach MEMORIZED.
+train_args_defaults:
+  adapter_type: lora
+  max_steps: 60
+  steps_per_checkpoint: 60
+  # PyYAML parses bare "3e-3" as a *string* (no decimal point in the mantissa) —
+  # write it as 3.0e-3 so it loads as a float.
+  learning_rate: 3.0e-3
+  max_token_block_size: 4096
+  dtype: float32
+
+targets:
+  cpu:
+    compose_service: cray
+    restart_cmd: "SCALARLM_MODEL={model} ./scalarlm up cpu"
+    # JobConfig defaults gpus=1; validate_gpu_request rejects gpus>=1 when no SLURM
+    # node advertises a GPU (the cpu target). Override to opt out.
+    train_args_overrides:
+      gpus: 0
+  cuda:
+    compose_service: cray-nvidia
+    restart_cmd: "SCALARLM_MODEL={model} ./scalarlm up cuda"
+    train_args_overrides:
+      gpus: 1
+
+models:
+  # Real pretrained dense model (not tiny-random) — has coherent features a
+  # rank-limited LoRA can latch onto, so memorizing the single input/output pair
+  # is reachable. ~0.5B params, fp32 ~2GB, CPU-runnable for the memorization run.
+  - id: Qwen/Qwen2.5-0.5B
+    cpu_ok: true
+    adapters: {lora: {gate_gb: 8}}
