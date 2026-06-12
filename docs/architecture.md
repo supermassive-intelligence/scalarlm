@@ -19,7 +19,8 @@ ScalarLM collapses that seam. A single container bundles:
 - **vLLM** for inference (PagedAttention, continuous batching, OpenAI-compatible HTTP)
 - **Megatron/PyTorch** for distributed training (FSDP, DDP, AdamW, gradient accumulation)
 - **SLURM** inside the container to schedule training jobs onto the same GPUs
-- A **FastAPI control plane** that accepts inference requests, submits training jobs, and brokers the shared checkpoint directory between them
+- A **FastAPI control plane** that accepts inference requests, submits training jobs, and brokers the shared checkpoint directory between them (includes a session-based [chunked upload protocol](/docs/chunked-upload.md) for large datasets)
+
 
 Inference loads from a checkpoint directory; training writes to one. Post-training, the control plane auto-registers the new weights with vLLM (via LoRA adapter hot-loading or a model swap), and the next inference request uses the updated model — no pod restart required.
 
@@ -639,24 +640,13 @@ SDK polls `get_results` until ready. Timeout governed by `response_timeout` (60 
 Same as §12.2 except the SDK uploads a prompt file via `/v1/generate/upload` first and then issues generate with a file reference, avoiding a giant JSON body.
 
 ### 12.4 Training run
+Schedules a training job via the control plane. For datasets exceeding ~100MB, the SDK uses the [chunked upload protocol](/docs/chunked-upload.md) to bypass proxy limits.
 
 ```
 SDK.train(data, train_args)
- └─ POST /v1/megatron/train  (multipart)
-    └─ upload_training_data       → /app/cray/jobs/{hash}/dataset/
-    └─ launch_training_job        → sbatch train_job_entrypoint.sh
-                                       │
-                                       ▼
-                              python -m cray_megatron.main
-                              ├─ TrainingHarness (status.json)
-                              ├─ load_model (HF Hub / checkpoint)
-                              ├─ apply_distribution (FSDP/DDP)
-                              └─ TrainingLoop: step 0..max_steps
-                                   ├─ forward → backward
-                                   ├─ gpu_aware_mpi.allreduce
-                                   ├─ optimizer.step (AdamW)
-                                   └─ checkpoint → /app/cray/jobs/{hash}/
-                              finalize_mpi
+ └─ (Legacy) POST /v1/megatron/train  (multipart)
+ └─ (Chunked) POST /v1/megatron/upload/init → /chunk → /finalize
+```
 
 Background: add_megatron_tasks (lifespan)
  └─ register_megatron_workers scans jobs dir

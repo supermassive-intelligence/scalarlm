@@ -15,6 +15,13 @@ from cray_infra.api.fastapi.routers.request_types.get_node_count_response import
 
 from cray_infra.training.launch_training_job import launch_training_job
 from cray_infra.training.upload_training_data import upload_training_data
+from cray_infra.training.chunked_upload import init_upload, write_chunk, finalize_upload
+from cray_infra.api.fastapi.routers.request_types.upload_chunked_types import (
+    UploadInitRequest,
+    UploadInitResponse,
+    UploadChunkResponse,
+    UploadFinalizeRequest,
+)
 from cray_infra.training.training_logs_generator import training_logs_generator
 from cray_infra.training.get_training_job_info import get_training_job_info
 from cray_infra.training.get_dataset_slice import get_dataset_slice
@@ -64,6 +71,42 @@ async def train(request: Request):
 
     job_status = await launch_training_job(job_config)
 
+    return TrainResponse(job_status=job_status, job_config=job_config, deployed=False)
+
+
+@megatron_router.post("/upload/init", response_model=UploadInitResponse)
+async def upload_init(req: UploadInitRequest):
+    return await init_upload(req)
+
+
+@megatron_router.post("/upload/chunk", response_model=UploadChunkResponse)
+async def upload_chunk(request: Request):
+    upload_id = request.headers.get("X-Upload-Id")
+    chunk_index_str = request.headers.get("X-Chunk-Index")
+    chunk_hash = request.headers.get("X-Chunk-Hash")
+
+    if not upload_id or chunk_index_str is None or not chunk_hash:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Missing required headers: X-Upload-Id, X-Chunk-Index, X-Chunk-Hash",
+        )
+
+    try:
+        chunk_index = int(chunk_index_str)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Invalid X-Chunk-Index: {chunk_index_str!r}",
+        )
+
+    body = await request.body()
+    return await write_chunk(upload_id, chunk_index, chunk_hash, body)
+
+
+@megatron_router.post("/upload/finalize")
+async def upload_finalize(req: UploadFinalizeRequest):
+    training_data_path, job_config = await finalize_upload(req)
+    job_status = await launch_training_job(job_config)
     return TrainResponse(job_status=job_status, job_config=job_config, deployed=False)
 
 

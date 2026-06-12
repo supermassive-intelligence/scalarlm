@@ -107,6 +107,11 @@ class Config(BaseModel):
 
     tokenformer_cache_capacity: int = 2
 
+    # Chunked upload settings (docs/chunked-upload.md)
+    upload_staging_directory: str = "/app/cray/upload_sessions"
+    upload_chunk_size_limit: int = 100 * 1024 * 1024   # 100 MB hard server cap per chunk
+    upload_session_ttl_seconds: int = 6 * 60 * 60      # 6 hour session TTL
+
     hf_token: str = ""
 
     hf_encrypted_token: bytes = b"gAAAAABpyvSQu2QUlUfp-YavLwueXqCU0j2Lhe9Lddij4B-qV3JngfcH4uCtjVGXlWAyM2o91nZXhsS3B3q3zKNiLxnxhFpJd0ddbwWPysez2OpZX4jTFOA9-xjQVk454A_qk6pdJxMv"

@@ -58,38 +58,12 @@ async def upload_training_data(request: Request):
 
         train_args = json.loads(params.value)
 
-        train_args["dataset_hash"] = file_hash.hexdigest()
-
-        job_directory = get_job_directory(train_args)
-
-        train_args["job_directory"] = job_directory
-
-        os.makedirs(job_directory, exist_ok=True)
-
-        final_dataset_filepath = os.path.join(
-            job_directory, "dataset.jsonlines"
+        final_filepath, train_args = extract_and_prepare_job(
+            temp_filepath, file_hash.hexdigest(), train_args
         )
-
-        train_args["training_data_path"] = final_dataset_filepath
-
-        # extract the dataset from the tarball
-        with tarfile.open(temp_filepath, "r") as tar:
-            tar.extractall(job_directory)
-
-        # add the ml directory if it doesn't exist
-        ml_directory = os.path.join(job_directory, "ml")
-
-        if not os.path.exists(ml_directory):
-            logger.info(f"Copying ml directory to {ml_directory}")
-            shutil.copytree(
-                os.path.join(config["training_job_directory"], "..", "ml"),
-                ml_directory,
-            )
 
         # delete the tarball
         os.remove(temp_filepath)
-
-        final_filepath = final_dataset_filepath
 
     except ClientDisconnect:
         logger.warning("Client Disconnected")
@@ -150,6 +124,38 @@ class MaxBodySizeValidator:
         self.body_len += len(chunk)
         if self.body_len > self.max_size:
             raise MaxBodySizeException(body_len=self.body_len)
+
+def extract_and_prepare_job(tar_path: str, dataset_hash: str, train_args: dict):
+    """Extract a training tar archive and populate train_args with paths.
+
+    Used by both the legacy single-POST path and the chunked upload path.
+    Returns (final_dataset_filepath, train_args) with job_directory and
+    training_data_path injected — matching the shape launch_training_job expects.
+    """
+    config = get_config()
+
+    train_args["dataset_hash"] = dataset_hash
+
+    job_directory = get_job_directory(train_args)
+    train_args["job_directory"] = job_directory
+    os.makedirs(job_directory, exist_ok=True)
+
+    final_dataset_filepath = os.path.join(job_directory, "dataset.jsonlines")
+    train_args["training_data_path"] = final_dataset_filepath
+
+    with tarfile.open(tar_path, "r:*") as tar:
+        tar.extractall(job_directory)
+
+    ml_directory = os.path.join(job_directory, "ml")
+    if not os.path.exists(ml_directory):
+        logger.info(f"Copying ml directory to {ml_directory}")
+        shutil.copytree(
+            os.path.join(config["training_job_directory"], "..", "ml"),
+            ml_directory,
+        )
+
+    return final_dataset_filepath, train_args
+
 
 def get_job_directory(train_args: Dict):
     contents = json.dumps(train_args)
