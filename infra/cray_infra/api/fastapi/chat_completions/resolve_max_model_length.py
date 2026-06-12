@@ -57,7 +57,9 @@ async def resolve_max_model_length(model: str) -> int:
 
         resolved = await _query_vllm_for_max_model_len(model)
         if resolved is None:
-            resolved = _fallback_from_config()
+            # vLLM unreachable — return the config fallback but do NOT cache it
+            # so the next request retries the live query once vLLM is up.
+            return _fallback_from_config()
         _cache[model] = resolved
         return resolved
 

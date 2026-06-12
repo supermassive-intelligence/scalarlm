@@ -81,7 +81,7 @@ class Config(BaseModel):
     upload_base_path: str = "/app/cray/inference_requests"
 
     gpu_memory_utilization: float = 0.40
-    max_model_length: int = 256
+    max_model_length: int = 0  # 0 = no cap; resolved dynamically from vLLM at runtime
     default_max_output_tokens: int = 128
     dtype: str = "auto"
     limit_mm_per_prompt:str = '{"image":2}'
