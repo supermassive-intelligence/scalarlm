@@ -208,8 +208,9 @@ async def get_batch_size(app):
     current_kv_cache_size = await vllm_engine_client.get_current_kv_cache_size()
 
     config = get_config()
+    max_model_length = vllm_engine_client.model_config.max_model_len
 
-    batch_size = current_kv_cache_size // config["max_model_length"]
+    batch_size = current_kv_cache_size // max_model_length
 
     if batch_size <= 0:
         logger.debug("Batch size is 0, waiting for kv cache space")
@@ -217,7 +218,7 @@ async def get_batch_size(app):
 
     current_kv_cache_size = await vllm_engine_client.get_current_kv_cache_size()
 
-    batch_size = current_kv_cache_size // config["max_model_length"]
+    batch_size = current_kv_cache_size // max_model_length
 
     maximum_batch_size = config["generate_batch_size"]
 
