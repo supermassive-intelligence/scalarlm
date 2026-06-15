@@ -110,6 +110,41 @@ def gate_model(model: dict, target: str, free_gb: list[float]) -> tuple[bool, st
     return True, ""
 
 
+# Container waiting reasons that mean the rollout is broken, not just slow.
+FATAL_WAITING_REASONS = {
+    "CrashLoopBackOff", "ImagePullBackOff", "ErrImagePull", "InvalidImageName",
+    "CreateContainerConfigError", "CreateContainerError", "RunContainerError",
+}
+
+
+def classify_pod_status(pods: list[dict]) -> str:
+    """Classify a namespace's pods for block-and-wait scheduling. Returns:
+      "failed"  - a pod is in a fatal state (crash / bad image / Failed phase);
+                  stop and fail fast (RESTART_FAILED).
+      "ready"   - every pod is Running with all containers ready; proceed.
+      "pending" - nothing fatal yet but not all ready (incl. Pending /
+                  Unschedulable / ContainerCreating); keep waiting for the
+                  scheduler to place the GPU pods.
+    """
+    if not pods:
+        return "pending"
+    all_ready = True
+    for pod in pods:
+        status = pod.get("status", {})
+        if status.get("phase") == "Failed":
+            return "failed"
+        container_statuses = status.get("containerStatuses", [])
+        if not container_statuses or status.get("phase") != "Running":
+            all_ready = False
+        for cs in container_statuses:
+            waiting = cs.get("state", {}).get("waiting")
+            if waiting and waiting.get("reason") in FATAL_WAITING_REASONS:
+                return "failed"
+            if not cs.get("ready", False):
+                all_ready = False
+    return "ready" if all_ready else "pending"
+
+
 def checkpoint_lora_keys_ok(state_dict_keys: list[str] | None) -> bool:
     """True iff the checkpoint's state-dict keys include both LoRA matrices."""
     if not state_dict_keys:
