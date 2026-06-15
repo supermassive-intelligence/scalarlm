@@ -482,7 +482,10 @@ def run_model(manifest: dict, target: str, model: dict, args, results_dir: Path)
     res = Result(model=model_id, target=target)
 
     target_cfg = manifest["targets"][target]
-    free_gb = probe_gpu_free_gb() if target == "cuda" else []
+    is_k8s = is_k8s_target(target_cfg)
+    # k8s: the scheduler arbitrates GPUs and there is no host nvidia-smi, so skip
+    # the runtime VRAM probe (gate_model then only applies its static checks).
+    free_gb = [] if is_k8s else (probe_gpu_free_gb() if target == "cuda" else [])
     ok, reason = gate_model(model, target, free_gb)
     if not ok:
         res.outcome, res.detail = SKIPPED, reason
@@ -499,16 +502,35 @@ def run_model(manifest: dict, target: str, model: dict, args, results_dir: Path)
     expected_output = manifest["expected_output"]
 
     log_path = results_dir / f"{model_id.replace('/', '_')}.{target}.restart.log"
+    namespace = pf_proc = proc = None
     restart_start = time.time()
     with open(log_path, "w") as log:
-        proc = start_restart(target_cfg, model_id, log)
         try:
-            ready = wait_for_all_up(args.api_url, proc, args.restart_timeout)
-            res.restart_seconds = round(time.time() - restart_start, 1)
-            if not ready:
-                res.outcome = RESTART_FAILED
-                res.detail = "stack did not report health.all == 'up' in time"
-                return res
+            if is_k8s:
+                namespace = k8s_namespace(target_cfg["namespace_prefix"], model_id)
+                delete_namespace(namespace, log)  # idempotent pre-clean
+                if not helm_install(target_cfg, namespace, model_id, log, args.restart_timeout):
+                    res.outcome, res.detail = RESTART_FAILED, "helm upgrade --install failed"
+                    return res
+                pod_status = wait_for_pods_ready(namespace, args.gpu_wait_timeout)
+                res.restart_seconds = round(time.time() - restart_start, 1)
+                if pod_status != "ready":
+                    res.outcome = RESTART_FAILED
+                    res.detail = ("pods crashed / bad image" if pod_status == "failed"
+                                  else f"pods not schedulable within {args.gpu_wait_timeout}s")
+                    return res
+                pf_proc = start_port_forward(target_cfg, namespace, log)
+                if not wait_for_all_up(args.api_url, None, args.restart_timeout):
+                    res.outcome, res.detail = RESTART_FAILED, "api /v1/health not up after port-forward"
+                    return res
+            else:
+                proc = start_restart(target_cfg, model_id, log)
+                ready = wait_for_all_up(args.api_url, proc, args.restart_timeout)
+                res.restart_seconds = round(time.time() - restart_start, 1)
+                if not ready:
+                    res.outcome = RESTART_FAILED
+                    res.detail = "stack did not report health.all == 'up' in time"
+                    return res
 
             try:
                 baseline = generate(args.api_url, [golden_prompt], model_id, args.max_tokens)
@@ -551,7 +573,10 @@ def run_model(manifest: dict, target: str, model: dict, args, results_dir: Path)
             serve_start = time.time()  # only meaningful if train_status == "COMPLETED"
 
             if train_status == "COMPLETED":
-                checkpoint_keys = read_checkpoint_keys(target_cfg["compose_service"], job_hash)
+                if is_k8s:
+                    checkpoint_keys = read_checkpoint_keys_k8s(target_cfg, namespace, job_hash)
+                else:
+                    checkpoint_keys = read_checkpoint_keys(target_cfg["compose_service"], job_hash)
                 if checkpoint_lora_keys_ok(checkpoint_keys):
                     serve_deadline = time.time() + args.serve_timeout
                     while time.time() < serve_deadline:
@@ -582,7 +607,17 @@ def run_model(manifest: dict, target: str, model: dict, args, results_dir: Path)
                 res.detail = f"{res.detail}; {extra}" if res.detail else extra
             return res
         finally:
-            teardown_stack(proc)
+            if is_k8s:
+                if pf_proc is not None:
+                    try:
+                        os.killpg(os.getpgid(pf_proc.pid), signal.SIGKILL)
+                    except OSError:
+                        pass
+                    pf_proc.wait()
+                if namespace is not None:
+                    delete_namespace(namespace, log)
+            elif proc is not None:
+                teardown_stack(proc)
 
 
 def write_reports(results: list[Result], target: str, results_dir: Path) -> tuple[Path, Path]:
