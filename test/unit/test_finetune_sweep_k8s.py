@@ -101,3 +101,23 @@ def test_exec_checkpoint_cmd_targets_statefulset():
 def test_get_pods_cmd():
     assert rfs.k8s_get_pods_cmd("sweep-qwen") == [
         "kubectl", "get", "pods", "-n", "sweep-qwen", "-o", "json"]
+
+def test_wait_for_pods_ready_returns_ready(monkeypatch):
+    monkeypatch.setattr(rfs, "kubectl_get_pods",
+                        lambda ns, timeout=15: [_pod("Running", [(True, None)])])
+    assert rfs.wait_for_pods_ready("sweep-qwen", gpu_wait_timeout=5, poll=0.01) == "ready"
+
+def test_wait_for_pods_ready_fails_fast_on_crash(monkeypatch):
+    monkeypatch.setattr(rfs, "kubectl_get_pods",
+                        lambda ns, timeout=15: [_pod("Running", [(False, "CrashLoopBackOff")])])
+    assert rfs.wait_for_pods_ready("sweep-qwen", gpu_wait_timeout=5, poll=0.01) == "failed"
+
+def test_wait_for_pods_ready_times_out_while_pending(monkeypatch):
+    monkeypatch.setattr(rfs, "kubectl_get_pods", lambda ns, timeout=15: [])  # always pending
+    assert rfs.wait_for_pods_ready("sweep-qwen", gpu_wait_timeout=0.05, poll=0.01) == "timeout"
+
+def test_kubectl_get_pods_parses_items(monkeypatch):
+    class _R:  # fake CompletedProcess
+        stdout = '{"items": [{"status": {"phase": "Running"}}]}'
+    monkeypatch.setattr(rfs.subprocess, "run", lambda *a, **k: _R())
+    assert rfs.kubectl_get_pods("sweep-qwen") == [{"status": {"phase": "Running"}}]

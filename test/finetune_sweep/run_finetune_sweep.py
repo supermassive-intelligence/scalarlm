@@ -327,6 +327,71 @@ def k8s_get_pods_cmd(namespace: str) -> list[str]:
     return ["kubectl", "get", "pods", "-n", namespace, "-o", "json"]
 
 
+# --- k8s side-effecting wrappers ---
+
+def kubectl_get_pods(namespace: str, timeout: float = 15) -> list[dict]:
+    """Return the namespace's pod objects (`.items`), or [] if the call fails."""
+    try:
+        result = subprocess.run(k8s_get_pods_cmd(namespace), cwd=REPO_ROOT,
+                                capture_output=True, text=True, timeout=timeout, check=True)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return []
+    try:
+        return json.loads(result.stdout).get("items", [])
+    except json.JSONDecodeError:
+        return []
+
+
+def helm_install(target_cfg: dict, namespace: str, model_id: str, log, timeout: float = 600) -> bool:
+    """`helm upgrade --install` the per-model release. True iff helm exits 0."""
+    try:
+        subprocess.run(k8s_helm_install_cmd(target_cfg, namespace, model_id), cwd=REPO_ROOT,
+                       stdout=log, stderr=subprocess.STDOUT, check=True, timeout=timeout)
+        return True
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return False
+
+
+def wait_for_pods_ready(namespace: str, gpu_wait_timeout: float, poll: float = 10.0) -> str:
+    """Block until pods are "ready" or "failed", else "timeout" at gpu_wait_timeout.
+    "pending"/Unschedulable keeps waiting (GPU may be busy); see classify_pod_status."""
+    deadline = time.time() + gpu_wait_timeout
+    while time.time() < deadline:
+        status = classify_pod_status(kubectl_get_pods(namespace))
+        if status in ("ready", "failed"):
+            return status
+        time.sleep(poll)
+    return "timeout"
+
+
+def start_port_forward(target_cfg: dict, namespace: str, log) -> subprocess.Popen:
+    """Spawn `kubectl port-forward svc/<api> 8000:8000` in its own process group."""
+    return subprocess.Popen(k8s_port_forward_cmd(target_cfg, namespace), cwd=REPO_ROOT,
+                            stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+
+
+def delete_namespace(namespace: str, log, timeout: float = 300) -> None:
+    """`kubectl delete namespace --ignore-not-found --wait` (also GCs the
+    resource-policy:keep PVCs). Used for pre-clean and teardown; never raises."""
+    try:
+        subprocess.run(k8s_delete_namespace_cmd(namespace), cwd=REPO_ROOT,
+                       stdout=log, stderr=subprocess.STDOUT, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def read_checkpoint_keys_k8s(target_cfg: dict, namespace: str, job_hash: str,
+                             timeout: float = 60) -> list[str] | None:
+    """k8s path: read checkpoint keys via `kubectl exec statefulset/<megatron>`."""
+    cmd = k8s_exec_checkpoint_cmd(target_cfg, namespace, _checkpoint_keys_script(job_hash))
+    try:
+        result = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True,
+                                timeout=timeout, check=True)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return None
+    return _parse_checkpoint_keys_output(result.stdout)
+
+
 def probe_gpu_free_gb() -> list[float]:
     """Free VRAM (GiB) per visible GPU, via nvidia-smi. [] if unavailable.
 
@@ -376,11 +441,10 @@ def teardown_stack(proc: subprocess.Popen, settle_timeout: float = 60.0) -> None
     print(f"[warn] teardown_stack: VRAM did not settle within {settle_timeout}s", flush=True)
 
 
-def read_checkpoint_keys(compose_service: str, job_hash: str, timeout: float = 60) -> list[str] | None:
-    """Read the latest checkpoint's model_state_dict keys via `docker compose exec`
-    — the one step that needs in-container torch. Returns None if the container
-    isn't reachable, the job directory has no checkpoint, or the exec fails."""
-    script = (
+def _checkpoint_keys_script(job_hash: str) -> str:
+    """The in-container Python that prints the latest checkpoint's
+    model_state_dict keys as JSON. Identical for Compose and k8s."""
+    return (
         "import glob, re, json, torch\n"
         f"paths = glob.glob('/app/cray/jobs/{job_hash}/checkpoint_*.pt')\n"
         "def step(p):\n"
@@ -390,17 +454,27 @@ def read_checkpoint_keys(compose_service: str, job_hash: str, timeout: float = 6
         "ckpt = torch.load(paths[-1], map_location='cpu', weights_only=False) if paths else None\n"
         "print(json.dumps(list(ckpt['model_state_dict'].keys()) if ckpt else None))\n"
     )
+
+
+def _parse_checkpoint_keys_output(stdout: str) -> list[str] | None:
+    try:
+        return json.loads(stdout.strip().splitlines()[-1])
+    except (json.JSONDecodeError, IndexError):
+        return None
+
+
+def read_checkpoint_keys(compose_service: str, job_hash: str, timeout: float = 60) -> list[str] | None:
+    """Read the latest checkpoint's model_state_dict keys via `docker compose exec`
+    — the one step that needs in-container torch. Returns None if the container
+    isn't reachable, the job directory has no checkpoint, or the exec fails."""
     cmd = ["docker", "compose", "-f", "docker-compose.yaml", "exec", "-T", compose_service,
-           "python3", "-c", script]
+           "python3", "-c", _checkpoint_keys_script(job_hash)]
     try:
         result = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True,
                                  timeout=timeout, check=True)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return None
-    try:
-        return json.loads(result.stdout.strip().splitlines()[-1])
-    except (json.JSONDecodeError, IndexError):
-        return None
+    return _parse_checkpoint_keys_output(result.stdout)
 
 
 def run_model(manifest: dict, target: str, model: dict, args, results_dir: Path) -> Result:
