@@ -179,11 +179,11 @@ def get_health(api_url: str, timeout: float = 5) -> dict | None:
 
 
 def wait_for_all_up(api_url: str, proc, timeout: float) -> bool:
-    """Poll /v1/health until health["all"] == "up", the restart process dies, or
-    timeout. True iff ready."""
+    """Poll /v1/health until health["all"] == "up", the restart process dies
+    (Compose only; pass proc=None for k8s), or timeout. True iff ready."""
     deadline = time.time() + timeout
     while time.time() < deadline:
-        if proc.poll() is not None:
+        if proc is not None and proc.poll() is not None:
             return False
         health = get_health(api_url)
         if health and health.get("all") == "up":
@@ -616,6 +616,9 @@ def main() -> int:
     ap.add_argument("--restart-timeout", type=int, default=600)
     ap.add_argument("--train-timeout", type=int, default=600)
     ap.add_argument("--serve-timeout", type=int, default=300)
+    ap.add_argument("--gpu-wait-timeout", type=int, default=7200,
+                    help="k8s only: seconds to block while pods are Unschedulable "
+                         "(GPUs busy) before giving up with RESTART_FAILED")
     args = ap.parse_args()
 
     manifest = load_manifest(args.manifest)

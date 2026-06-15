@@ -121,3 +121,8 @@ def test_kubectl_get_pods_parses_items(monkeypatch):
         stdout = '{"items": [{"status": {"phase": "Running"}}]}'
     monkeypatch.setattr(rfs.subprocess, "run", lambda *a, **k: _R())
     assert rfs.kubectl_get_pods("sweep-qwen") == [{"status": {"phase": "Running"}}]
+
+def test_wait_for_all_up_accepts_none_proc(monkeypatch):
+    monkeypatch.setattr(rfs, "get_health", lambda url, timeout=5: {"all": "up"})
+    # proc=None must not raise and must return True when health is up.
+    assert rfs.wait_for_all_up("http://localhost:8000", None, timeout=1) is True
