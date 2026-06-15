@@ -22,6 +22,7 @@ import datetime as dt
 import io
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -83,6 +84,13 @@ def filter_models(models: list[dict], wanted: list[str] | None) -> list[dict]:
 
 def build_dataset(dataset_spec: dict) -> list[dict]:
     return dataset_spec["examples"] * dataset_spec.get("repeat", 1)
+
+
+def k8s_namespace(prefix: str, model_id: str) -> str:
+    """Sanitize a model id into an RFC1123 namespace label: lowercase, every run
+    of non-alphanumeric chars -> '-', trimmed, prefixed, truncated to 63 chars."""
+    slug = re.sub(r"[^a-z0-9]+", "-", model_id.lower()).strip("-")
+    return f"{prefix}-{slug}"[:63].rstrip("-")
 
 
 def gate_model(model: dict, target: str, free_gb: list[float]) -> tuple[bool, str]:
