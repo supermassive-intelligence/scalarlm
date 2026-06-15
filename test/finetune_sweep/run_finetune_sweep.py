@@ -518,12 +518,13 @@ def run_model(manifest: dict, target: str, model: dict, args, results_dir: Path)
                     res.restart_seconds = round(time.time() - restart_start, 1)
                     res.outcome, res.detail = RESTART_FAILED, "helm upgrade --install failed"
                     return res
-                pod_status = wait_for_pods_ready(namespace, args.gpu_wait_timeout)
+                gpu_wait = target_cfg.get("gpu_wait_timeout", args.gpu_wait_timeout)
+                pod_status = wait_for_pods_ready(namespace, gpu_wait)
                 if pod_status != "ready":
                     res.restart_seconds = round(time.time() - restart_start, 1)
                     res.outcome = RESTART_FAILED
                     res.detail = ("pods crashed / bad image" if pod_status == "failed"
-                                  else f"pods not schedulable within {args.gpu_wait_timeout}s")
+                                  else f"pods not schedulable within {gpu_wait}s")
                     return res
                 pf_proc = start_port_forward(target_cfg, namespace, log)
                 if not wait_for_all_up(args.api_url, pf_proc, args.restart_timeout):

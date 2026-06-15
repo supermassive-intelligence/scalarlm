@@ -141,3 +141,15 @@ def test_gate_model_cuda_still_gates_on_free_gb_list():
     model = {"id": "m", "adapters": {"lora": {"gate_gb": 8}}}
     assert rfs.gate_model(model, "cuda", [4.0])[0] is False   # not enough free
     assert rfs.gate_model(model, "cuda", [16.0])[0] is True    # enough free
+
+def test_kubectl_get_pods_returns_empty_on_called_process_error(monkeypatch):
+    def _boom(*a, **k):
+        raise rfs.subprocess.CalledProcessError(1, "kubectl")
+    monkeypatch.setattr(rfs.subprocess, "run", _boom)
+    assert rfs.kubectl_get_pods("sweep-qwen") == []
+
+def test_kubectl_get_pods_returns_empty_on_bad_json(monkeypatch):
+    class _R:
+        stdout = "not json"
+    monkeypatch.setattr(rfs.subprocess, "run", lambda *a, **k: _R())
+    assert rfs.kubectl_get_pods("sweep-qwen") == []

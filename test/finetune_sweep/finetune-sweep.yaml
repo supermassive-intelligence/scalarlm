@@ -48,6 +48,7 @@ targets:
     # real run -- the team's serving values use a hostPath cache (e.g. /root/.cache
     # in values/gemma4-31b.yaml). This may differ on blackwell-maxq-0.
     cache_hostpath: /root/.cache
+    gpu_wait_timeout: 7200   # k8s block-and-wait cap (s); CLI --gpu-wait-timeout overrides
     train_args_overrides:
       gpus: 1
 
