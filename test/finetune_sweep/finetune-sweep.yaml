@@ -36,8 +36,18 @@ targets:
     train_args_overrides:
       gpus: 0
   cuda:
-    compose_service: cray-nvidia
-    restart_cmd: "SCALARLM_MODEL={model} ./scalarlm up cuda"
+    # k8s target: one Helm release per model in a fresh `sweep-<model>` namespace.
+    # See docs/superpowers/specs/2026-06-15-finetune-sweep-k8s-design.md and the
+    # 2026-06-15 amendment in docs/adr/0003-finetune-sweep-restart-per-model.md.
+    chart_path: deployment/helm/scalarlm
+    release: scalarlm              # namespace isolates, so a fixed name is fine
+    namespace_prefix: sweep        # -> sweep-<sanitized-model-id>
+    megatron_sts: scalarlm-megatron  # kubectl exec target (StatefulSet)
+    api_service: scalarlm          # svc for port-forward (== release fullname)
+    # NOTE: confirm the node's populated HF cache path on the cuda box before a
+    # real run -- the team's serving values use a hostPath cache (e.g. /root/.cache
+    # in values/gemma4-31b.yaml). This may differ on blackwell-maxq-0.
+    cache_hostpath: /root/.cache
     train_args_overrides:
       gpus: 1
 
