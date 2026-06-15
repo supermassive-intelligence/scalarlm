@@ -291,6 +291,42 @@ def generate(api_url: str, prompts: list[str], model_name: str, max_tokens: int,
             raise RuntimeError(result["error"])
 
 
+# --- k8s command builders (pure) ---
+
+def is_k8s_target(target_cfg: dict) -> bool:
+    """A target is k8s-driven when it declares a Helm chart path (vs the
+    Compose target's compose_service/restart_cmd)."""
+    return "chart_path" in target_cfg
+
+
+def k8s_helm_install_cmd(target_cfg: dict, namespace: str, model_id: str) -> list[str]:
+    return [
+        "helm", "upgrade", "--install", target_cfg["release"], target_cfg["chart_path"],
+        "-n", namespace, "--create-namespace",
+        "--set", f"model={model_id}",
+        "--set", "storage.cache.kind=hostPath",
+        "--set", f"storage.cache.hostPath={target_cfg['cache_hostpath']}",
+    ]
+
+
+def k8s_delete_namespace_cmd(namespace: str) -> list[str]:
+    return ["kubectl", "delete", "namespace", namespace, "--ignore-not-found", "--wait"]
+
+
+def k8s_port_forward_cmd(target_cfg: dict, namespace: str, port: int = 8000) -> list[str]:
+    return ["kubectl", "port-forward", "-n", namespace,
+            f"svc/{target_cfg['api_service']}", f"{port}:{port}"]
+
+
+def k8s_exec_checkpoint_cmd(target_cfg: dict, namespace: str, script: str) -> list[str]:
+    return ["kubectl", "exec", "-n", namespace,
+            f"statefulset/{target_cfg['megatron_sts']}", "--", "python3", "-c", script]
+
+
+def k8s_get_pods_cmd(namespace: str) -> list[str]:
+    return ["kubectl", "get", "pods", "-n", namespace, "-o", "json"]
+
+
 def probe_gpu_free_gb() -> list[float]:
     """Free VRAM (GiB) per visible GPU, via nvidia-smi. [] if unavailable.
 

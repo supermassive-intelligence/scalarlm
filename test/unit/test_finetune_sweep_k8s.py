@@ -60,3 +60,44 @@ def test_classify_imagepull_is_failed():
 
 def test_classify_failed_phase_is_failed():
     assert rfs.classify_pod_status([{"status": {"phase": "Failed"}}]) == "failed"
+
+CUDA_CFG = {
+    "chart_path": "deployment/helm/scalarlm",
+    "release": "scalarlm",
+    "namespace_prefix": "sweep",
+    "megatron_sts": "scalarlm-megatron",
+    "api_service": "scalarlm",
+    "cache_hostpath": "/root/.cache",
+    "gpu_wait_timeout": 7200,
+}
+
+def test_is_k8s_target_true_for_chart_path():
+    assert rfs.is_k8s_target(CUDA_CFG) is True
+
+def test_is_k8s_target_false_for_compose():
+    assert rfs.is_k8s_target({"compose_service": "cray", "restart_cmd": "x"}) is False
+
+def test_helm_install_cmd():
+    cmd = rfs.k8s_helm_install_cmd(CUDA_CFG, "sweep-qwen", "Qwen/Qwen2.5-0.5B")
+    assert cmd[:5] == ["helm", "upgrade", "--install", "scalarlm", "deployment/helm/scalarlm"]
+    assert "-n" in cmd and "sweep-qwen" in cmd and "--create-namespace" in cmd
+    assert "model=Qwen/Qwen2.5-0.5B" in cmd
+    assert "storage.cache.kind=hostPath" in cmd
+    assert "storage.cache.hostPath=/root/.cache" in cmd
+
+def test_delete_namespace_cmd():
+    assert rfs.k8s_delete_namespace_cmd("sweep-qwen") == [
+        "kubectl", "delete", "namespace", "sweep-qwen", "--ignore-not-found", "--wait"]
+
+def test_port_forward_cmd():
+    assert rfs.k8s_port_forward_cmd(CUDA_CFG, "sweep-qwen") == [
+        "kubectl", "port-forward", "-n", "sweep-qwen", "svc/scalarlm", "8000:8000"]
+
+def test_exec_checkpoint_cmd_targets_statefulset():
+    cmd = rfs.k8s_exec_checkpoint_cmd(CUDA_CFG, "sweep-qwen", "print(1)")
+    assert cmd == ["kubectl", "exec", "-n", "sweep-qwen",
+                   "statefulset/scalarlm-megatron", "--", "python3", "-c", "print(1)"]
+
+def test_get_pods_cmd():
+    assert rfs.k8s_get_pods_cmd("sweep-qwen") == [
+        "kubectl", "get", "pods", "-n", "sweep-qwen", "-o", "json"]
