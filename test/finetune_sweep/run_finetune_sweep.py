@@ -93,9 +93,11 @@ def k8s_namespace(prefix: str, model_id: str) -> str:
     return f"{prefix}-{slug}"[:63].rstrip("-")
 
 
-def gate_model(model: dict, target: str, free_gb: list[float]) -> tuple[bool, str]:
+def gate_model(model: dict, target: str, free_gb: list[float] | None) -> tuple[bool, str]:
     """Decide whether `model` should run on `target`. cpu is opt-in via cpu_ok;
-    cuda is gated on the LoRA VRAM gate vs. probed free VRAM."""
+    cuda is gated on the LoRA VRAM gate vs. probed free VRAM. `free_gb is None`
+    means the VRAM check is not applicable (k8s: the scheduler arbitrates GPU
+    fit) — only the static checks apply."""
     if target == "cpu":
         if not model.get("cpu_ok"):
             return False, "no cpu_ok opt-in for this model"
@@ -104,6 +106,8 @@ def gate_model(model: dict, target: str, free_gb: list[float]) -> tuple[bool, st
     gate_gb = model.get("adapters", {}).get("lora", {}).get("gate_gb")
     if gate_gb is None:
         return False, "no adapters.lora.gate_gb declared"
+    if free_gb is None:
+        return True, ""  # k8s: scheduler arbitrates GPU fit; skip the VRAM check
     if not free_gb or max(free_gb) < gate_gb:
         return False, (f"LoRA needs >={gate_gb:g}GiB free; "
                         f"free GiB: {[round(f, 1) for f in free_gb]}")
@@ -484,8 +488,9 @@ def run_model(manifest: dict, target: str, model: dict, args, results_dir: Path)
     target_cfg = manifest["targets"][target]
     is_k8s = is_k8s_target(target_cfg)
     # k8s: the scheduler arbitrates GPUs and there is no host nvidia-smi, so skip
-    # the runtime VRAM probe (gate_model then only applies its static checks).
-    free_gb = [] if is_k8s else (probe_gpu_free_gb() if target == "cuda" else [])
+    # the runtime VRAM probe (free_gb=None tells gate_model the VRAM check is
+    # not applicable; only its static checks apply).
+    free_gb = None if is_k8s else (probe_gpu_free_gb() if target == "cuda" else [])
     ok, reason = gate_model(model, target, free_gb)
     if not ok:
         res.outcome, res.detail = SKIPPED, reason
@@ -510,19 +515,22 @@ def run_model(manifest: dict, target: str, model: dict, args, results_dir: Path)
                 namespace = k8s_namespace(target_cfg["namespace_prefix"], model_id)
                 delete_namespace(namespace, log)  # idempotent pre-clean
                 if not helm_install(target_cfg, namespace, model_id, log, args.restart_timeout):
+                    res.restart_seconds = round(time.time() - restart_start, 1)
                     res.outcome, res.detail = RESTART_FAILED, "helm upgrade --install failed"
                     return res
                 pod_status = wait_for_pods_ready(namespace, args.gpu_wait_timeout)
-                res.restart_seconds = round(time.time() - restart_start, 1)
                 if pod_status != "ready":
+                    res.restart_seconds = round(time.time() - restart_start, 1)
                     res.outcome = RESTART_FAILED
                     res.detail = ("pods crashed / bad image" if pod_status == "failed"
                                   else f"pods not schedulable within {args.gpu_wait_timeout}s")
                     return res
                 pf_proc = start_port_forward(target_cfg, namespace, log)
-                if not wait_for_all_up(args.api_url, None, args.restart_timeout):
+                if not wait_for_all_up(args.api_url, pf_proc, args.restart_timeout):
+                    res.restart_seconds = round(time.time() - restart_start, 1)
                     res.outcome, res.detail = RESTART_FAILED, "api /v1/health not up after port-forward"
                     return res
+                res.restart_seconds = round(time.time() - restart_start, 1)
             else:
                 proc = start_restart(target_cfg, model_id, log)
                 ready = wait_for_all_up(args.api_url, proc, args.restart_timeout)

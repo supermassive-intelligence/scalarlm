@@ -126,3 +126,18 @@ def test_wait_for_all_up_accepts_none_proc(monkeypatch):
     monkeypatch.setattr(rfs, "get_health", lambda url, timeout=5: {"all": "up"})
     # proc=None must not raise and must return True when health is up.
     assert rfs.wait_for_all_up("http://localhost:8000", None, timeout=1) is True
+
+def test_gate_model_k8s_skips_vram_check_when_free_gb_none():
+    model = {"id": "m", "adapters": {"lora": {"gate_gb": 8}}}
+    ok, reason = rfs.gate_model(model, "cuda", None)
+    assert ok is True and reason == ""
+
+def test_gate_model_k8s_still_requires_gate_gb_declared():
+    model = {"id": "m"}  # no adapters.lora.gate_gb
+    ok, reason = rfs.gate_model(model, "cuda", None)
+    assert ok is False and "gate_gb" in reason
+
+def test_gate_model_cuda_still_gates_on_free_gb_list():
+    model = {"id": "m", "adapters": {"lora": {"gate_gb": 8}}}
+    assert rfs.gate_model(model, "cuda", [4.0])[0] is False   # not enough free
+    assert rfs.gate_model(model, "cuda", [16.0])[0] is True    # enough free
