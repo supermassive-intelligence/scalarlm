@@ -81,9 +81,24 @@ async def finish_work_queue_item(request_id, inference_work_queue, in_memory_res
         # Update the status file
         status_path = group_request_id_to_status_path(group_request_id)
 
-        with open(status_path, "r") as status_file:
-            current_status = json.load(status_file)
+        # Load the existing status JSON – if it is missing or malformed we create a fresh one.
+        try:
+            with open(status_path, "r") as status_file:
+                current_status = json.load(status_file)
+        except (FileNotFoundError, json.JSONDecodeError):
+            logger.warning(
+                "Status file %s missing or malformed – creating fresh status.",
+                status_path,
+            )
+            # Minimal status shape that matches what UI expects.
+            current_status = {
+                "status": "in_progress",
+                "created_at": time.time(),
+                "total_requests": in_memory_results.get("total_requests", 0),
+                "current_index": 0,
+            }
 
+        # Mark the request as completed.
         current_status["status"] = "completed"
         current_status["completed_at"] = time.time()
         current_status["current_index"] = in_memory_results["current_index"]
