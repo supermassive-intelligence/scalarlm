@@ -85,6 +85,16 @@ def test_helm_install_cmd():
     assert "storage.cache.kind=hostPath" in cmd
     assert "storage.cache.hostPath=/root/.cache" in cmd
 
+def test_helm_install_cmd_omits_jobs_size_by_default():
+    # No jobs_size in cfg -> no override, chart default (100Gi) applies.
+    cmd = rfs.k8s_helm_install_cmd(CUDA_CFG, "sweep-qwen", "Qwen/Qwen2.5-0.5B")
+    assert not any(c.startswith("storage.jobs.size=") for c in cmd)
+
+def test_helm_install_cmd_sets_jobs_size_when_configured():
+    cfg = {**CUDA_CFG, "jobs_size": "20Gi"}
+    cmd = rfs.k8s_helm_install_cmd(cfg, "sweep-qwen", "Qwen/Qwen2.5-0.5B")
+    assert "storage.jobs.size=20Gi" in cmd
+
 def test_delete_namespace_cmd():
     assert rfs.k8s_delete_namespace_cmd("sweep-qwen") == [
         "kubectl", "delete", "namespace", "sweep-qwen", "--ignore-not-found", "--wait"]

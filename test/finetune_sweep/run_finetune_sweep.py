@@ -371,6 +371,13 @@ def k8s_helm_install_cmd(target_cfg: dict, namespace: str, model_id: str) -> lis
         "--set", "storage.cache.kind=hostPath",
         "--set", f"storage.cache.hostPath={target_cfg['cache_hostpath']}",
     ]
+    # Right-size the jobs PVC per target (chart default is 100Gi). Lets a small
+    # model claim e.g. 20Gi so its Longhorn replica fits under the node's
+    # scheduling ceiling. Omitted -> chart default applies. NOTE: the jobs PVC
+    # has helm.sh/resource-policy: keep and PVCs can't shrink, so a changed size
+    # only takes effect on a freshly provisioned namespace, not an in-place upgrade.
+    if "jobs_size" in target_cfg:
+        cmd += ["--set", f"storage.jobs.size={target_cfg['jobs_size']}"]
     if target_cfg.get("phase_scaled"):
         # Phase 0: megatron holds the single GPU; vLLM is off until the phase-2
         # handoff. Use replicaCounts, NOT vllm.enabled=false (which drops the

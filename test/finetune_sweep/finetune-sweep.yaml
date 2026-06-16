@@ -49,6 +49,12 @@ targets:
     # real run -- the team's serving values use a hostPath cache (e.g. /root/.cache
     # in values/gemma4-31b.yaml). This may differ on blackwell-maxq-0.
     cache_hostpath: /root/.cache
+    # Jobs PVC size (chart default is 100Gi). blackwell-maxq-0 has a single
+    # Longhorn disk near its scheduling ceiling, so 100Gi faults with
+    # ReplicaSchedulingFailure; 20Gi fits and is ample for a ~0.5B model +
+    # checkpoints. Takes effect only on a fresh namespace (PVC keep policy + no
+    # shrink). Raise per-target for larger models.
+    jobs_size: 20Gi
     gpu_wait_timeout: 7200   # k8s block-and-wait cap (s); CLI --gpu-wait-timeout overrides
     # 1-GPU phase-scaled loop: train (megatron) then hand the GPU to vLLM, peak
     # GPU = 1. See docs/superpowers/specs/2026-06-15-finetune-sweep-1gpu-phase-scaled-design.md
