@@ -522,8 +522,8 @@ def read_checkpoint_keys_k8s(target_cfg: dict, namespace: str, job_hash: str,
 def probe_gpu_free_gb() -> list[float]:
     """Free VRAM (GiB) per visible GPU, via nvidia-smi. [] if unavailable.
 
-    Used both for the cuda LoRA gate and to detect VRAM reclamation after
-    teardown_stack — via nvidia-smi (no torch dependency on the host)."""
+    Used both for the GPU-target LoRA VRAM gate (cuda-docker) and to detect VRAM
+    reclamation after teardown_stack — via nvidia-smi (no torch on the host)."""
     try:
         result = subprocess.run(
             ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
