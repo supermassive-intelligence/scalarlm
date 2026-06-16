@@ -216,6 +216,46 @@ def poll_training(api_url: str, job_hash: str, train_timeout: float) -> str:
     return "TIMEOUT"
 
 
+def serve_check_and_classify(api_url: str, golden_prompt: str, expected_output: str,
+                             job_hash: str, train_status: str,
+                             checkpoint_keys: list[str] | None, args, res: "Result") -> None:
+    """Hot-load the trained adapter, classify the outcome, and set the result
+    fields (serve_seconds, outcome, adapter_sample, detail). Shared by the 2-GPU
+    and phase-scaled k8s paths; the caller reads `checkpoint_keys` first (the read
+    mechanism differs per path)."""
+    adapter_loaded = False
+    adapter_text = ""
+    last_serve_error = ""
+    serve_start = time.time()  # serve_seconds only meaningful when train_status == "COMPLETED"
+    if train_status == "COMPLETED" and checkpoint_lora_keys_ok(checkpoint_keys):
+        serve_deadline = time.time() + args.serve_timeout
+        while time.time() < serve_deadline:
+            try:
+                adapter_text = generate(api_url, [golden_prompt], job_hash, args.max_tokens)[0]
+                adapter_loaded = True
+                break
+            except Exception as e:
+                last_serve_error = str(e)
+                time.sleep(5)
+    res.serve_seconds = round(time.time() - serve_start, 1)
+
+    memorized = expected_output in adapter_text
+    res.outcome = classify_result(train_status, checkpoint_keys, adapter_loaded, memorized)
+    res.adapter_sample = adapter_text[:200]
+
+    if res.outcome == TRAIN_FAILED:
+        res.detail = f"job ended with status {train_status}"
+    elif res.outcome == TRAIN_TIMEOUT:
+        res.detail = f"job did not reach a terminal status within {args.train_timeout}s"
+    elif res.outcome == BAD_CHECKPOINT:
+        res.detail = f"checkpoint keys: {checkpoint_keys}"
+    elif res.outcome == ADAPTER_NOT_LOADED:
+        res.detail = f"adapter never became servable; last error: {last_serve_error}"
+    elif res.outcome == NO_MEMORIZATION:
+        extra = "adapter served but did not memorize expected_output"
+        res.detail = f"{res.detail}; {extra}" if res.detail else extra
+
+
 def build_dataset_tar(dataset: list[dict]) -> bytes:
     """In-memory tar containing dataset.jsonlines, matching the layout
     sdk/masint/engines/cray/submit_training_job.py builds."""
@@ -630,44 +670,13 @@ def run_model(manifest: dict, target: str, model: dict, args, results_dir: Path)
             res.train_seconds = round(time.time() - train_start, 1)
 
             checkpoint_keys: list[str] | None = None
-            adapter_loaded = False
-            adapter_text = ""
-            last_serve_error = ""
-            serve_start = time.time()  # only meaningful if train_status == "COMPLETED"
-
             if train_status == "COMPLETED":
                 if is_k8s:
                     checkpoint_keys = read_checkpoint_keys_k8s(target_cfg, namespace, job_hash)
                 else:
                     checkpoint_keys = read_checkpoint_keys(target_cfg["compose_service"], job_hash)
-                if checkpoint_lora_keys_ok(checkpoint_keys):
-                    serve_deadline = time.time() + args.serve_timeout
-                    while time.time() < serve_deadline:
-                        try:
-                            adapter_out = generate(args.api_url, [golden_prompt], job_hash, args.max_tokens)
-                            adapter_text = adapter_out[0]
-                            adapter_loaded = True
-                            break
-                        except Exception as e:
-                            last_serve_error = str(e)
-                            time.sleep(5)
-            res.serve_seconds = round(time.time() - serve_start, 1)
-
-            memorized = expected_output in adapter_text
-            res.outcome = classify_result(train_status, checkpoint_keys, adapter_loaded, memorized)
-            res.adapter_sample = adapter_text[:200]
-
-            if res.outcome == TRAIN_FAILED:
-                res.detail = f"job ended with status {train_status}"
-            elif res.outcome == TRAIN_TIMEOUT:
-                res.detail = f"job did not reach a terminal status within {args.train_timeout}s"
-            elif res.outcome == BAD_CHECKPOINT:
-                res.detail = f"checkpoint keys: {checkpoint_keys}"
-            elif res.outcome == ADAPTER_NOT_LOADED:
-                res.detail = f"adapter never became servable; last error: {last_serve_error}"
-            elif res.outcome == NO_MEMORIZATION:
-                extra = "adapter served but did not memorize expected_output"
-                res.detail = f"{res.detail}; {extra}" if res.detail else extra
+            serve_check_and_classify(args.api_url, golden_prompt, expected_output, job_hash,
+                                     train_status, checkpoint_keys, args, res)
             return res
         finally:
             if is_k8s:

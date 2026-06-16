@@ -223,3 +223,35 @@ def test_poll_training_times_out(monkeypatch):
     monkeypatch.setattr(rfs, "get_training_job", lambda url, jh, timeout=10: {"status": "TRAINING"})
     monkeypatch.setattr(rfs.time, "sleep", lambda s: None)
     assert rfs.poll_training("http://x", "abc", train_timeout=0.01) == "TIMEOUT"
+
+
+class _ServeArgs:  # minimal stand-in for the argparse Namespace fields used here
+    serve_timeout = 1
+    train_timeout = 60
+    max_tokens = 32
+
+def test_serve_check_sets_pass_on_memorization(monkeypatch):
+    monkeypatch.setattr(rfs, "generate", lambda api, prompts, jh, mt: ["... SECRET123 ..."])
+    res = rfs.Result(model="m", target="cuda")
+    rfs.serve_check_and_classify("http://x", "p", "SECRET123", "abc", "COMPLETED",
+                                 ["base.lora_A.weight", "base.lora_B.weight"], _ServeArgs(), res)
+    assert res.outcome == rfs.PASS
+    assert "SECRET123" in res.adapter_sample
+
+def test_serve_check_adapter_not_loaded(monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("404 model not found")
+    monkeypatch.setattr(rfs, "generate", boom)
+    monkeypatch.setattr(rfs.time, "sleep", lambda s: None)
+    res = rfs.Result(model="m", target="cuda")
+    rfs.serve_check_and_classify("http://x", "p", "SECRET123", "abc", "COMPLETED",
+                                 ["base.lora_A.weight", "base.lora_B.weight"], _ServeArgs(), res)
+    assert res.outcome == rfs.ADAPTER_NOT_LOADED
+
+def test_serve_check_bad_checkpoint(monkeypatch):
+    # No lora_B key -> checkpoint_lora_keys_ok is False -> BAD_CHECKPOINT, no generate call.
+    monkeypatch.setattr(rfs, "generate", lambda *a, **k: (_ for _ in ()).throw(AssertionError("called")))
+    res = rfs.Result(model="m", target="cuda")
+    rfs.serve_check_and_classify("http://x", "p", "SECRET123", "abc", "COMPLETED",
+                                 ["base.lora_A.weight"], _ServeArgs(), res)
+    assert res.outcome == rfs.BAD_CHECKPOINT
