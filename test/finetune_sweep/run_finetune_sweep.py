@@ -329,8 +329,11 @@ def k8s_exec_checkpoint_cmd(target_cfg: dict, namespace: str, script: str) -> li
             f"statefulset/{target_cfg['megatron_sts']}", "--", "python3", "-c", script]
 
 
-def k8s_get_pods_cmd(namespace: str) -> list[str]:
-    return ["kubectl", "get", "pods", "-n", namespace, "-o", "json"]
+def k8s_get_pods_cmd(namespace: str, selector: str | None = None) -> list[str]:
+    cmd = ["kubectl", "get", "pods", "-n", namespace]
+    if selector:
+        cmd += ["-l", selector]
+    return cmd + ["-o", "json"]
 
 
 def k8s_scale_cmd(kind_name: str, replicas: int, namespace: str) -> list[str]:
@@ -341,10 +344,11 @@ def k8s_scale_cmd(kind_name: str, replicas: int, namespace: str) -> list[str]:
 
 # --- k8s side-effecting wrappers ---
 
-def kubectl_get_pods(namespace: str, timeout: float = 15) -> list[dict]:
-    """Return the namespace's pod objects (`.items`), or [] if the call fails."""
+def kubectl_get_pods(namespace: str, selector: str | None = None, timeout: float = 15) -> list[dict]:
+    """Return the namespace's pod objects (`.items`), optionally filtered by a
+    label selector, or [] if the call fails."""
     try:
-        result = subprocess.run(k8s_get_pods_cmd(namespace), cwd=REPO_ROOT,
+        result = subprocess.run(k8s_get_pods_cmd(namespace, selector), cwd=REPO_ROOT,
                                 capture_output=True, text=True, timeout=timeout, check=True)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return []
@@ -382,6 +386,26 @@ def wait_for_pods_ready(namespace: str, gpu_wait_timeout: float, poll: float = 1
         status = classify_pod_status(kubectl_get_pods(namespace))
         if status in ("ready", "failed"):
             return status
+        time.sleep(poll)
+    return "timeout"
+
+
+# Megatron pods carry this component label (chart _helpers.tpl megatronlabels);
+# used to wait for the megatron pod to fully delete during the phase-2 handoff.
+MEGATRON_POD_SELECTOR = "app.kubernetes.io/component=megatron"
+
+
+def wait_for_pods_gone(namespace: str, selector: str, gpu_wait_timeout: float,
+                       poll: float = 5.0) -> str:
+    """Block until no pod matching `selector` exists (its nvidia.com/gpu request is
+    released only on full deletion, not while Terminating), else "timeout" at
+    gpu_wait_timeout. Phase-2 handoff: megatron must be gone before vLLM claims the
+    card. Polling beats `kubectl wait --for=delete`, which errors when zero pods
+    already match."""
+    deadline = time.time() + gpu_wait_timeout
+    while time.time() < deadline:
+        if not kubectl_get_pods(namespace, selector):
+            return "gone"
         time.sleep(poll)
     return "timeout"
 

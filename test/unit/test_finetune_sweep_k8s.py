@@ -177,3 +177,29 @@ def test_kubectl_scale_false_on_error(monkeypatch):
         raise rfs.subprocess.CalledProcessError(1, a[0])
     monkeypatch.setattr(rfs.subprocess, "run", boom)
     assert rfs.kubectl_scale("deployment/scalarlm-vllm", 1, "sweep-qwen", log=None) is False
+
+def test_get_pods_cmd_with_selector():
+    assert rfs.k8s_get_pods_cmd("sweep-qwen", "app.kubernetes.io/component=megatron") == [
+        "kubectl", "get", "pods", "-n", "sweep-qwen",
+        "-l", "app.kubernetes.io/component=megatron", "-o", "json"]
+
+def test_get_pods_cmd_without_selector_unchanged():
+    assert rfs.k8s_get_pods_cmd("sweep-qwen") == [
+        "kubectl", "get", "pods", "-n", "sweep-qwen", "-o", "json"]
+
+def test_wait_for_pods_gone_returns_gone_when_empty(monkeypatch):
+    seen = []
+    def fake_get(ns, selector=None, timeout=15):
+        seen.append(selector)
+        return []
+    monkeypatch.setattr(rfs, "kubectl_get_pods", fake_get)
+    assert rfs.wait_for_pods_gone("sweep-qwen", "sel", gpu_wait_timeout=5, poll=0.01) == "gone"
+    assert seen[0] == "sel"  # selector must flow through to kubectl_get_pods
+
+def test_wait_for_pods_gone_times_out_while_present(monkeypatch):
+    monkeypatch.setattr(rfs, "kubectl_get_pods",
+                        lambda ns, selector=None, timeout=15: [{"metadata": {"name": "megatron-0"}}])
+    assert rfs.wait_for_pods_gone("sweep-qwen", "sel", gpu_wait_timeout=0.05, poll=0.01) == "timeout"
+
+def test_megatron_pod_selector_is_component_label():
+    assert rfs.MEGATRON_POD_SELECTOR == "app.kubernetes.io/component=megatron"
