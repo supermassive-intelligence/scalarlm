@@ -12,7 +12,8 @@ in-container step (reading LoRA checkpoint keys) via `docker compose exec`.
 
 Usage:
     python3 run_finetune_sweep.py --target cpu
-    python3 run_finetune_sweep.py --target cuda --models tiny-random/gemma-4-dense
+    python3 run_finetune_sweep.py --target cuda-docker            # GPU via Docker Compose (scheduler-less box)
+    python3 run_finetune_sweep.py --target cuda-k8s --models Qwen/Qwen2.5-0.5B
 """
 
 from __future__ import annotations
@@ -522,8 +523,7 @@ def probe_gpu_free_gb() -> list[float]:
     """Free VRAM (GiB) per visible GPU, via nvidia-smi. [] if unavailable.
 
     Used both for the cuda LoRA gate and to detect VRAM reclamation after
-    teardown_stack — same role as probe_gpu_free_gb in test/model_sweep/run_sweep.py,
-    but via nvidia-smi (no torch dependency on the host)."""
+    teardown_stack — via nvidia-smi (no torch dependency on the host)."""
     try:
         result = subprocess.run(
             ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
@@ -536,7 +536,7 @@ def probe_gpu_free_gb() -> list[float]:
 
 def start_restart(target_cfg: dict, model_id: str, log) -> subprocess.Popen:
     """Launch `SCALARLM_MODEL=<model> ./scalarlm up <target>` in its own process
-    group, non-blocking (mirrors run_sweep.py:279-280)."""
+    group, non-blocking."""
     cmd = target_cfg["restart_cmd"].format(model=model_id)
     return subprocess.Popen(cmd, shell=True, cwd=REPO_ROOT, stdout=log,
                              stderr=subprocess.STDOUT, start_new_session=True)
@@ -544,7 +544,10 @@ def start_restart(target_cfg: dict, model_id: str, log) -> subprocess.Popen:
 
 def teardown_stack(proc: subprocess.Popen, settle_timeout: float = 60.0) -> None:
     """SIGKILL the restart process's whole process group, then wait for VRAM to
-    stop climbing (mirrors teardown_engine in test/model_sweep/run_sweep.py)."""
+    stop climbing. NOTE: `./scalarlm up` runs `docker compose up` in the
+    foreground, so SIGKILL stops the compose CLI but leaves the container (and its
+    GPU) running; the next run's --force-recreate reclaims it, or `docker compose
+    down <service>` does."""
     try:
         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
     except OSError:
