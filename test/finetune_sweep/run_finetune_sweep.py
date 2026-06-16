@@ -698,8 +698,8 @@ def run_model(manifest: dict, target: str, model: dict, args, results_dir: Path)
     # k8s: the scheduler arbitrates GPUs and there is no host nvidia-smi, so skip
     # the runtime VRAM probe (free_gb=None tells gate_model the VRAM check is
     # not applicable; only its static checks apply).
-    free_gb = None if is_k8s else (probe_gpu_free_gb() if target == "cuda" else [])
-    ok, reason = gate_model(model, target, free_gb)
+    free_gb = None if is_k8s else (probe_gpu_free_gb() if target_requests_gpu(target_cfg) else [])
+    ok, reason = gate_model(model, target_cfg, free_gb)
     if not ok:
         res.outcome, res.detail = SKIPPED, reason
         return res
@@ -820,13 +820,19 @@ def write_reports(results: list[Result], target: str, results_dir: Path) -> tupl
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Fine-tune sweep (tier d, LoRA only).")
-    ap.add_argument("--target", required=True, choices=["cpu", "cuda"])
+    ap.add_argument("--target", required=True,
+                    help="manifest target key (e.g. cpu, cuda-docker, cuda-k8s); "
+                         "validated against the manifest after load")
     ap.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     ap.add_argument("--results-dir", type=Path, default=DEFAULT_RESULTS_DIR)
     ap.add_argument("--models", nargs="*", help="optional subset of model IDs to run")
     ap.add_argument("--api-url", default="http://localhost:8000")
     ap.add_argument("--max-tokens", type=int, default=64)
-    ap.add_argument("--restart-timeout", type=int, default=600)
+    ap.add_argument("--restart-timeout", type=int, default=3000,
+                    help="health-wait cap (s). Default 3000 (50 min) covers a cold "
+                         "`./scalarlm up nvidia --build` (vLLM compiles from source) "
+                         "on a fresh GPU box; only a ceiling, so happy paths are "
+                         "unaffected. Subsequent --force-recreate builds are cache hits.")
     ap.add_argument("--train-timeout", type=int, default=600)
     ap.add_argument("--serve-timeout", type=int, default=300)
     ap.add_argument("--gpu-wait-timeout", type=int, default=7200,
