@@ -93,12 +93,13 @@ def k8s_namespace(prefix: str, model_id: str) -> str:
     return f"{prefix}-{slug}"[:63].rstrip("-")
 
 
-def gate_model(model: dict, target: str, free_gb: list[float] | None) -> tuple[bool, str]:
-    """Decide whether `model` should run on `target`. cpu is opt-in via cpu_ok;
-    cuda is gated on the LoRA VRAM gate vs. probed free VRAM. `free_gb is None`
-    means the VRAM check is not applicable (k8s: the scheduler arbitrates GPU
-    fit) — only the static checks apply."""
-    if target == "cpu":
+def gate_model(model: dict, target_cfg: dict, free_gb: list[float] | None) -> tuple[bool, str]:
+    """Decide whether `model` should run on this target. A CPU target (no GPU
+    requested) is opt-in via cpu_ok; a GPU target is gated on the LoRA VRAM gate
+    vs. probed free VRAM. `free_gb is None` means the VRAM check is not applicable
+    (k8s: the scheduler arbitrates GPU fit) — only the static checks apply.
+    Branches on target config (target_requests_gpu), not the literal target name."""
+    if not target_requests_gpu(target_cfg):
         if not model.get("cpu_ok"):
             return False, "no cpu_ok opt-in for this model"
         return True, ""

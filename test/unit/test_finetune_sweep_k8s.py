@@ -139,18 +139,24 @@ def test_wait_for_all_up_accepts_none_proc(monkeypatch):
 
 def test_gate_model_k8s_skips_vram_check_when_free_gb_none():
     model = {"id": "m", "adapters": {"lora": {"gate_gb": 8}}}
-    ok, reason = rfs.gate_model(model, "cuda", None)
+    ok, reason = rfs.gate_model(model, {"train_args_overrides": {"gpus": 1}}, None)
     assert ok is True and reason == ""
 
 def test_gate_model_k8s_still_requires_gate_gb_declared():
     model = {"id": "m"}  # no adapters.lora.gate_gb
-    ok, reason = rfs.gate_model(model, "cuda", None)
+    ok, reason = rfs.gate_model(model, {"train_args_overrides": {"gpus": 1}}, None)
     assert ok is False and "gate_gb" in reason
 
-def test_gate_model_cuda_still_gates_on_free_gb_list():
+def test_gate_model_gpu_still_gates_on_free_gb_list():
     model = {"id": "m", "adapters": {"lora": {"gate_gb": 8}}}
-    assert rfs.gate_model(model, "cuda", [4.0])[0] is False   # not enough free
-    assert rfs.gate_model(model, "cuda", [16.0])[0] is True    # enough free
+    gpu_cfg = {"train_args_overrides": {"gpus": 1}}
+    assert rfs.gate_model(model, gpu_cfg, [4.0])[0] is False   # not enough free
+    assert rfs.gate_model(model, gpu_cfg, [16.0])[0] is True   # enough free
+
+def test_gate_model_cpu_requires_cpu_ok_optin():
+    cpu_cfg = {"train_args_overrides": {"gpus": 0}}
+    assert rfs.gate_model({"id": "m"}, cpu_cfg, [])[0] is False           # no cpu_ok
+    assert rfs.gate_model({"id": "m", "cpu_ok": True}, cpu_cfg, [])[0] is True
 
 def test_kubectl_get_pods_returns_empty_on_called_process_error(monkeypatch):
     def _boom(*a, **k):
