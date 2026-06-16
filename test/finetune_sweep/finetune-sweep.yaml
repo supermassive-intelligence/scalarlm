@@ -35,7 +35,20 @@ targets:
     # node advertises a GPU (the cpu target). Override to opt out.
     train_args_overrides:
       gpus: 0
-  cuda:
+  cuda-docker:
+    # Testing target for a GPU box that runs NO Helm/k8s scheduler (the 3090).
+    # The cray-nvidia Compose service co-locates vLLM (in-process) + the
+    # slurm-launched training job in one container, sharing the single GPU — no
+    # phase-scaling needed. Outside the "no GPU work outside the scheduler"
+    # directive's scope (no scheduler here to subvert). GUARDRAIL: never run on a
+    # k8s node (blackwell-maxq-0) -- there it WOULD contend with the scheduler.
+    # cuda-k8s stays the canonical path for the cluster. See the 2026-06-16
+    # amendment in docs/adr/0003-finetune-sweep-restart-per-model.md.
+    compose_service: cray-nvidia
+    restart_cmd: "SCALARLM_MODEL={model} ./scalarlm up nvidia"
+    train_args_overrides:
+      gpus: 1
+  cuda-k8s:
     # k8s target: one Helm release per model in a fresh `sweep-<model>` namespace.
     # See docs/superpowers/specs/2026-06-15-finetune-sweep-k8s-design.md and the
     # 2026-06-15 amendment in docs/adr/0003-finetune-sweep-restart-per-model.md.

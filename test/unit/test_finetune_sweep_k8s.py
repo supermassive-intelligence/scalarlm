@@ -342,3 +342,19 @@ def test_target_requests_gpu_defaults_true_when_unset():
     # JobConfig defaults gpus=1, so a target with no override requests a GPU.
     assert rfs.target_requests_gpu({}) is True
     assert rfs.target_requests_gpu({"train_args_overrides": {}}) is True
+
+def test_manifest_targets_dispatch_correctly():
+    manifest = rfs.load_manifest(rfs.DEFAULT_MANIFEST)
+    targets = manifest["targets"]
+    # cuda-docker: Compose lifecycle (not k8s) + GPU probe path
+    assert "cuda-docker" in targets
+    assert rfs.is_k8s_target(targets["cuda-docker"]) is False
+    assert rfs.target_requests_gpu(targets["cuda-docker"]) is True
+    assert targets["cuda-docker"]["compose_service"] == "cray-nvidia"
+    # cuda-k8s: k8s lifecycle (renamed from cuda) + GPU
+    assert "cuda-k8s" in targets and "cuda" not in targets
+    assert rfs.is_k8s_target(targets["cuda-k8s"]) is True
+    assert rfs.target_requests_gpu(targets["cuda-k8s"]) is True
+    # cpu: Compose lifecycle, no GPU
+    assert rfs.is_k8s_target(targets["cpu"]) is False
+    assert rfs.target_requests_gpu(targets["cpu"]) is False
