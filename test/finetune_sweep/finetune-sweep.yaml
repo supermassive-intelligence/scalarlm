@@ -43,12 +43,18 @@ targets:
     release: scalarlm              # namespace isolates, so a fixed name is fine
     namespace_prefix: sweep        # -> sweep-<sanitized-model-id>
     megatron_sts: scalarlm-megatron  # kubectl exec target (StatefulSet)
+    vllm_deploy: scalarlm-vllm     # phase-2 kubectl scale target (Deployment)
     api_service: scalarlm          # svc for port-forward (== release fullname)
     # NOTE: confirm the node's populated HF cache path on the cuda box before a
     # real run -- the team's serving values use a hostPath cache (e.g. /root/.cache
     # in values/gemma4-31b.yaml). This may differ on blackwell-maxq-0.
     cache_hostpath: /root/.cache
     gpu_wait_timeout: 7200   # k8s block-and-wait cap (s); CLI --gpu-wait-timeout overrides
+    # 1-GPU phase-scaled loop: train (megatron) then hand the GPU to vLLM, peak
+    # GPU = 1. See docs/superpowers/specs/2026-06-15-finetune-sweep-1gpu-phase-scaled-design.md
+    # and the 2026-06-16 amendment in docs/adr/0003-finetune-sweep-restart-per-model.md.
+    # Remove this line to fall back to the 2-GPU (always-on vLLM + megatron) path.
+    phase_scaled: true
     train_args_overrides:
       gpus: 1
 
