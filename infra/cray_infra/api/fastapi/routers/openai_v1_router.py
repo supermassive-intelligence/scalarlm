@@ -34,10 +34,14 @@ from cray_infra.api.fastapi.routers.openai_v1_helpers import (
 from cray_infra.generate.metrics import get_metrics
 from cray_infra.util.get_config import get_config
 
+import aiohttp
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 
+import asyncio
+import json
 import logging
+import time
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -47,17 +51,42 @@ openai_v1_router = APIRouter()
 
 @openai_v1_router.get("/models")
 async def list_models():
-    """List available models - proxy to vLLM server."""
-    session = get_global_session()
+    """List available models.
+
+    Prefer vLLM's own /v1/models, but fall back to ScalarLM's configured
+    model so discovery keeps working when the vLLM server's endpoint is
+    unavailable (e.g. the prometheus instrumentator returns 500). OpenAI
+    clients only need the ``{object: "list", data: [{id, ...}]}`` shape.
+    """
     config = get_config()
-    async with session.get(config["vllm_api_url"] + "/v1/models") as resp:
-        if resp.status == 200:
-            return await resp.json()
-        else:
-            return JSONResponse(
-                content={"error": f"Failed to fetch models: {resp.status}"},
-                status_code=resp.status,
+    try:
+        session = get_global_session()
+        async with session.get(
+            config["vllm_api_url"] + "/v1/models",
+            timeout=aiohttp.ClientTimeout(total=5),
+        ) as resp:
+            if resp.status == 200:
+                return await resp.json()
+            logger.warning(
+                "vLLM /v1/models returned %s; serving model list from config",
+                resp.status,
             )
+    except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError) as e:
+        logger.warning(
+            "vLLM /v1/models unavailable (%s); serving model list from config", e
+        )
+
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": config["model"],
+                "object": "model",
+                "created": int(time.time()),
+                "owned_by": "scalarlm",
+            }
+        ],
+    }
 
 
 @openai_v1_router.post("/completions")
