@@ -163,3 +163,17 @@ def test_wait_for_all_up_default_key_is_all(monkeypatch):
     monkeypatch.setattr(rfs, "get_health", lambda url, timeout=5: {"vllm": "up", "all": "down"})
     monkeypatch.setattr(rfs.time, "sleep", lambda s: None)  # don't actually sleep 2s
     assert rfs.wait_for_all_up("http://x", None, timeout=0.01) is False  # no health_key -> default "all" -> False
+
+def test_k8s_scale_cmd():
+    assert rfs.k8s_scale_cmd("statefulset/scalarlm-megatron", 0, "sweep-qwen") == [
+        "kubectl", "scale", "statefulset/scalarlm-megatron", "--replicas=0", "-n", "sweep-qwen"]
+
+def test_kubectl_scale_true_on_success(monkeypatch):
+    monkeypatch.setattr(rfs.subprocess, "run", lambda *a, **k: None)
+    assert rfs.kubectl_scale("deployment/scalarlm-vllm", 1, "sweep-qwen", log=None) is True
+
+def test_kubectl_scale_false_on_error(monkeypatch):
+    def boom(*a, **k):
+        raise rfs.subprocess.CalledProcessError(1, a[0])
+    monkeypatch.setattr(rfs.subprocess, "run", boom)
+    assert rfs.kubectl_scale("deployment/scalarlm-vllm", 1, "sweep-qwen", log=None) is False

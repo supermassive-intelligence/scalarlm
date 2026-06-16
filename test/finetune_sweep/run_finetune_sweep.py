@@ -333,6 +333,12 @@ def k8s_get_pods_cmd(namespace: str) -> list[str]:
     return ["kubectl", "get", "pods", "-n", namespace, "-o", "json"]
 
 
+def k8s_scale_cmd(kind_name: str, replicas: int, namespace: str) -> list[str]:
+    """`kubectl scale <kind/name> --replicas=<n> -n <ns>`. kind_name is e.g.
+    "statefulset/scalarlm-megatron" or "deployment/scalarlm-vllm"."""
+    return ["kubectl", "scale", kind_name, f"--replicas={replicas}", "-n", namespace]
+
+
 # --- k8s side-effecting wrappers ---
 
 def kubectl_get_pods(namespace: str, timeout: float = 15) -> list[dict]:
@@ -346,6 +352,16 @@ def kubectl_get_pods(namespace: str, timeout: float = 15) -> list[dict]:
         return json.loads(result.stdout).get("items", [])
     except json.JSONDecodeError:
         return []
+
+
+def kubectl_scale(kind_name: str, replicas: int, namespace: str, log, timeout: float = 60) -> bool:
+    """Scale a Deployment/StatefulSet. True iff kubectl exits 0."""
+    try:
+        subprocess.run(k8s_scale_cmd(kind_name, replicas, namespace), cwd=REPO_ROOT,
+                       stdout=log, stderr=subprocess.STDOUT, check=True, timeout=timeout)
+        return True
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return False
 
 
 def helm_install(target_cfg: dict, namespace: str, model_id: str, log, timeout: float = 600) -> bool:
