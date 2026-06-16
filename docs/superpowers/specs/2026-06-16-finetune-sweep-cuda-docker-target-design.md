@@ -37,15 +37,28 @@ lifecycle code.
 - **Out of scope**: any chart change, the phase-scaled k8s loop, and making
   `cuda-docker` a production path (it is explicitly testing-only).
 
-## Directive tension (must be recorded)
+## Relationship to the single-GPU-arbiter directive (outside its scope)
 
-A standing supervisor directive says GPU sweeps must go through the **k8s
-single-GPU arbiter**, and the sweep's Compose stack-launch was to become a Helm
-rollout. A `cuda-docker` target reintroduces exactly that Compose stack-launch.
-This is accepted **only as a testing affordance while k8s compute is
-unavailable**: `cuda-k8s` remains the canonical GPU path. The manifest comment
-and an amendment to ADR 0003 record this so the deviation is intentional and
-visible, not silent drift.
+`cuda-docker` is **not** a deviation from the supervisor's GPU directive — it
+sits **outside the directive's scope**. ADR 0003 (2026-06-15 amendment) records
+the directive precisely: "use the cluster instead of running scripts directly" is
+concretely **"no GPU work outside the scheduler"** — and "it does not forbid
+running helm/kubectl from the host." Its *reason* is specific to a
+**scheduler-managed box** like `blackwell-maxq-0`: a Compose vLLM container there
+occupies a GPU outside k8s's knowledge, so k8s can double-place a pod onto a busy
+card → CUDA OOM / contention.
+
+`cuda-docker` targets a box that runs **no Helm/k8s scheduler** (the 3090). There
+is no scheduler there to subvert and no pods to double-place, so it cannot
+reintroduce the contention the directive guards against. It is a **testing
+affordance for scheduler-less GPU boxes**; `cuda-k8s` remains the canonical path
+for the scheduler-managed cluster.
+
+**The one real guardrail this implies:** `cuda-docker` must **never** be run on a
+k8s node (`blackwell-maxq-0`). *There* a Compose GPU launch would be exactly the
+behind-the-scheduler's-back contention the directive forbids. On a scheduler-less
+box it is fine. The manifest comment and the ADR amendment record this scope and
+guardrail.
 
 ## Design
 
@@ -65,9 +78,11 @@ targets:
     compose_service: cray-nvidia
     restart_cmd: "SCALARLM_MODEL={model} ./scalarlm up nvidia"
     train_args_overrides: { gpus: 1 }
-    # Reintroduces a Compose GPU stack-launch, which the k8s single-GPU-arbiter
-    # directive moved away from. Use only while k8s compute is unavailable;
-    # cuda-k8s stays the canonical GPU path. See the 2026-06-16 amendment in
+    # Testing target for a GPU box that runs NO Helm/k8s scheduler (the 3090).
+    # Outside the "no GPU work outside the scheduler" directive's scope (no
+    # scheduler here to subvert). GUARDRAIL: never run on a k8s node
+    # (blackwell-maxq-0) -- there it WOULD contend with the scheduler. cuda-k8s
+    # stays the canonical path for the cluster. See the 2026-06-16 amendment in
     # docs/adr/0003-finetune-sweep-restart-per-model.md.
 
   cuda-k8s:                    # canonical GPU path (was `cuda`); k8s, phase-scaled.
@@ -106,6 +121,55 @@ config-driven dispatch, mirroring the existing config-driven `is_k8s_target`
   existing post-load check (`if args.target not in manifest["targets"]:
   ap.error(...)`) already validates against the manifest's keys, so accepted
   targets auto-track `cpu` / `cuda-docker` / `cuda-k8s`.
+- **`--restart-timeout` default 600 → 3000.** `./scalarlm up nvidia` runs
+  `docker compose up --build`, and the Dockerfile compiles **vLLM from source**
+  for the GPU arch (`pip install --no-build-isolation -e .`) on `nvcr.io/nvidia/
+  pytorch`. A cold build is tens of minutes, so the 600s health-wait would record
+  the first model as `RESTART_FAILED` for a reason unrelated to the sweep
+  (subsequent `--force-recreate` builds are cache hits and fast). 3000s (50 min)
+  covers the cold build unattended. Raising the *default* (not a per-target
+  override) is safe: it is only a ceiling — `wait_for_all_up` / `helm_install`
+  return as soon as healthy, so `cpu` and `cuda-k8s` happy paths are unaffected;
+  only their failure-detection latency grows, an acceptable trade for not failing
+  the cold GPU build.
+
+### How one GPU serves both train and serve (no phase handoff)
+
+`cuda-k8s` needs the phase-scaled design — two `kubectl scale`s and a GPU
+handoff — because vLLM and megatron are **separate pods**, each reserving a card,
+so a single GPU cannot host both at once. The Compose path has no such split. The
+`cray-nvidia` service runs `one_server.main`, and `start_cray_server` with the
+default `server_list="all"` brings up the **API + vLLM in-process** while training
+is dispatched as a **slurm job** (slurmd runs in the same container via
+`start_slurm.sh`). So one container hosts the server and the trainer, and they
+**share the single GPU simultaneously** — this is a *co-located run*, the
+co-location strategy the phase-scaled k8s spec rejected as "chart surgery" but
+which Compose provides for free. Consequently `cuda-docker` needs **none** of the
+phase-scaling machinery: no `replicaCounts` overrides, no scale calls, no GPU
+handoff, no per-phase health gating. It is the plain always-on Compose loop on a
+GPU, gated only by the model fitting the one card alongside vLLM (Qwen2.5-0.5B
+fp32 on a 3090's ~24 GB is comfortable).
+
+### Teardown note (GPU not fully reclaimed by `teardown_stack`)
+
+`teardown_stack` SIGKILLs the `./scalarlm up nvidia` process group, but
+`./scalarlm up` runs `docker compose up cray-nvidia` in the **foreground
+(attached, not `-d`)**. The container is owned by the docker daemon, so SIGKILL
+kills the compose CLI and leaves the `cray-nvidia` container running, **still
+holding the GPU**. `teardown_stack`'s settle loop only watches for VRAM to stop
+*climbing*, so a leaked-but-idle container reads as "settled" though the card was
+never freed. Consequences for `cuda-docker`:
+
+- **Between models** the next `./scalarlm up nvidia` self-heals, because it runs
+  with `--force-recreate` (stops + recreates the container, freeing then
+  re-claiming the card). So a multi-model sweep is correct.
+- **After the last/only model** (the manifest currently has exactly one) the
+  `cray-nvidia` container survives the run and keeps the GPU bound until a manual
+  `docker compose -f docker-compose.yaml down cray-nvidia`.
+
+This is accepted for a testing-only target rather than changing the shared
+`teardown_stack` (which `cpu` also uses). The integration-test steps document the
+manual `down`. We do **not** claim clean VRAM reclamation for this path.
 
 ### What stays identical
 
@@ -135,13 +199,23 @@ stack here).
   `gpus` 0/1/absent) and for `cuda-docker` selecting the Compose lifecycle (not
   k8s) and triggering the VRAM probe. `Result(target="cuda")` labels are free
   strings — leave as-is or relabel cosmetically.
-- **Docs**: the k8s and phase-scaled specs and the runner module docstring
-  reference `--target cuda`; add a note that the k8s target is now `cuda-k8s` and
-  a `cuda-docker` sibling exists. (The specs are historical design records; a
-  light note suffices, no rewrite.)
+- **Stale docstring**: `teardown_stack`'s docstring says it "mirrors
+  teardown_engine in test/model_sweep/run_sweep.py", but that file no longer
+  exists (only `__pycache__` remains). Drop or correct the reference while we're
+  in this code — a one-line cleanup, not a behavior change.
+- **Docs (forward-record only)**: do **not** back-edit historical mentions of the
+  `cuda` target — ADR 0003's existing amendments and the k8s/phase-scaled specs
+  correctly describe the state at *their* date (when the target was named
+  `cuda`). Record the `cuda` → `cuda-k8s` rename **only** in the new 2026-06-16
+  amendment. Update **only live surfaces** a user runs against today: the runner
+  module docstring's `--target cuda` usage example, and the manifest. This matches
+  standard ADR practice (amend forward, never rewrite history) and keeps the blast
+  radius tiny.
 - **ADR**: amend `docs/adr/0003-finetune-sweep-restart-per-model.md` (2026-06-16)
   recording the testing-only Compose-GPU target, the `cuda` → `cuda-k8s` rename,
-  and the single-GPU-arbiter directive tension.
+  and the directive **scope boundary + box-confinement guardrail** (`cuda-docker`
+  is outside the "no GPU work outside the scheduler" directive; never run it on a
+  k8s node).
 
 ## Consequences
 
@@ -149,9 +223,10 @@ stack here).
 - **Config-driven dispatch** removes three brittle literal-name branches, so
   future targets are manifest-only — a net simplification the third target pays
   for.
-- **Deviates from the single-GPU-arbiter directive** for the Compose-GPU path.
-  Mitigated by the testing-only framing, the manifest comment, and the ADR
-  amendment; `cuda-k8s` stays canonical.
+- **Sits outside the single-GPU-arbiter directive** (a scheduler-less GPU box has
+  no scheduler to subvert), not in tension with it — provided the box-confinement
+  guardrail holds: never run `cuda-docker` on the k8s node. `cuda-k8s` stays
+  canonical for the cluster.
 - **Two GPU targets to keep in sync** if the closed loop changes — but they share
   every helper below the lifecycle branch, so the surface is small.
 
@@ -162,17 +237,25 @@ stack here).
   Compose lifecycle and triggering the VRAM probe. Run with
   `PYTHONPATH=infra uv run --with pytest --with torch python -m pytest`.
 - **Integration (on the 3090):** `python3 run_finetune_sweep.py --target
-  cuda-docker` — full train → hot-load → serve closed loop on the GPU; confirm
-  `nvidia-smi` shows the `cray-nvidia` container using the card and the result
-  reaches PASS/NO_MEMORIZATION.
+  cuda-docker` — full train → hot-load → serve closed loop on the GPU. The first
+  run compiles the vLLM image (covered by the 3000s `--restart-timeout`);
+  subsequent runs are cache-hit fast. Confirm `nvidia-smi` shows the
+  `cray-nvidia` container using the card and the result reaches
+  PASS/NO_MEMORIZATION. Afterwards, free the card with `docker compose -f
+  docker-compose.yaml down cray-nvidia` (see the teardown note — the container
+  outlives the runner).
 
 ## ADR impact
 
 Recorded as the **2026-06-16 amendment to ADR 0003**
 (`docs/adr/0003-finetune-sweep-restart-per-model.md`): "the sweep exposes a
 testing-only `cuda-docker` target that runs the GPU closed loop via Docker
-Compose on a single-GPU box, bypassing k8s, while compute for the canonical
-`cuda-k8s` path is unavailable." It is a deliberate, recorded deviation from the
-single-GPU-arbiter directive (hence ADR-worthy), continues the per-model → k8s →
-1-GPU narrative already in that ADR, and renames the prior `cuda` target to
-`cuda-k8s`.
+Compose on a **scheduler-less** GPU box (the 3090), and renames the prior `cuda`
+target to `cuda-k8s`." The amendment's job is to record the **scope and
+guardrail** a future reader will otherwise misread: `cuda-docker` is *outside* the
+2026-06-15 amendment's "no GPU work outside the scheduler" directive (no scheduler
+on that box), **not** a deviation from it — and it must never be run on a k8s node
+(`blackwell-maxq-0`), where it would become exactly the behind-the-scheduler
+contention that amendment forbids. It is ADR-worthy because that scope boundary is
+surprising without context (the prior amendment moved GPU work *onto* k8s), and it
+continues the per-model → k8s → 1-GPU → scheduler-less-testing narrative.
