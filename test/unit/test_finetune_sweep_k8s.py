@@ -255,3 +255,62 @@ def test_serve_check_bad_checkpoint(monkeypatch):
     rfs.serve_check_and_classify("http://x", "p", "SECRET123", "abc", "COMPLETED",
                                  ["base.lora_A.weight"], _ServeArgs(), res)
     assert res.outcome == rfs.BAD_CHECKPOINT
+
+
+def test_run_model_k8s_phased_orders_gpu_handoff(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(rfs, "delete_namespace", lambda ns, log, **k: None)
+    monkeypatch.setattr(rfs, "helm_install", lambda *a, **k: True)
+    monkeypatch.setattr(rfs, "wait_for_pods_ready", lambda ns, t, **k: "ready")
+    monkeypatch.setattr(rfs, "start_port_forward", lambda *a, **k: None)
+    monkeypatch.setattr(rfs, "wait_for_all_up", lambda *a, **k: True)
+    monkeypatch.setattr(rfs, "submit_train", lambda *a, **k: {"job_directory": "/app/cray/jobs/abc"})
+    monkeypatch.setattr(rfs, "poll_training", lambda *a, **k: "COMPLETED")
+    monkeypatch.setattr(rfs, "read_checkpoint_keys_k8s",
+                        lambda *a, **k: ["base.lora_A.weight", "base.lora_B.weight"])
+    monkeypatch.setattr(rfs, "kubectl_scale",
+                        lambda kn, r, ns, log, **k: (calls.append((kn, r)), True)[1])
+    monkeypatch.setattr(rfs, "wait_for_pods_gone", lambda *a, **k: "gone")
+    # baseline (model="Qwen/...") has no secret; adapter (model="abc") memorizes it.
+    monkeypatch.setattr(rfs, "generate",
+                        lambda api, prompts, model, mt: ["x SECRET123 y"] if model == "abc"
+                        else ["plain baseline"])
+    monkeypatch.setattr(rfs.time, "sleep", lambda s: None)
+
+    cfg = {**CUDA_CFG, "vllm_deploy": "scalarlm-vllm", "phase_scaled": True}
+    args = type("A", (), {"api_url": "http://x", "restart_timeout": 1, "serve_timeout": 1,
+                          "train_timeout": 1, "max_tokens": 32, "gpu_wait_timeout": 1})()
+    res = rfs.Result(model="Qwen/Qwen2.5-0.5B", target="cuda")
+    with open(tmp_path / "log.txt", "w") as log:
+        out = rfs.run_model_k8s_phased(cfg, "Qwen/Qwen2.5-0.5B", {}, [], "p", "SECRET123",
+                                       args, res, log)
+
+    assert out.outcome == rfs.PASS
+    # megatron must be freed (->0) before vLLM claims the GPU (->1).
+    assert calls == [("statefulset/scalarlm-megatron", 0), ("deployment/scalarlm-vllm", 1)]
+
+
+def test_run_model_k8s_phased_fails_fast_on_scale_down(monkeypatch, tmp_path):
+    # Phase 0/1 succeed, then the megatron scale-down fails -> RESTART_FAILED.
+    monkeypatch.setattr(rfs, "delete_namespace", lambda ns, log, **k: None)
+    monkeypatch.setattr(rfs, "helm_install", lambda *a, **k: True)
+    monkeypatch.setattr(rfs, "wait_for_pods_ready", lambda ns, t, **k: "ready")
+    monkeypatch.setattr(rfs, "start_port_forward", lambda *a, **k: None)
+    monkeypatch.setattr(rfs, "wait_for_all_up", lambda *a, **k: True)
+    monkeypatch.setattr(rfs, "submit_train", lambda *a, **k: {"job_directory": "/app/cray/jobs/abc"})
+    monkeypatch.setattr(rfs, "poll_training", lambda *a, **k: "COMPLETED")
+    monkeypatch.setattr(rfs, "read_checkpoint_keys_k8s",
+                        lambda *a, **k: ["base.lora_A.weight", "base.lora_B.weight"])
+    monkeypatch.setattr(rfs, "kubectl_scale", lambda kn, r, ns, log, **k: False)  # scale fails
+    monkeypatch.setattr(rfs.time, "sleep", lambda s: None)
+
+    cfg = {**CUDA_CFG, "vllm_deploy": "scalarlm-vllm", "phase_scaled": True}
+    args = type("A", (), {"api_url": "http://x", "restart_timeout": 1, "serve_timeout": 1,
+                          "train_timeout": 1, "max_tokens": 32, "gpu_wait_timeout": 1})()
+    res = rfs.Result(model="Qwen/Qwen2.5-0.5B", target="cuda")
+    with open(tmp_path / "log.txt", "w") as log:
+        out = rfs.run_model_k8s_phased(cfg, "Qwen/Qwen2.5-0.5B", {}, [], "p", "SECRET123",
+                                       args, res, log)
+
+    assert out.outcome == rfs.RESTART_FAILED
+    assert "megatron->0" in out.detail

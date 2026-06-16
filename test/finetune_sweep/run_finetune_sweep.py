@@ -587,6 +587,92 @@ def read_checkpoint_keys(compose_service: str, job_hash: str, timeout: float = 6
     return _parse_checkpoint_keys_output(result.stdout)
 
 
+def run_model_k8s_phased(target_cfg: dict, model_id: str, train_args: dict, dataset: list[dict],
+                         golden_prompt: str, expected_output: str, args, res, log) -> "Result":
+    """Phase-scaled k8s closed loop (peak GPU = 1). Re-sequences run_model:
+    install vLLM=0/megatron=1 -> train (phase 1) -> hand the GPU to vLLM (phase 2)
+    -> baseline + hot-load + memorization check. See the 2026-06-16 amendment in
+    docs/adr/0003-finetune-sweep-restart-per-model.md."""
+    namespace = k8s_namespace(target_cfg["namespace_prefix"], model_id)
+    gpu_wait = target_cfg.get("gpu_wait_timeout", args.gpu_wait_timeout)
+    pf_proc = None
+    restart_start = time.time()
+    try:
+        # --- Phase 0: install; megatron holds the single GPU, vLLM is off. ---
+        delete_namespace(namespace, log)  # idempotent pre-clean
+        if not helm_install(target_cfg, namespace, model_id, log, args.restart_timeout):
+            res.restart_seconds = round(time.time() - restart_start, 1)
+            res.outcome, res.detail = RESTART_FAILED, "helm upgrade --install failed"
+            return res
+        if wait_for_pods_ready(namespace, gpu_wait) != "ready":
+            res.restart_seconds = round(time.time() - restart_start, 1)
+            res.outcome, res.detail = RESTART_FAILED, f"megatron not schedulable within {gpu_wait}s"
+            return res
+        pf_proc = start_port_forward(target_cfg, namespace, log)
+        # Gate on slurm-registered megatron (NOT health.all -- vLLM is down).
+        if not wait_for_all_up(args.api_url, pf_proc, args.restart_timeout, health_key="megatron"):
+            res.restart_seconds = round(time.time() - restart_start, 1)
+            res.outcome, res.detail = RESTART_FAILED, "megatron health not up after port-forward"
+            return res
+        res.restart_seconds = round(time.time() - restart_start, 1)
+
+        # --- Phase 1: train (vLLM absent; baseline deferred to phase 2). ---
+        train_start = time.time()
+        try:
+            job_status = submit_train(args.api_url, dataset, train_args)
+        except Exception as e:
+            res.outcome, res.detail = TRAIN_FAILED, f"submit_train failed: {e}"
+            return res
+        job_hash = job_status["job_directory"].rstrip("/").split("/")[-1]
+        train_status = poll_training(args.api_url, job_hash, args.train_timeout)
+        res.train_seconds = round(time.time() - train_start, 1)
+
+        checkpoint_keys: list[str] | None = None
+        if train_status == "COMPLETED":
+            checkpoint_keys = read_checkpoint_keys_k8s(target_cfg, namespace, job_hash)
+
+        # --- Phase 2: hand the GPU from megatron to vLLM. ---
+        if not kubectl_scale(f"statefulset/{target_cfg['megatron_sts']}", 0, namespace, log):
+            res.outcome, res.detail = RESTART_FAILED, "kubectl scale megatron->0 failed"
+            return res
+        if wait_for_pods_gone(namespace, MEGATRON_POD_SELECTOR, gpu_wait) != "gone":
+            res.outcome, res.detail = RESTART_FAILED, f"megatron did not release GPU within {gpu_wait}s"
+            return res
+        if not kubectl_scale(f"deployment/{target_cfg['vllm_deploy']}", 1, namespace, log):
+            res.outcome, res.detail = RESTART_FAILED, "kubectl scale vllm->1 failed"
+            return res
+        if wait_for_pods_ready(namespace, gpu_wait) != "ready":
+            res.outcome, res.detail = RESTART_FAILED, f"vLLM not schedulable within {gpu_wait}s"
+            return res
+        # Gate on vLLM serving (NOT health.all -- megatron is down now).
+        if not wait_for_all_up(args.api_url, pf_proc, args.serve_timeout, health_key="vllm"):
+            res.outcome, res.detail = RESTART_FAILED, "vllm health not up after scale-up"
+            return res
+
+        # Baseline (control on the base model) -- moved here: vLLM is now up.
+        try:
+            baseline = generate(args.api_url, [golden_prompt], model_id, args.max_tokens)
+            res.baseline_sample = baseline[0][:200]
+            if expected_output in baseline[0]:
+                res.detail = "expected_output already present in baseline output"
+        except Exception as e:
+            res.outcome, res.detail = RESTART_FAILED, f"baseline generate failed: {e}"
+            return res
+
+        # Hot-load + classify (shared with the 2-GPU path).
+        serve_check_and_classify(args.api_url, golden_prompt, expected_output, job_hash,
+                                 train_status, checkpoint_keys, args, res)
+        return res
+    finally:
+        if pf_proc is not None:
+            try:
+                os.killpg(os.getpgid(pf_proc.pid), signal.SIGKILL)
+            except OSError:
+                pass
+            pf_proc.wait()
+        delete_namespace(namespace, log)
+
+
 def run_model(manifest: dict, target: str, model: dict, args, results_dir: Path) -> Result:
     model_id = model["id"]
     res = Result(model=model_id, target=target)
@@ -613,6 +699,10 @@ def run_model(manifest: dict, target: str, model: dict, args, results_dir: Path)
     expected_output = manifest["expected_output"]
 
     log_path = results_dir / f"{model_id.replace('/', '_')}.{target}.restart.log"
+    if is_k8s and target_cfg.get("phase_scaled"):
+        with open(log_path, "w") as log:
+            return run_model_k8s_phased(target_cfg, model_id, train_args, dataset,
+                                        golden_prompt, expected_output, args, res, log)
     namespace = pf_proc = proc = None
     restart_start = time.time()
     with open(log_path, "w") as log:
