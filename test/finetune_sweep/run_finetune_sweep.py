@@ -306,13 +306,19 @@ def is_k8s_target(target_cfg: dict) -> bool:
 
 
 def k8s_helm_install_cmd(target_cfg: dict, namespace: str, model_id: str) -> list[str]:
-    return [
+    cmd = [
         "helm", "upgrade", "--install", target_cfg["release"], target_cfg["chart_path"],
         "-n", namespace, "--create-namespace",
         "--set", f"model={model_id}",
         "--set", "storage.cache.kind=hostPath",
         "--set", f"storage.cache.hostPath={target_cfg['cache_hostpath']}",
     ]
+    if target_cfg.get("phase_scaled"):
+        # Phase 0: megatron holds the single GPU; vLLM is off until the phase-2
+        # handoff. Use replicaCounts, NOT vllm.enabled=false (which drops the
+        # Deployment and leaves nothing for `kubectl scale` to bring up).
+        cmd += ["--set", "replicaCounts.inference=0", "--set", "replicaCounts.training=1"]
+    return cmd
 
 
 def k8s_delete_namespace_cmd(namespace: str) -> list[str]:

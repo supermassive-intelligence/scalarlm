@@ -203,3 +203,14 @@ def test_wait_for_pods_gone_times_out_while_present(monkeypatch):
 
 def test_megatron_pod_selector_is_component_label():
     assert rfs.MEGATRON_POD_SELECTOR == "app.kubernetes.io/component=megatron"
+
+def test_helm_install_cmd_no_phase_scaling_by_default():
+    cmd = rfs.k8s_helm_install_cmd(CUDA_CFG, "sweep-qwen", "Qwen/Qwen2.5-0.5B")
+    assert "replicaCounts.inference=0" not in cmd
+    assert "replicaCounts.training=1" not in cmd
+
+def test_helm_install_cmd_phase_scaled_sets_replica_counts():
+    cfg = {**CUDA_CFG, "phase_scaled": True}
+    cmd = rfs.k8s_helm_install_cmd(cfg, "sweep-qwen", "Qwen/Qwen2.5-0.5B")
+    assert "replicaCounts.inference=0" in cmd  # vLLM off in phase 0/1
+    assert "replicaCounts.training=1" in cmd   # megatron holds the single GPU
