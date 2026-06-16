@@ -182,15 +182,17 @@ def get_health(api_url: str, timeout: float = 5) -> dict | None:
         return None
 
 
-def wait_for_all_up(api_url: str, proc, timeout: float) -> bool:
-    """Poll /v1/health until health["all"] == "up", the restart process dies
-    (Compose only; pass proc=None for k8s), or timeout. True iff ready."""
+def wait_for_all_up(api_url: str, proc, timeout: float, health_key: str = "all") -> bool:
+    """Poll /v1/health until health[health_key] == "up", the restart process dies
+    (Compose only; pass proc=None for k8s), or timeout. True iff ready. The
+    phase-scaled k8s path passes health_key="megatron" (phase 1) / "vllm" (phase 2)
+    because health["all"] is structurally down when only one GPU service is up."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         if proc is not None and proc.poll() is not None:
             return False
         health = get_health(api_url)
-        if health and health.get("all") == "up":
+        if health and health.get(health_key) == "up":
             return True
         time.sleep(2)
     return False
