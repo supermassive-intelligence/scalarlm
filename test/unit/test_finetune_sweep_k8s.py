@@ -324,3 +324,15 @@ def test_run_model_k8s_phased_fails_fast_on_scale_down(monkeypatch, tmp_path):
 
     assert out.outcome == rfs.RESTART_FAILED
     assert "megatron->0" in out.detail
+
+
+def test_target_requests_gpu_true_when_gpus_one():
+    assert rfs.target_requests_gpu({"train_args_overrides": {"gpus": 1}}) is True
+
+def test_target_requests_gpu_false_when_gpus_zero():
+    assert rfs.target_requests_gpu({"train_args_overrides": {"gpus": 0}}) is False
+
+def test_target_requests_gpu_defaults_true_when_unset():
+    # JobConfig defaults gpus=1, so a target with no override requests a GPU.
+    assert rfs.target_requests_gpu({}) is True
+    assert rfs.target_requests_gpu({"train_args_overrides": {}}) is True

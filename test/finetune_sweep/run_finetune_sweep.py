@@ -363,6 +363,14 @@ def is_k8s_target(target_cfg: dict) -> bool:
     return "chart_path" in target_cfg
 
 
+def target_requests_gpu(target_cfg: dict) -> bool:
+    """True iff this target runs training on a GPU. Config-driven (not keyed on
+    the target name), mirroring is_k8s_target: JobConfig defaults gpus=1 and only
+    the cpu target overrides it to 0, so this is True for the GPU targets
+    (cuda-docker, cuda-k8s) and False for cpu."""
+    return target_cfg.get("train_args_overrides", {}).get("gpus", 1) >= 1
+
+
 def k8s_helm_install_cmd(target_cfg: dict, namespace: str, model_id: str) -> list[str]:
     cmd = [
         "helm", "upgrade", "--install", target_cfg["release"], target_cfg["chart_path"],
