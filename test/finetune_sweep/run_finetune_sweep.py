@@ -198,6 +198,24 @@ def wait_for_all_up(api_url: str, proc, timeout: float, health_key: str = "all")
     return False
 
 
+def poll_training(api_url: str, job_hash: str, train_timeout: float) -> str:
+    """Poll the training job until terminal (COMPLETED/FAILED/CANCELLED) or
+    train_timeout. Returns the terminal status or "TIMEOUT". Shared by the 2-GPU
+    and phase-scaled k8s paths."""
+    deadline = time.time() + train_timeout
+    while time.time() < deadline:
+        try:
+            info = get_training_job(api_url, job_hash)
+        except (urllib.error.URLError, RuntimeError):
+            time.sleep(5)
+            continue
+        st = info.get("status")
+        if st in ("COMPLETED", "FAILED", "CANCELLED"):
+            return st
+        time.sleep(5)
+    return "TIMEOUT"
+
+
 def build_dataset_tar(dataset: list[dict]) -> bytes:
     """In-memory tar containing dataset.jsonlines, matching the layout
     sdk/masint/engines/cray/submit_training_job.py builds."""
@@ -608,19 +626,7 @@ def run_model(manifest: dict, target: str, model: dict, args, results_dir: Path)
                 return res
             job_hash = job_status["job_directory"].rstrip("/").split("/")[-1]
 
-            train_status = "TIMEOUT"
-            deadline = time.time() + args.train_timeout
-            while time.time() < deadline:
-                try:
-                    info = get_training_job(args.api_url, job_hash)
-                except (urllib.error.URLError, RuntimeError):
-                    time.sleep(5)
-                    continue
-                st = info.get("status")
-                if st in ("COMPLETED", "FAILED", "CANCELLED"):
-                    train_status = st
-                    break
-                time.sleep(5)
+            train_status = poll_training(args.api_url, job_hash, args.train_timeout)
             res.train_seconds = round(time.time() - train_start, 1)
 
             checkpoint_keys: list[str] | None = None

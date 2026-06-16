@@ -214,3 +214,12 @@ def test_helm_install_cmd_phase_scaled_sets_replica_counts():
     cmd = rfs.k8s_helm_install_cmd(cfg, "sweep-qwen", "Qwen/Qwen2.5-0.5B")
     assert "replicaCounts.inference=0" in cmd  # vLLM off in phase 0/1
     assert "replicaCounts.training=1" in cmd   # megatron holds the single GPU
+
+def test_poll_training_returns_terminal_status(monkeypatch):
+    monkeypatch.setattr(rfs, "get_training_job", lambda url, jh, timeout=10: {"status": "COMPLETED"})
+    assert rfs.poll_training("http://x", "abc", train_timeout=1) == "COMPLETED"
+
+def test_poll_training_times_out(monkeypatch):
+    monkeypatch.setattr(rfs, "get_training_job", lambda url, jh, timeout=10: {"status": "TRAINING"})
+    monkeypatch.setattr(rfs.time, "sleep", lambda s: None)
+    assert rfs.poll_training("http://x", "abc", train_timeout=0.01) == "TIMEOUT"
