@@ -43,6 +43,21 @@ services:
             - type: bind
               source: ./test
               target: /app/cray/test
+            # Live-mount the fork's pure-Python vLLM code so edits take effect
+            # on a container *restart* instead of an image rebuild + CUDA
+            # recompile. These dirs are pure Python — the compiled .so kernels
+            # live in /app/cray/vllm/vllm/ (top level), which is NOT mounted, so
+            # they aren't shadowed. Coherent only when host ./vllm matches the
+            # built vLLM (VLLM_SOURCE=local, or remote built from the same branch).
+            - type: bind
+              source: ./vllm/vllm/model_executor/models
+              target: /app/cray/vllm/vllm/model_executor/models
+            - type: bind
+              source: ./vllm/vllm/config
+              target: /app/cray/vllm/vllm/config
+            - type: bind
+              source: ./vllm/vllm/tokenformer
+              target: /app/cray/vllm/vllm/tokenformer
         networks:
             - cray-network
 
