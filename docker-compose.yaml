@@ -2,6 +2,16 @@ services:
 
     cray: &cray
         command: /app/cray/scripts/start_one_server.sh
+        # Forward host SCALARLM_* overrides into the container. Compose only
+        # substitutes ${VAR} into the compose file itself; it does NOT inject
+        # host env into the container unless listed here. get_config() reads
+        # these from the in-container os.environ (SCALARLM_MODEL -> config
+        # "model"; SCALARLM_VLLM_ARGS read by create_vllm). Without this,
+        # `SCALARLM_MODEL=... ./scalarlm up <target>` silently serves the
+        # default model and /v1/generate 404s for the requested model.
+        environment:
+            - SCALARLM_MODEL
+            - SCALARLM_VLLM_ARGS
         build:
             context: .
             dockerfile: Dockerfile

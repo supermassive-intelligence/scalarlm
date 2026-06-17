@@ -200,6 +200,36 @@ def wait_for_all_up(api_url: str, proc, timeout: float, health_key: str = "all")
     return False
 
 
+def get_served_models(api_url: str, timeout: float = 5) -> set[str]:
+    """Model ids vLLM currently serves (via the cray API's /v1/models proxy).
+    Empty set if the endpoint is unreachable or malformed."""
+    req = urllib.request.Request(f"{api_url}/v1/models", method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.loads(r.read())
+        return {m["id"] for m in data.get("data", [])}
+    except (urllib.error.URLError, ConnectionError, OSError, ValueError, KeyError, TypeError):
+        return set()
+
+
+def wait_for_model_served(api_url: str, model_id: str, proc, timeout: float) -> bool:
+    """Like wait_for_all_up, but also requires the served model to be `model_id`.
+    The Compose teardown leaves the previous model's container running (see
+    teardown_stack), so health.all=="up" alone can be satisfied by the STALE
+    stack before `--force-recreate` swaps in the new model — gating on
+    /v1/models too makes the runner block until the new container is actually
+    serving model_id."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if proc is not None and proc.poll() is not None:
+            return False
+        health = get_health(api_url)
+        if health and health.get("all") == "up" and model_id in get_served_models(api_url):
+            return True
+        time.sleep(2)
+    return False
+
+
 def poll_training(api_url: str, job_hash: str, train_timeout: float) -> str:
     """Poll the training job until terminal (COMPLETED/FAILED/CANCELLED) or
     train_timeout. Returns the terminal status or "TIMEOUT". Shared by the 2-GPU
@@ -749,11 +779,14 @@ def run_model(manifest: dict, target: str, model: dict, args, results_dir: Path)
                 res.restart_seconds = round(time.time() - restart_start, 1)
             else:
                 proc = start_restart(target_cfg, model_id, log)
-                ready = wait_for_all_up(args.api_url, proc, args.restart_timeout)
+                # Model-aware wait: a stale (previous-model) container left
+                # running by teardown_stack is still health.all=="up", so we
+                # also gate on /v1/models serving model_id before proceeding.
+                ready = wait_for_model_served(args.api_url, model_id, proc, args.restart_timeout)
                 res.restart_seconds = round(time.time() - restart_start, 1)
                 if not ready:
                     res.outcome = RESTART_FAILED
-                    res.detail = "stack did not report health.all == 'up' in time"
+                    res.detail = f"stack did not serve {model_id} (health.all/up + /v1/models) in time"
                     return res
 
             try:
