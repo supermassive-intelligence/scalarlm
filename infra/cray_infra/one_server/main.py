@@ -21,12 +21,11 @@ from cray_infra.one_server.log_handlers import get_log_file_handlers
 
 logger = logging.getLogger(__name__)
 
-logging.basicConfig(level=logging.DEBUG,
-    handlers=get_log_file_handlers() + [
-        logging.StreamHandler()
-    ]
+logging.basicConfig(
+    level=logging.DEBUG, handlers=get_log_file_handlers() + [logging.StreamHandler()]
 )
 quiet_noisy_loggers()
+
 
 def main():
     try:
@@ -66,7 +65,9 @@ def run_all_servers(sockets):
 async def run_all_servers_async():
     config = get_config()
 
-    server_status = await start_cray_server(server_list=[config["server_list"]])
+    server_status = await start_cray_server(
+        server_list=get_server_list(config["server_list"])
+    )
 
     logger.info(f"Running with {len(server_status.tasks)} servers")
 
@@ -109,6 +110,10 @@ async def run_all_servers_async():
             logger.error(traceback.format_exc())
             raise
 
+def get_server_list(server_list_config):
+    servers = server_list_config.split(",")
+
+    return [server.strip() for server in servers if server.strip()]
 
 
 if __name__ == "__main__":
