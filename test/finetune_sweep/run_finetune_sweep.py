@@ -45,6 +45,8 @@ DEFAULT_RESULTS_DIR = HERE / "results"
 # Outcome enum (see docs/adr/0003-finetune-sweep-restart-per-model.md). Best -> worst.
 PASS = "PASS"
 NO_MEMORIZATION = "NO_MEMORIZATION"
+ADAPTER_NO_OP = "ADAPTER_NO_OP"
+PRECHECK_NO_OP = "PRECHECK_NO_OP"
 ADAPTER_NOT_LOADED = "ADAPTER_NOT_LOADED"
 BAD_CHECKPOINT = "BAD_CHECKPOINT"
 TRAIN_FAILED = "TRAIN_FAILED"
@@ -53,7 +55,8 @@ RESTART_FAILED = "RESTART_FAILED"
 SKIPPED = "SKIPPED"
 
 # NO_MEMORIZATION is expected (not yet a hard fail) until the LoRA-memorization
-# open question in the design spec is resolved.
+# open question in the design spec is resolved. ADAPTER_NO_OP and PRECHECK_NO_OP
+# are both failing: the adapter served (or is predicted to serve) base output.
 NON_FAILING_OUTCOMES = {PASS, SKIPPED, NO_MEMORIZATION}
 
 
@@ -64,6 +67,7 @@ class Result:
     adapter_type: str = "lora"
     outcome: str = SKIPPED
     detail: str = ""
+    hint: str = ""  # root-cause hint (preflight key diff, or scraped no-op warning)
     baseline_sample: str = ""
     adapter_sample: str = ""
     restart_seconds: float = 0.0
@@ -160,10 +164,13 @@ def checkpoint_lora_keys_ok(state_dict_keys: list[str] | None) -> bool:
 
 
 def classify_result(train_status: str, checkpoint_keys: list[str] | None,
-                     adapter_loaded: bool, memorized: bool) -> str:
+                     adapter_loaded: bool, memorized: bool,
+                     adapter_is_noop: bool = False) -> str:
     """Map the per-step results of run_model's training+serving pipeline to an
     outcome. Assumes train_status == "COMPLETED" for any value not handled by
-    the first two branches."""
+    the first two branches. `adapter_is_noop` is True when the adapter served
+    output byte-identical to the baseline (LoRA silently dropped at activation);
+    combined with "did not memorize" it is the ADAPTER_NO_OP failure."""
     if train_status in ("FAILED", "CANCELLED"):
         return TRAIN_FAILED
     if train_status == "TIMEOUT":
@@ -172,7 +179,36 @@ def classify_result(train_status: str, checkpoint_keys: list[str] | None,
         return BAD_CHECKPOINT
     if not adapter_loaded:
         return ADAPTER_NOT_LOADED
+    if adapter_is_noop and not memorized:
+        return ADAPTER_NO_OP
     return PASS if memorized else NO_MEMORIZATION
+
+
+def preflight_hint(pf_result) -> str:
+    """Human-readable key diff for a PRECHECK_NO_OP row: the normalized adapter
+    module paths the preflight produced vs a sample of the base model's modules,
+    so a failure is self-explanatory without a per-model forensic dive."""
+    return (f"adapter keys {pf_result.sample_adapter_keys} "
+            f"vs base {pf_result.sample_base_modules}")
+
+
+def split_by_preflight(models: list[dict], pf_results: dict,
+                       target: str) -> tuple[list[dict], list["Result"]]:
+    """Partition `models` into (to_run, skipped) using the offline preflight.
+    A model whose PreflightResult `predicted_noop` is True (zero module overlap,
+    no build error) is excluded and recorded as a PRECHECK_NO_OP Result with a
+    key-diff hint. Models with no entry, or whose preflight errored (fail open),
+    stay in to_run — a preflight crash never silently skips a model."""
+    to_run: list[dict] = []
+    skipped: list[Result] = []
+    for m in models:
+        pf = pf_results.get(m["id"])
+        if pf is not None and pf.predicted_noop:
+            skipped.append(Result(model=m["id"], target=target,
+                                  outcome=PRECHECK_NO_OP, hint=preflight_hint(pf)))
+        else:
+            to_run.append(m)
+    return to_run, skipped
 
 
 def get_health(api_url: str, timeout: float = 5) -> dict | None:
@@ -250,11 +286,14 @@ def poll_training(api_url: str, job_hash: str, train_timeout: float) -> str:
 
 def serve_check_and_classify(api_url: str, golden_prompt: str, expected_output: str,
                              job_hash: str, train_status: str,
-                             checkpoint_keys: list[str] | None, args, res: "Result") -> None:
+                             checkpoint_keys: list[str] | None, args, res: "Result",
+                             baseline_full: str = "") -> None:
     """Hot-load the trained adapter, classify the outcome, and set the result
     fields (serve_seconds, outcome, adapter_sample, detail). Shared by the 2-GPU
     and phase-scaled k8s paths; the caller reads `checkpoint_keys` first (the read
-    mechanism differs per path)."""
+    mechanism differs per path) and passes the FULL baseline string for the no-op
+    discriminator (byte-identical adapter output under greedy decoding -> the LoRA
+    silently dropped at activation -> ADAPTER_NO_OP)."""
     adapter_loaded = False
     adapter_text = ""
     last_serve_error = ""
@@ -272,7 +311,9 @@ def serve_check_and_classify(api_url: str, golden_prompt: str, expected_output: 
     res.serve_seconds = round(time.time() - serve_start, 1)
 
     memorized = expected_output in adapter_text
-    res.outcome = classify_result(train_status, checkpoint_keys, adapter_loaded, memorized)
+    adapter_is_noop = adapter_loaded and adapter_text == baseline_full
+    res.outcome = classify_result(train_status, checkpoint_keys, adapter_loaded,
+                                  memorized, adapter_is_noop=adapter_is_noop)
     res.adapter_sample = adapter_text[:200]
 
     if res.outcome == TRAIN_FAILED:
@@ -283,6 +324,9 @@ def serve_check_and_classify(api_url: str, golden_prompt: str, expected_output: 
         res.detail = f"checkpoint keys: {checkpoint_keys}"
     elif res.outcome == ADAPTER_NOT_LOADED:
         res.detail = f"adapter never became servable; last error: {last_serve_error}"
+    elif res.outcome == ADAPTER_NO_OP:
+        extra = "adapter served output byte-identical to baseline (LoRA not applied)"
+        res.detail = f"{res.detail}; {extra}" if res.detail else extra
     elif res.outcome == NO_MEMORIZATION:
         extra = "adapter served but did not memorize expected_output"
         res.detail = f"{res.detail}; {extra}" if res.detail else extra
@@ -347,12 +391,20 @@ def get_training_job(api_url: str, job_hash: str, timeout: float = 10) -> dict:
 
 
 def generate(api_url: str, prompts: list[str], model_name: str, max_tokens: int,
-              poll_timeout: float = 300) -> list[str]:
+              poll_timeout: float = 300, temperature: float = 0.0) -> list[str]:
     """POST /v1/generate then poll /v1/generate/get_results until every result has
     a response, raising on any error (mirrors handle_error/poll_for_responses in
-    sdk/masint/engines/async_cray.py)."""
+    sdk/masint/engines/async_cray.py).
+    Default temperature=0.0 ensures greedy-decoding determinism for the no-op
+    discriminator.
+    """
     request_timeout = 30
-    body = json.dumps({"prompts": prompts, "model": model_name, "max_tokens": max_tokens}).encode()
+    body = json.dumps({
+        "prompts": prompts,
+        "model": model_name,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+    }).encode()
     req = urllib.request.Request(
         f"{api_url}/v1/generate", data=body,
         headers={"Content-Type": "application/json"}, method="POST",
@@ -708,9 +760,11 @@ def run_model_k8s_phased(target_cfg: dict, model_id: str, train_args: dict, data
             res.outcome, res.detail = RESTART_FAILED, f"baseline generate failed: {e}"
             return res
 
-        # Hot-load + classify (shared with the 2-GPU path).
+        # Hot-load + classify (shared with the 2-GPU path); pass the full
+        # baseline for the no-op discriminator.
         serve_check_and_classify(args.api_url, golden_prompt, expected_output, job_hash,
-                                 train_status, checkpoint_keys, args, res)
+                                 train_status, checkpoint_keys, args, res,
+                                 baseline_full=baseline[0])
         return res
     finally:
         if pf_proc is not None:
@@ -817,8 +871,27 @@ def run_model(manifest: dict, target: str, model: dict, args, results_dir: Path)
                     checkpoint_keys = read_checkpoint_keys_k8s(target_cfg, namespace, job_hash)
                 else:
                     checkpoint_keys = read_checkpoint_keys(target_cfg["compose_service"], job_hash)
+            # Hot-load + classify (shared with the phased k8s path). The full
+            # baseline string drives the in-sweep no-op discriminator: a served
+            # adapter whose output is byte-identical to baseline under greedy
+            # decoding never applied the LoRA -> ADAPTER_NO_OP.
             serve_check_and_classify(args.api_url, golden_prompt, expected_output, job_hash,
-                                     train_status, checkpoint_keys, args, res)
+                                     train_status, checkpoint_keys, args, res,
+                                     baseline_full=baseline[0])
+
+            # If ADAPTER_NO_OP, scrape logs for the a-priori known warning.
+            if res.outcome == ADAPTER_NO_OP:
+                try:
+                    logs = subprocess.run(
+                        ["docker", "compose", "-f", "docker-compose.yaml", "logs", "--no-color", target_cfg["compose_service"]],
+                        cwd=REPO_ROOT, capture_output=True, text=True
+                    ).stdout
+                    match = [l for l in logs.splitlines() if "NONE of its" in l and "match the base model" in l]
+                    if match:
+                        res.hint = match[-1]
+                except Exception:
+                    pass
+
             return res
         finally:
             if is_k8s:
@@ -842,13 +915,14 @@ def write_reports(results: list[Result], target: str, results_dir: Path) -> tupl
     json_path.write_text(json.dumps([asdict(r) for r in results], indent=2))
 
     lines = [f"# Fine-tune sweep — `{target}` — {stamp}", "",
-             "| Model | Outcome | Detail | Baseline sample | Adapter sample | restart_s | train_s | serve_s |",
-             "|---|---|---|---|---|---|---|---|"]
+             "| Model | Outcome | Detail | Hint | Baseline sample | Adapter sample | restart_s | train_s | serve_s |",
+             "|---|---|---|---|---|---|---|---|---|"]
     for r in results:
         baseline = r.baseline_sample.replace("\n", " ").replace("|", "\\|")[:60]
         adapter = r.adapter_sample.replace("\n", " ").replace("|", "\\|")[:60]
         detail = r.detail.replace("|", "\\|")
-        lines.append(f"| `{r.model}` | {r.outcome} | {detail} | {baseline} | {adapter} "
+        hint = r.hint.replace("\n", " ").replace("|", "\\|")
+        lines.append(f"| `{r.model}` | {r.outcome} | {detail} | {hint} | {baseline} | {adapter} "
                      f"| {r.restart_seconds} | {r.train_seconds} | {r.serve_seconds} |")
     md_path.write_text("\n".join(lines) + "\n")
     return json_path, md_path
@@ -874,6 +948,9 @@ def main() -> int:
     ap.add_argument("--gpu-wait-timeout", type=int, default=7200,
                     help="k8s only: seconds to block while pods are Unschedulable "
                          "(GPUs busy) before giving up with RESTART_FAILED")
+    ap.add_argument("--no-preflight", action="store_true",
+                    help="skip the offline LoRA no-op preflight; run every model "
+                         "even if it is predicted to serve base output")
     args = ap.parse_args()
 
     manifest = load_manifest(args.manifest)
@@ -884,7 +961,21 @@ def main() -> int:
 
     models = filter_models(manifest["models"], args.models)
 
-    results = []
+    # Offline preflight: predict the silent LoRA no-op before paying for a
+    # model's restart + train + serve, and skip those models. Compose-only —
+    # k8s targets have no `compose_service`, so they run unfiltered (the
+    # in-sweep ADAPTER_NO_OP discriminator is still ground truth there).
+    results: list[Result] = []
+    compose_service = manifest["targets"][args.target].get("compose_service")
+    if not args.no_preflight and compose_service:
+        from preflight import run_preflight
+        print(f"\n=== preflight ({len(models)} models) ===", flush=True)
+        pf_results = run_preflight([m["id"] for m in models], compose_service)
+        models, skipped = split_by_preflight(models, pf_results, args.target)
+        for s in skipped:
+            print(f"--> {s.model}: {s.outcome} ({s.hint})", flush=True)
+        results.extend(skipped)
+
     for m in models:
         print(f"\n=== {m['id']} [{args.target}] ===", flush=True)
         r = run_model(manifest, args.target, m, args, args.results_dir)

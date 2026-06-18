@@ -286,3 +286,52 @@ down cray-nvidia`.
 **Naming.** Historical mentions of the `cuda` target in earlier amendments and
 specs are left as-is (they describe the state at their date); the rename is
 recorded forward here only.
+
+## Amendment 2026-06-18 — the dry-test discriminator splits "served base output" out of `NO_MEMORIZATION`
+
+**Status:** the outcome enum gains two **failing** outcomes and `NO_MEMORIZATION`
+is narrowed. The per-model restart decision and everything in "Shape" except the
+enum stand. See
+`docs/superpowers/specs/2026-06-11-finetune-sweep-dry-test-design.md`.
+
+**Why.** The original enum (lines 76–79) folded two distinct conditions into one
+non-failing `NO_MEMORIZATION`: an adapter that *applied but didn't memorize* (the
+documented open question) and an adapter that *silently never applied* and served
+**base output** (the fork's `normalize_lora_key` no-op bug; see
+`docs/reports/lora-serving-noop-investigation.md`). The latter is a real failure
+masquerading as the former — `expected_output in adapter_text` is False in both
+cases, so the sweep stayed green while the adapter did nothing. Distinguishing
+them by hand forced a per-model forensic dive (the very thing this sweep exists to
+avoid).
+
+**What changes (outcome enum).** Two failing outcomes are added and
+`NO_MEMORIZATION` is given a precise meaning:
+
+- **`ADAPTER_NO_OP`** (failing) — the adapter loaded and served, but its output is
+  **byte-identical to the baseline** under greedy decoding (`temperature=0`), so the
+  LoRA was dropped at activation. Detected in-sweep by comparing the *full* baseline
+  and adapter strings (not the truncated report samples).
+- **`PRECHECK_NO_OP`** (failing) — the **offline preflight** (`preflight.py`)
+  predicted zero module overlap *before* the restart+train+serve, and the model's
+  run was skipped. Compose-only (needs a `compose_service`); k8s/cpu targets without
+  one run unfiltered, where `ADAPTER_NO_OP` remains ground truth.
+- **`NO_MEMORIZATION`** (still non-failing) now means specifically: the adapter
+  *changed* the output (not byte-identical to baseline) but did not reproduce the
+  golden string. The "every row is expected to report `NO_MEMORIZATION`" note in
+  "Consequences" holds only for adapters that genuinely apply.
+
+`NON_FAILING_OUTCOMES` stays `{PASS, SKIPPED, NO_MEMORIZATION}`; both new outcomes
+fall outside it, so the existing exit-code logic flags them. Revised best→worst
+enum: `PASS`, `NO_MEMORIZATION`, `ADAPTER_NO_OP`, `PRECHECK_NO_OP`,
+`ADAPTER_NOT_LOADED`, `BAD_CHECKPOINT`, `TRAIN_FAILED`, `TRAIN_TIMEOUT`,
+`RESTART_FAILED`, `SKIPPED`.
+
+**Determinism note.** The `ADAPTER_NO_OP` equality check is only valid under greedy
+decoding, so `generate()` now defaults `temperature=0.0` and the baseline/adapter
+calls inherit it.
+
+**What is unchanged.** The per-model restart/isolation decision, the memorization
+pass criterion, the `sweep_run_id` dedup-defeat, the checkpoint-key check, the HTTP
+helpers, and all three target lifecycles (`cpu`/`cuda-docker` Compose, `cuda-k8s`
+Helm). The preflight is a *filter* in front of the closed loop, not a replacement
+for it.

@@ -19,6 +19,38 @@ by its `job_hash`. Discovered from the `jobs` volume by globbing `*.pt`; never
 requires the trainer to be alive.
 _Avoid_: fine-tune, model (when you mean the adapter).
 
+**Hybrid adapter loader** (`HybridAdapterManager`):
+The fork-added path (`vllm/tokenformer/`) that registers an Adapter from the
+trainer's `.pt` format and dispatches LoRA vs Tokenformer. Serving goes through
+*this*, not stock vLLM `load_lora_adapter` — so adapter-load failures are
+debugged here. The fork is stock vLLM 0.19.0 plus this subsystem; see ADR 0005.
+_Avoid_: vLLM LoRA loader (it's the fork's, not upstream's).
+
+**Tokenformer**:
+The fork's non-LoRA adapter mechanism, served through the same Hybrid adapter
+loader. Serving it is currently deferred (ADR 0004); the sweep is LoRA only.
+_Avoid_: adapter (when you specifically mean the Tokenformer variant).
+
+**Offline preflight**:
+A pre-run structural check (`preflight.py`) that predicts the no-op class *before*
+paying for a model's restart + train + serve. It synthesizes the trainer's would-be
+LoRA keys, runs them through the fork's **real two-pass** serve-time normalization
+(`normalize_lora_key`, then `PTWorkerLoRAManager._renormalize_lora_sd_for_model`
+against the live tree — pass 2 is load-bearing: it corrects pass 1's deliberate
+over-mapping of `model.layers.*` per model), and asks whether the normalized module
+paths exist in the served model's module tree. Faithful only against vLLM's *own*
+tree, so it builds the model through vLLM's dummy-weight loader on the meta device —
+never an HF meta-model. A zero-overlap prediction yields `PRECHECK_NO_OP` and skips
+the model.
+_Avoid_: dry run, smoke test (the closed loop is the real test; this is a filter).
+
+**Adapter key normalization**:
+Rewriting a trainer `.pt` state-dict's keys to match vLLM module paths (swap
+`model.language_model` ↔ `language_model.model`, strip the Gemma4 `language_model`
+infix). A **zero match** here means the Adapter registers nothing — the failure
+mode behind a served Base-Model output or an `ADAPTER_NOT_LOADED` on MoE models.
+_Avoid_: weight mapping, key remap.
+
 **Closed loop**:
 The sweep's per-model cycle: launch the stack → train a tiny LoRA → verify the
 checkpoint → hot-load the adapter → check the served output memorized the target.
