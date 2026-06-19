@@ -601,8 +601,27 @@ def read_checkpoint_keys_k8s(target_cfg: dict, namespace: str, job_hash: str,
     return _parse_checkpoint_keys_output(result.stdout)
 
 
+def _parse_gpu_free_gb(stdout: str) -> list[float]:
+    """Parse `nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits`
+    (MiB per GPU) into GiB. Non-numeric lines are skipped: unified-memory parts
+    (GB10/DGX Spark) report '[N/A]' for memory.free, which must not crash int()."""
+    out: list[float] = []
+    for line in stdout.strip().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(int(line) / 1024)
+        except ValueError:
+            continue  # '[N/A]' on unified-memory GPUs
+    return out
+
+
 def probe_gpu_free_gb() -> list[float]:
-    """Free VRAM (GiB) per visible GPU, via nvidia-smi. [] if unavailable.
+    """Free VRAM (GiB) per visible GPU that reports a numeric figure, via
+    nvidia-smi. [] if nvidia-smi is unavailable or no GPU reports numeric free
+    memory (e.g. a unified-memory GB10 reporting '[N/A]' — use gpu_count to tell
+    that apart from a box with no GPU).
 
     Used both for the GPU-target LoRA VRAM gate (cuda-docker) and to detect VRAM
     reclamation after teardown_stack — via nvidia-smi (no torch on the host)."""
@@ -613,7 +632,32 @@ def probe_gpu_free_gb() -> list[float]:
         )
     except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return []
-    return [int(line.strip()) / 1024 for line in result.stdout.strip().splitlines() if line.strip()]
+    return _parse_gpu_free_gb(result.stdout)
+
+
+def gpu_count() -> int:
+    """Number of GPUs nvidia-smi enumerates, regardless of whether they report a
+    numeric memory figure. Lets the caller distinguish a unified-memory GPU
+    (present, but memory.free '[N/A]' — GB10/DGX Spark) from a box with no GPU."""
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=10, check=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return 0
+    return len([line for line in result.stdout.strip().splitlines() if line.strip()])
+
+
+def _vram_for_gate(free_gb: list[float], n_gpus: int) -> list[float] | None:
+    """Decide the VRAM-gate input from probed free memory and GPU count. Returns
+    None — "VRAM check not applicable", same as the k8s path — when a GPU is
+    present but reports no numeric free figure (unified memory, GB10/DGX Spark ->
+    '[N/A]'): there is no discrete VRAM pool to gate on, so never SKIP for it.
+    [] (genuinely no GPU visible) and a populated list pass straight through."""
+    if not free_gb and n_gpus > 0:
+        return None
+    return free_gb
 
 
 def start_restart(target_cfg: dict, model_id: str, log) -> subprocess.Popen:
@@ -784,8 +828,15 @@ def run_model(manifest: dict, target: str, model: dict, args, results_dir: Path)
     is_k8s = is_k8s_target(target_cfg)
     # k8s: the scheduler arbitrates GPUs and there is no host nvidia-smi, so skip
     # the runtime VRAM probe (free_gb=None tells gate_model the VRAM check is
-    # not applicable; only its static checks apply).
-    free_gb = None if is_k8s else (probe_gpu_free_gb() if target_requests_gpu(target_cfg) else [])
+    # not applicable; only its static checks apply). For a Compose GPU target,
+    # _vram_for_gate also yields None on a unified-memory GPU (GB10/DGX Spark,
+    # whose nvidia-smi memory.free is '[N/A]') — no discrete VRAM pool to gate on.
+    if is_k8s:
+        free_gb = None
+    elif target_requests_gpu(target_cfg):
+        free_gb = _vram_for_gate(probe_gpu_free_gb(), gpu_count())
+    else:
+        free_gb = []
     ok, reason = gate_model(model, target_cfg, free_gb)
     if not ok:
         res.outcome, res.detail = SKIPPED, reason

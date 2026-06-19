@@ -158,6 +158,26 @@ def test_gate_model_cpu_requires_cpu_ok_optin():
     assert rfs.gate_model({"id": "m"}, cpu_cfg, [])[0] is False           # no cpu_ok
     assert rfs.gate_model({"id": "m", "cpu_ok": True}, cpu_cfg, [])[0] is True
 
+def test_parse_gpu_free_gb_parses_numeric_mib_to_gib():
+    # nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits emits MiB.
+    assert rfs._parse_gpu_free_gb("1024\n2048\n") == [1.0, 2.0]
+
+def test_parse_gpu_free_gb_skips_na_unified_memory():
+    # GB10/DGX Spark unified memory reports '[N/A]' -- must skip, not crash int().
+    assert rfs._parse_gpu_free_gb("[N/A]\n") == []
+    assert rfs._parse_gpu_free_gb("[N/A]\n1024\n") == [1.0]
+
+def test_vram_for_gate_none_when_gpu_present_but_no_numeric_vram():
+    # Unified-memory GPU: enumerated (count>0) but free=[] -> gate not applicable
+    # (None), same as the k8s path; never a spurious SKIP.
+    assert rfs._vram_for_gate([], 1) is None
+
+def test_vram_for_gate_empty_when_no_gpu_visible():
+    assert rfs._vram_for_gate([], 0) == []
+
+def test_vram_for_gate_passes_through_numeric_free():
+    assert rfs._vram_for_gate([16.0], 1) == [16.0]
+
 def test_kubectl_get_pods_returns_empty_on_called_process_error(monkeypatch):
     def _boom(*a, **k):
         raise rfs.subprocess.CalledProcessError(1, "kubectl")
