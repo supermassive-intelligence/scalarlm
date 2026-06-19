@@ -56,7 +56,13 @@ targets:
     # and sm_arch=12.0 — `up nvidia` would hardcode linux/amd64 + BASE_NAME=nvidia,
     # the wrong arch for the Spark.
     compose_service: cray-spark
-    restart_cmd: "SCALARLM_MODEL={model} ./scalarlm up spark"
+    # --enforce-eager skips CUDA-graph capture and --gpu-memory-utilization=0.15
+    # shrinks the KV-cache prealloc (default 0.4 of 128GiB unified ≈ 48GiB) — both
+    # are pure startup cost on a co-located memorization sweep, so trimming them
+    # cuts the ~146s per-model engine init (time-to-feedback). SCALARLM_VLLM_ARGS
+    # is appended and overrides config in create_vllm; it rides the compose env
+    # passthrough. 0.15 of 128GiB ≈ 19GiB is ample for these small models.
+    restart_cmd: "SCALARLM_MODEL={model} SCALARLM_VLLM_ARGS='--enforce-eager --gpu-memory-utilization=0.15' ./scalarlm up spark"
     train_args_overrides:
       gpus: 1
   cuda-k8s:

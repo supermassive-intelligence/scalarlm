@@ -166,6 +166,30 @@ def test_split_by_preflight_runs_model_absent_from_results():
     assert skipped == []
 
 
+def test_is_gated_repo_error_matches_401_and_gated():
+    assert rfs.is_gated_repo_error("OSError: You are trying to access a gated repo. "
+                                   "... 401 Client Error.")
+    assert rfs.is_gated_repo_error("401 Client Error")
+    assert not rfs.is_gated_repo_error("ImportError: boom")  # generic crash -> fail open
+
+
+def test_split_by_preflight_skips_gated_repo_as_skipped():
+    # A gated/401 preflight error is deterministic -> SKIP (not fail-open run).
+    models = [{"id": "google/gemma-3-270m-it"}, {"id": "crashy"}]
+    pf_results = {
+        "google/gemma-3-270m-it": pf.PreflightResult(
+            "google/gemma-3-270m-it",
+            error="OSError: You are trying to access a gated repo. 401 Client Error."),
+        "crashy": pf.PreflightResult("crashy", error="ImportError: boom"),
+    }
+    to_run, skipped = rfs.split_by_preflight(models, pf_results, "cuda-spark")
+    assert [m["id"] for m in to_run] == ["crashy"]  # generic error still fails open
+    assert len(skipped) == 1
+    assert skipped[0].model == "google/gemma-3-270m-it"
+    assert skipped[0].outcome == rfs.SKIPPED
+    assert "gated" in skipped[0].detail.lower()
+
+
 # --- Cycle E: Result.hint surfaced as a report column ---
 
 def test_write_reports_has_hint_column(tmp_path):

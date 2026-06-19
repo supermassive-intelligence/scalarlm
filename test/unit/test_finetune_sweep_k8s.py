@@ -137,6 +137,36 @@ def test_wait_for_all_up_accepts_none_proc(monkeypatch):
     # proc=None must not raise and must return True when health is up.
     assert rfs.wait_for_all_up("http://localhost:8000", None, timeout=1) is True
 
+def test_wait_for_model_served_returns_served_when_up(monkeypatch):
+    monkeypatch.setattr(rfs, "get_health", lambda url, timeout=5: {"all": "up"})
+    monkeypatch.setattr(rfs, "get_served_models", lambda url, timeout=5: {"m"})
+    assert rfs.wait_for_model_served("http://x", "m", None, timeout=1) == "served"
+
+def test_wait_for_model_served_fails_fast_on_crash_loop(monkeypatch):
+    # vLLM never serves; the container RestartCount climbs (0 baseline -> 1) ->
+    # "crashed" without waiting out the timeout.
+    monkeypatch.setattr(rfs, "get_health", lambda url, timeout=5: {"all": "down"})
+    monkeypatch.setattr(rfs, "get_served_models", lambda url, timeout=5: set())
+    counts = iter([0, 1, 1, 1])
+    monkeypatch.setattr(rfs, "get_compose_restart_count", lambda svc, timeout=10: next(counts))
+    monkeypatch.setattr(rfs.time, "sleep", lambda s: None)
+    status = rfs.wait_for_model_served("http://x", "m", None, timeout=100,
+                                       compose_service="cray-spark", crash_check_every=0)
+    assert status == "crashed"
+
+def test_wait_for_model_served_proc_exited(monkeypatch):
+    monkeypatch.setattr(rfs, "get_health", lambda url, timeout=5: {"all": "down"})
+    monkeypatch.setattr(rfs, "get_served_models", lambda url, timeout=5: set())
+    proc = type("P", (), {"poll": lambda self: 1})()
+    assert rfs.wait_for_model_served("http://x", "m", proc, timeout=1) == "proc_exited"
+
+def test_wait_for_model_served_times_out(monkeypatch):
+    # No compose_service -> no crash check; health never up -> "timeout".
+    monkeypatch.setattr(rfs, "get_health", lambda url, timeout=5: {"all": "down"})
+    monkeypatch.setattr(rfs, "get_served_models", lambda url, timeout=5: set())
+    monkeypatch.setattr(rfs.time, "sleep", lambda s: None)
+    assert rfs.wait_for_model_served("http://x", "m", None, timeout=0.01) == "timeout"
+
 def test_gate_model_k8s_skips_vram_check_when_free_gb_none():
     model = {"id": "m", "adapters": {"lora": {"gate_gb": 8}}}
     ok, reason = rfs.gate_model(model, {"train_args_overrides": {"gpus": 1}}, None)
@@ -425,6 +455,8 @@ def test_manifest_targets_dispatch_correctly():
     assert rfs.target_requests_gpu(targets["cuda-spark"]) is True
     assert targets["cuda-spark"]["compose_service"] == "cray-spark"
     assert "spark" in targets["cuda-spark"]["restart_cmd"]
+    # Fast-feedback knobs ride SCALARLM_VLLM_ARGS in the restart_cmd.
+    assert "--enforce-eager" in targets["cuda-spark"]["restart_cmd"]
     # cuda-k8s: k8s lifecycle (renamed from cuda) + GPU
     assert "cuda-k8s" in targets and "cuda" not in targets
     assert rfs.is_k8s_target(targets["cuda-k8s"]) is True

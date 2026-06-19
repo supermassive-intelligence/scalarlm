@@ -192,20 +192,38 @@ def preflight_hint(pf_result) -> str:
             f"vs base {pf_result.sample_base_modules}")
 
 
+def is_gated_repo_error(error: str) -> bool:
+    """True iff a preflight error is an HF gated-repo / auth failure (401). Unlike
+    a transient build/introspection crash (which fails open), this is
+    deterministic — the model can't load without access — so the sweep SKIPs it
+    rather than paying a doomed restart + train + serve that ends in the same 401."""
+    e = error.lower()
+    return "gated repo" in e or "401 client error" in e
+
+
 def split_by_preflight(models: list[dict], pf_results: dict,
                        target: str) -> tuple[list[dict], list["Result"]]:
     """Partition `models` into (to_run, skipped) using the offline preflight.
     A model whose PreflightResult `predicted_noop` is True (zero module overlap,
-    no build error) is excluded and recorded as a PRECHECK_NO_OP Result with a
-    key-diff hint. Models with no entry, or whose preflight errored (fail open),
-    stay in to_run — a preflight crash never silently skips a model."""
+    no build error) is excluded as a PRECHECK_NO_OP Result with a key-diff hint;
+    a model whose preflight hit an HF gated-repo/401 error is excluded as SKIPPED
+    (deterministic — no point running it). Models with no entry, or whose preflight
+    errored for any OTHER reason (fail open), stay in to_run — a preflight crash
+    never silently skips a model."""
     to_run: list[dict] = []
     skipped: list[Result] = []
     for m in models:
         pf = pf_results.get(m["id"])
-        if pf is not None and pf.predicted_noop:
+        if pf is None:
+            to_run.append(m)
+        elif pf.predicted_noop:
             skipped.append(Result(model=m["id"], target=target,
                                   outcome=PRECHECK_NO_OP, hint=preflight_hint(pf)))
+        elif pf.error and is_gated_repo_error(pf.error):
+            skipped.append(Result(model=m["id"], target=target, outcome=SKIPPED,
+                                  detail="gated HF repo (preflight 401) — request access "
+                                         "or wire HF_TOKEN into the compose env",
+                                  hint=pf.error[:120]))
         else:
             to_run.append(m)
     return to_run, skipped
@@ -248,22 +266,64 @@ def get_served_models(api_url: str, timeout: float = 5) -> set[str]:
         return set()
 
 
-def wait_for_model_served(api_url: str, model_id: str, proc, timeout: float) -> bool:
+def get_compose_restart_count(compose_service: str, timeout: float = 10) -> int | None:
+    """The Docker RestartCount of the compose service's container, or None if it
+    can't be read. A value that climbs during wait_for_model_served means a crashed
+    vLLM is being restart-looped by `restart: unless-stopped` (PID 1 is
+    `one_server.main` under `set -e`, so a crash exits the container) — a broken
+    model, not a slow one. The k8s path has no Compose container, so its callers
+    pass compose_service=None and skip this."""
+    try:
+        cid = subprocess.run(
+            ["docker", "compose", "-f", "docker-compose.yaml", "ps", "-q", compose_service],
+            cwd=REPO_ROOT, capture_output=True, text=True, timeout=timeout, check=True,
+        ).stdout.strip()
+        if not cid:
+            return None
+        rc = subprocess.run(
+            ["docker", "inspect", "--format", "{{.RestartCount}}", cid],
+            cwd=REPO_ROOT, capture_output=True, text=True, timeout=timeout, check=True,
+        ).stdout.strip()
+        return int(rc)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError):
+        return None
+
+
+def wait_for_model_served(api_url: str, model_id: str, proc, timeout: float,
+                          compose_service: str | None = None,
+                          crash_check_every: float = 15.0) -> str:
     """Like wait_for_all_up, but also requires the served model to be `model_id`.
     The Compose teardown leaves the previous model's container running (see
     teardown_stack), so health.all=="up" alone can be satisfied by the STALE
     stack before `--force-recreate` swaps in the new model — gating on
     /v1/models too makes the runner block until the new container is actually
-    serving model_id."""
+    serving model_id. Returns:
+      "served"      - health.all up AND /v1/models serves model_id.
+      "crashed"     - the container's RestartCount climbed: vLLM crashed and
+                      `restart: unless-stopped` is restart-looping it. Fail fast
+                      instead of waiting out `timeout` (the foreground `docker
+                      compose up` survives container restarts, so proc never dies).
+      "proc_exited" - the foreground `./scalarlm up` process died.
+      "timeout"     - none of the above within `timeout`.
+    Pass compose_service to enable crash detection (Compose only)."""
     deadline = time.time() + timeout
+    baseline_restarts = (get_compose_restart_count(compose_service)
+                         if compose_service else None)
+    last_crash_check = time.time()
     while time.time() < deadline:
         if proc is not None and proc.poll() is not None:
-            return False
+            return "proc_exited"
         health = get_health(api_url)
         if health and health.get("all") == "up" and model_id in get_served_models(api_url):
-            return True
+            return "served"
+        if (compose_service and baseline_restarts is not None
+                and time.time() - last_crash_check >= crash_check_every):
+            last_crash_check = time.time()
+            rc = get_compose_restart_count(compose_service)
+            if rc is not None and rc > baseline_restarts:
+                return "crashed"
         time.sleep(2)
-    return False
+    return "timeout"
 
 
 def poll_training(api_url: str, job_hash: str, train_timeout: float) -> str:
@@ -914,11 +974,22 @@ def run_model(manifest: dict, target: str, model: dict, args, results_dir: Path)
                 # Model-aware wait: a stale (previous-model) container left
                 # running by teardown_stack is still health.all=="up", so we
                 # also gate on /v1/models serving model_id before proceeding.
-                ready = wait_for_model_served(args.api_url, model_id, proc, args.restart_timeout)
+                # Pass compose_service so a crash-looping vLLM fails fast (a model
+                # that crashes the engine would otherwise hang the whole
+                # restart_timeout while restart:unless-stopped re-inits it).
+                status = wait_for_model_served(args.api_url, model_id, proc,
+                                               args.restart_timeout,
+                                               compose_service=target_cfg["compose_service"])
                 res.restart_seconds = round(time.time() - restart_start, 1)
-                if not ready:
+                if status != "served":
                     res.outcome = RESTART_FAILED
-                    res.detail = f"stack did not serve {model_id} (health.all/up + /v1/models) in time"
+                    res.detail = {
+                        "crashed": f"vLLM crash-looped serving {model_id} "
+                                   f"(container RestartCount climbed)",
+                        "proc_exited": f"`./scalarlm up` exited before serving {model_id}",
+                        "timeout": f"stack did not serve {model_id} "
+                                   f"(health.all/up + /v1/models) within {args.restart_timeout}s",
+                    }.get(status, f"stack did not serve {model_id}")
                     return res
 
             # Retry across the cold-start window: health.all/up + /v1/models can
@@ -1072,7 +1143,9 @@ def main() -> int:
             if r is None:
                 continue
             if r.error:
-                print(f"    [preflight] {mid}: ERROR -> fail-open (will run): "
+                tag = ("gated repo -> SKIP" if is_gated_repo_error(r.error)
+                       else "fail-open (will run)")
+                print(f"    [preflight] {mid}: ERROR -> {tag}: "
                       f"{r.error[:160]}", flush=True)
             else:
                 print(f"    [preflight] {mid}: predicted_ok={r.predicted_ok} "
