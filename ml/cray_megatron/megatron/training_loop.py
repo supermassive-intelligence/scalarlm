@@ -68,7 +68,13 @@ def _build_document_block_mask(doc_ids, device):
     def mask_mod(b, h, q_idx, kv_idx):
         return (q_idx >= kv_idx) & (doc_ids[b, q_idx] == doc_ids[b, kv_idx])
 
-    return create_block_mask(mask_mod, B=B, H=None, Q_LEN=S, KV_LEN=S, device=device)
+    # _compile=True is required: without it create_block_mask calls create_mask
+    # which materializes the full dense [B, H, S, S] boolean tensor (16 GB at
+    # 128K) before converting to block-sparse format. With _compile=True the
+    # mask_mod is compiled and evaluated only at block boundaries — O((S/128)²)
+    # instead of O(S²). First call pays a small compile overhead; subsequent
+    # calls hit the compiled cache.
+    return create_block_mask(mask_mod, B=B, H=None, Q_LEN=S, KV_LEN=S, device=device, _compile=True)
 
 
 class TrainingLoop:
