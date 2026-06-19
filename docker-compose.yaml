@@ -9,9 +9,15 @@ services:
         # "model"; SCALARLM_VLLM_ARGS read by create_vllm). Without this,
         # `SCALARLM_MODEL=... ./scalarlm up <target>` silently serves the
         # default model and /v1/generate 404s for the requested model.
+        # HF_TOKEN (huggingface_hub's standard var) is passed through the same way
+        # so gated repos (e.g. google/gemma-*) load when the host has access; it
+        # also reaches the preflight `docker compose run`, which then authenticates
+        # instead of 401-ing. Unset on the host -> simply absent in the container
+        # (no error); export HF_TOKEN before `./scalarlm up` to use it.
         environment:
             - SCALARLM_MODEL
             - SCALARLM_VLLM_ARGS
+            - HF_TOKEN
         build:
             context: .
             dockerfile: Dockerfile
