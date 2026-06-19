@@ -351,6 +351,13 @@ def test_manifest_targets_dispatch_correctly():
     assert rfs.is_k8s_target(targets["cuda-docker"]) is False
     assert rfs.target_requests_gpu(targets["cuda-docker"]) is True
     assert targets["cuda-docker"]["compose_service"] == "cray-nvidia"
+    # cuda-spark: Compose lifecycle (like cuda-docker) + GPU, but the cray-spark
+    # service (aarch64 + Blackwell) via `./scalarlm up spark`
+    assert "cuda-spark" in targets
+    assert rfs.is_k8s_target(targets["cuda-spark"]) is False
+    assert rfs.target_requests_gpu(targets["cuda-spark"]) is True
+    assert targets["cuda-spark"]["compose_service"] == "cray-spark"
+    assert "spark" in targets["cuda-spark"]["restart_cmd"]
     # cuda-k8s: k8s lifecycle (renamed from cuda) + GPU
     assert "cuda-k8s" in targets and "cuda" not in targets
     assert rfs.is_k8s_target(targets["cuda-k8s"]) is True

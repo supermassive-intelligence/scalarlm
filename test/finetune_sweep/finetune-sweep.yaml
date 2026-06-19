@@ -48,6 +48,17 @@ targets:
     restart_cmd: "SCALARLM_MODEL={model} ./scalarlm up nvidia"
     train_args_overrides:
       gpus: 1
+  cuda-spark:
+    # NVIDIA DGX Spark (aarch64 Grace + Blackwell GPU, sm 12.0): a scheduler-less
+    # GPU box like the 3090, so it mirrors cuda-docker (co-located vLLM + training
+    # in one Compose container, single GPU, no phase-scaling). Differs only in the
+    # CLI target: `./scalarlm up spark` selects the cray-spark service, linux/arm64,
+    # and sm_arch=12.0 — `up nvidia` would hardcode linux/amd64 + BASE_NAME=nvidia,
+    # the wrong arch for the Spark.
+    compose_service: cray-spark
+    restart_cmd: "SCALARLM_MODEL={model} ./scalarlm up spark"
+    train_args_overrides:
+      gpus: 1
   cuda-k8s:
     # k8s target: one Helm release per model in a fresh `sweep-<model>` namespace.
     # See docs/superpowers/specs/2026-06-15-finetune-sweep-k8s-design.md and the
