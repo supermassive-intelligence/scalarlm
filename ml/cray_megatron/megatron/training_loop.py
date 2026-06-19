@@ -781,8 +781,12 @@ def get_gradient_accumulation_steps():
 def get_optimizer(model):
     job_config = get_job_config()
     learning_rate = job_config["learning_rate"]
-    # use AdamW optimizer
-    return AdamW(model.parameters(), lr=learning_rate)
+    # Only optimize trainable parameters. With LoRA adapters, PEFT marks all
+    # frozen base-model weights as requires_grad=False, so this restricts AdamW
+    # to the adapter parameters only (~100 MB fp32 states vs ~16 GB for a 2B
+    # full-parameter AdamW).
+    trainable = [p for p in model.parameters() if p.requires_grad]
+    return AdamW(trainable, lr=learning_rate)
 
     # use Adafactor optimizer
     # return torch.optim.Adafactor(
