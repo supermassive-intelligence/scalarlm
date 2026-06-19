@@ -275,21 +275,20 @@ cray image on the box**; the host unit tests cover only torch-free seams.
   fuses q/k/v and gate/up into single modules — so one fused vLLM module can back several
   LoRA targets. The permissive `n_overlap > 0` rule absorbs this (partial overlap passes),
   so fusion does not produce false no-op predictions.
-- **Preflight build failures** fail open (run the model), so a build quirk on a novel arch
-  never silently skips a model. **Every** preflight result is now logged (predicted_ok /
-  overlap / error), not just the skips, so a fail-open is loud — a wholly-broken preflight
-  can't masquerade as "all predicted OK" (the 2026-06-18 silent-no-op fix).
-- **Runs in an already-built image, not a fresh build** (`preflight_service`, 2026-06-18
-  amendment). `docker compose run <gpu-service>` triggers a multi-GB GPU image *build*
-  (and fails on the unset `BASE_NAME` build arg that only `./scalarlm up` supplies). Since
-  the introspection is CPU-only, a GPU target sets `preflight_service: cray` to reuse the
-  already-built CPU image instead; it defaults to the target's `compose_service`.
-- **CPU-image arch inspection.** A consequence of the above: some custom/multimodal arch
-  classes (e.g. `Gemma4ForConditionalGeneration`) fail to *inspect* in the CPU image (cpp
-  extensions are skipped under CPU torch) → `error` → fail-open run. Acceptable: those archs
-  also fail at engine load and/or are the separate fork-upgrade work, and the in-sweep
-  `ADAPTER_NO_OP` discriminator remains ground truth. The preflight's reliable coverage is
-  the plain-decoder prefix-no-op class — the bug it was built for.
+- **Preflight failures fail open** (run the model), so a quirk on a novel arch never
+  silently skips a model. **Every** preflight result is now logged (predicted_ok / overlap
+  / error), not just the skips, so a fail-open is loud — a wholly-broken preflight can't
+  masquerade as "all predicted OK" (the 2026-06-18 silent-no-op fix).
+- **Needs the serving image already built — gated, never built on demand** (2026-06-18
+  fix). `docker compose run <service>` reuses the service image when present but silently
+  tries to *build* it when absent — and that build fails on the `BASE_NAME` build arg only
+  `./scalarlm up` supplies, so the captured output is build chatter, not the script's JSON
+  → every model fail-opens *silently*. `run_preflight` now checks the image exists first
+  (`docker compose config --images` + `docker image inspect`) and, if not, skips the whole
+  preflight with one clear reason. So the preflight is effective only on a **warm box**
+  (image built by a prior `./scalarlm up`/sweep); on a cold box it cleanly no-ops. It runs
+  in the target's own `compose_service` image (e.g. `cray-nvidia`), which is the image that
+  exists on a GPU box — *not* a separate CPU image, which a GPU box never builds.
 - **Compose-only.** The preflight needs a `compose_service` to issue `docker compose run`;
   k8s targets have none, so they run unfiltered (the in-sweep `ADAPTER_NO_OP` discriminator
   is still ground truth there).

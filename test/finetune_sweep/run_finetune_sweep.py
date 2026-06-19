@@ -966,18 +966,16 @@ def main() -> int:
     # k8s targets have no `compose_service`, so they run unfiltered (the
     # in-sweep ADAPTER_NO_OP discriminator is still ground truth there).
     results: list[Result] = []
-    target_cfg = manifest["targets"][args.target]
-    compose_service = target_cfg.get("compose_service")
+    compose_service = manifest["targets"][args.target].get("compose_service")
     if not args.no_preflight and compose_service:
         from preflight import run_preflight
-        # The introspection is CPU-only and just needs an image with vLLM + the
-        # fork, so a GPU target can run it in an already-built CPU image
-        # (`preflight_service`, default: the target's compose_service) instead of
-        # triggering a multi-GB GPU image build via `docker compose run`.
-        preflight_service = target_cfg.get("preflight_service", compose_service)
-        print(f"\n=== preflight ({len(models)} models, service={preflight_service}) ===",
+        # Preflight runs inside the target's already-built serving image. It is
+        # gated on that image existing (run_preflight skips cleanly if not), since
+        # `docker compose run` would otherwise attempt a doomed build of a missing
+        # image — failing on the BASE_NAME build arg only `./scalarlm up` supplies.
+        print(f"\n=== preflight ({len(models)} models, service={compose_service}) ===",
               flush=True)
-        pf_results = run_preflight([m["id"] for m in models], preflight_service)
+        pf_results = run_preflight([m["id"] for m in models], compose_service)
         # Log EVERY result, not just the skips: a fail-open (build/introspection
         # error -> run the model) must be loud, otherwise a wholly-broken preflight
         # looks identical to "every model predicted OK".

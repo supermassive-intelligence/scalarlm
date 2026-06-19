@@ -211,11 +211,42 @@ if __name__ == "__main__":
 '''
 
 
+def _compose_image_present(compose_service: str) -> bool:
+    """True iff the Compose service's image is already built. `docker compose run`
+    silently tries to BUILD a missing image — and that build fails without the
+    BASE_NAME/TORCH_CUDA_ARCH_LIST build args only `./scalarlm up` supplies, so the
+    captured output is build chatter instead of the script's JSON. Gate on presence
+    and skip the preflight cleanly rather than issue one doomed build per model."""
+    try:
+        names = subprocess.run(
+            ["docker", "compose", "-f", "docker-compose.yaml", "config",
+             "--images", compose_service],
+            cwd=REPO_ROOT, capture_output=True, text=True, timeout=30,
+        ).stdout.strip().splitlines()
+        if not names:
+            return False
+        return subprocess.run(
+            ["docker", "image", "inspect", names[0].strip()],
+            cwd=REPO_ROOT, capture_output=True, text=True, timeout=30,
+        ).returncode == 0
+    except Exception:
+        return False
+
+
 def run_preflight(model_ids: list[str], compose_service: str) -> dict[str, PreflightResult]:
     """Run the offline preflight as a filter over `model_ids`. Issues one
     throwaway `docker compose run --rm --no-deps <service>` per model (entirely
     inside the cray image) and parses each JSON result. Compose-only: needs a
-    `compose_service`. A subprocess failure is recorded as `error` (fail open)."""
+    `compose_service`. A subprocess failure is recorded as `error` (fail open).
+
+    If the service's image isn't built yet, skip the whole preflight (every model
+    fails open) with one clear reason — `docker compose run` would otherwise issue
+    a doomed build per model and bury the cause in build output."""
+    if not _compose_image_present(compose_service):
+        msg = (f"preflight image for compose service '{compose_service}' is not "
+               f"built; skipping preflight (all models run). Build it first, e.g. "
+               f"`./scalarlm up cpu` (or warm the box with a prior sweep).")
+        return {mid: PreflightResult(model_id=mid, error=msg) for mid in model_ids}
     results: dict[str, PreflightResult] = {}
     for mid in model_ids:
         cmd = [
