@@ -274,7 +274,11 @@ def poll_training(api_url: str, job_hash: str, train_timeout: float) -> str:
     while time.time() < deadline:
         try:
             info = get_training_job(api_url, job_hash)
-        except (urllib.error.URLError, RuntimeError):
+        except (OSError, RuntimeError):
+            # OSError covers urllib.error.URLError AND raw socket errors like
+            # ConnectionResetError (Errno 104) — the co-located training job can
+            # saturate the GPU and make the API server briefly reset connections;
+            # retry until train_timeout instead of crashing the run.
             time.sleep(5)
             continue
         st = info.get("status")

@@ -289,6 +289,21 @@ def test_poll_training_times_out(monkeypatch):
     monkeypatch.setattr(rfs.time, "sleep", lambda s: None)
     assert rfs.poll_training("http://x", "abc", train_timeout=0.01) == "TIMEOUT"
 
+def test_poll_training_retries_on_connection_reset(monkeypatch):
+    # The API server can reset the connection mid-training (GPU saturated by the
+    # co-located training job). ConnectionResetError is an OSError, not a URLError;
+    # poll_training must retry, not crash the whole run.
+    calls = {"n": 0}
+    def flaky(url, jh, timeout=10):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ConnectionResetError(104, "Connection reset by peer")
+        return {"status": "COMPLETED"}
+    monkeypatch.setattr(rfs, "get_training_job", flaky)
+    monkeypatch.setattr(rfs.time, "sleep", lambda s: None)
+    assert rfs.poll_training("http://x", "abc", train_timeout=5) == "COMPLETED"
+    assert calls["n"] == 2
+
 
 class _ServeArgs:  # minimal stand-in for the argparse Namespace fields used here
     serve_timeout = 1
