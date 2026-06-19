@@ -23,15 +23,19 @@ import time
 import logging
 from gpu_aware_mpi import allreduce, get_size
 
+try:
+    from torch.nn.attention.flex_attention import create_block_mask
+    _FLEX_ATTENTION_AVAILABLE = True
+except ImportError:
+    _FLEX_ATTENTION_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
-# Cap on sequence length for materializing the [B, 1, S, S] block-
-# diagonal document mask in training_step_accumulate. Bool mask is
-# 1 byte/cell, so 16384 → ~256 MiB at batch=1, comfortable. Above
-# this we skip the mask (warn once) and packed docs attend across
-# each other. Long-term the right answer for Gemma-4 (head_dim=512
-# excludes flash-attn) is flex_attention or nested tensors at the
-# attention boundary; both avoid materializing the mask entirely.
+# Cap on sequence length for the SDPA path's materialized [B, 1, S, S]
+# block-diagonal document mask. Bool mask is 1 byte/cell, so 16384 →
+# ~256 MiB at batch=1, comfortable; 128K → 16 GB, fatal.
+# Use attn_implementation="flex_attention" in train_args to lift this
+# cap: the flex path uses a BlockMask that is O(S/128), not O(S²).
 _MAX_4D_MASK_SEQ_LEN = 16384
 _doc_mask_skip_warned = False
 
@@ -44,9 +48,27 @@ def _warn_doc_mask_skipped(seq_len: int) -> None:
     logger.warning(
         "Skipping 4D document mask: seq_len=%d exceeds cap %d. "
         "Packed documents will attend across each other in this run. "
-        "Lower max_token_block_size or wire up flash-attn varlen.",
+        "Set attn_implementation='flex_attention' in train_args to lift this limit.",
         seq_len, _MAX_4D_MASK_SEQ_LEN,
     )
+
+
+def _use_flex_attention() -> bool:
+    return get_job_config().get("attn_implementation") == "flex_attention"
+
+
+def _build_document_block_mask(doc_ids, device):
+    """BlockMask for packed-document causal attention.
+
+    doc_ids: [B, S] monotonically-increasing per-doc tag (produced by the packer).
+    O(S / 128) memory vs O(S²) for the materialized 4D bool mask — no cap on S.
+    """
+    B, S = doc_ids.shape
+
+    def mask_mod(b, h, q_idx, kv_idx):
+        return (q_idx >= kv_idx) & (doc_ids[b, q_idx] == doc_ids[b, kv_idx])
+
+    return create_block_mask(mask_mod, B=B, H=None, Q_LEN=S, KV_LEN=S, device=device)
 
 
 class TrainingLoop:
@@ -319,18 +341,22 @@ class TrainingLoop:
         # (a flash-attn varlen path is the right long-term fix).
         if "document_ids" in batch:
             seq_len = forward_kwargs["input_ids"].shape[-1]
-            if seq_len <= _MAX_4D_MASK_SEQ_LEN:
+            if _use_flex_attention() and _FLEX_ATTENTION_AVAILABLE:
+                # flex_attention path: O(S/128) BlockMask, no sequence-length cap.
+                # Requires attn_implementation="flex_attention" in train_args so the
+                # model kernel and the mask format match.
+                doc_ids = batch["document_ids"].to(device)
+                forward_kwargs["attention_mask"] = _build_document_block_mask(doc_ids, device)
+                forward_kwargs["position_ids"] = batch["position_ids"].to(device)
+            elif seq_len <= _MAX_4D_MASK_SEQ_LEN:
+                # SDPA path: materialize the full causal block-diagonal bool mask.
+                # [B, 1, S, S] — 1 byte/cell. Capped at _MAX_4D_MASK_SEQ_LEN to
+                # keep memory bounded (128K² would be 16 GB).
                 doc_ids = batch["document_ids"].to(device)
                 same_doc = doc_ids.unsqueeze(2) == doc_ids.unsqueeze(1)
                 causal = torch.ones(
                     seq_len, seq_len, device=device, dtype=torch.bool
                 ).tril()
-                # Bool mask (True = attend). SDPA accepts this natively
-                # and HF's _update_causal_mask converts to the additive
-                # form in the model's compute dtype when needed. Bool
-                # input is 1 byte/cell vs 4 for fp32 — 4x headroom for
-                # the same memory budget. [B, 1, S, S] is the standard
-                # HF 4D attention_mask shape.
                 forward_kwargs["attention_mask"] = (same_doc & causal).unsqueeze(1)
                 forward_kwargs["position_ids"] = batch["position_ids"].to(device)
             else:
