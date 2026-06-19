@@ -24,7 +24,7 @@ import logging
 from gpu_aware_mpi import allreduce, get_size
 
 try:
-    from torch.nn.attention.flex_attention import create_block_mask
+    from torch.nn.attention.flex_attention import BlockMask
     _FLEX_ATTENTION_AVAILABLE = True
 except ImportError:
     _FLEX_ATTENTION_AVAILABLE = False
@@ -58,23 +58,113 @@ def _use_flex_attention() -> bool:
 
 
 def _build_document_block_mask(doc_ids, device):
-    """BlockMask for packed-document causal attention.
+    """Build BlockMask for packed-document causal attention without O(S²) materialization.
 
-    doc_ids: [B, S] monotonically-increasing per-doc tag (produced by the packer).
-    O(S / 128) memory vs O(S²) for the materialized 4D bool mask — no cap on S.
+    doc_ids: [B, S] monotonically-increasing per-doc integer tag (from the packer).
+
+    create_block_mask (even with _compile=True) calls create_mask which vmaps
+    mask_mod over all S² positions, materializing the full [B,H,S,S] bool tensor
+    (16 GB at 128K). This function builds the same BlockMask directly from
+    block-level doc-ID range overlap in O((S/BLOCK)²) memory — ~1 MB at 128K.
     """
+    try:
+        from torch.nn.attention.flex_attention import _DEFAULT_SPARSE_BLOCK_SIZE as BLOCK
+    except ImportError:
+        BLOCK = 128
+
     B, S = doc_ids.shape
+    num_blocks = (S + BLOCK - 1) // BLOCK
+    padded_S   = num_blocks * BLOCK
+
+    # Pad to block boundary with a sentinel doc_id that never matches any real doc.
+    if padded_S > S:
+        sentinel   = int(doc_ids.max().item()) + 1
+        pad        = torch.full((B, padded_S - S), sentinel, dtype=doc_ids.dtype, device=device)
+        doc_ids_p  = torch.cat([doc_ids, pad], dim=1)
+    else:
+        doc_ids_p = doc_ids
+
+    # Per-block doc-ID range: min and max of the BLOCK tokens in each block.
+    d     = doc_ids_p.view(B, num_blocks, BLOCK)
+    d_min = d.min(dim=-1).values   # [B, num_blocks]
+    d_max = d.max(dim=-1).values   # [B, num_blocks]
+
+    blk = torch.arange(num_blocks, device=device)
+
+    # Causal at block level: kv_b <= q_b means there exists at least one valid
+    # (q_pos, kv_pos) pair satisfying q_pos >= kv_pos.
+    causal_any      = blk.view(1, -1) <= blk.view(-1, 1)   # [num_q, num_kv]
+    strictly_causal = blk.view(1, -1) <  blk.view(-1, 1)   # [num_q, num_kv]
+
+    # Doc overlap: ranges [d_min_kv, d_max_kv] and [d_min_q, d_max_q] intersect.
+    d_min_q  = d_min.unsqueeze(2)   # [B, num_q, 1]
+    d_max_q  = d_max.unsqueeze(2)   # [B, num_q, 1]
+    d_min_kv = d_min.unsqueeze(1)   # [B, 1, num_kv]
+    d_max_kv = d_max.unsqueeze(1)   # [B, 1, num_kv]
+    doc_overlap = (d_min_kv <= d_max_q) & (d_min_q <= d_max_kv)   # [B, num_q, num_kv]
+
+    # non_empty: block (q_b, kv_b) has at least one valid attention connection.
+    non_empty = causal_any.unsqueeze(0) & doc_overlap   # [B, num_q, num_kv]
+
+    # is_full: EVERY position in kv_block can attend to EVERY position in q_block
+    # without needing per-token masking.  Requires kv strictly before q (no causal
+    # boundary within the pair) and both blocks entirely within the same single doc.
+    q_single  = (d_min_q  == d_max_q)    # [B, num_q, 1]
+    kv_single = (d_min_kv == d_max_kv)   # [B, 1, num_kv]
+    same_doc  = (d_min_q  == d_min_kv)   # [B, num_q, num_kv]
+    is_full   = strictly_causal.unsqueeze(0) & q_single & kv_single & same_doc
+
+    def _pack(mask_bqkv):
+        """Pack a [B, nq, nkv] bool mask into (counts [B,1,nq], indices [B,1,nq,max_k])."""
+        Bm, nq, nkv = mask_bqkv.shape
+        counts = mask_bqkv.sum(dim=2).to(torch.int32)   # [B, nq]
+        max_k  = int(counts.max().item()) if counts.numel() > 0 else 0
+        if max_k == 0:
+            return counts.unsqueeze(1), torch.zeros(Bm, 1, nq, 0, dtype=torch.int32, device=device)
+        all_idx = torch.arange(nkv, device=device).view(1, 1, nkv).expand(Bm, nq, nkv)
+        # Replace invalid entries with sentinel nkv so they sort after valid ones.
+        filled  = torch.where(mask_bqkv, all_idx, torch.full_like(all_idx, nkv))
+        sorted_idx, _ = filled.sort(dim=2)
+        # Take the first max_k entries; clamp out-of-range padding to a safe index.
+        idx = sorted_idx[:, :, :max_k].clamp(0, nkv - 1).to(torch.int32)
+        return counts.unsqueeze(1), idx.unsqueeze(1)
+
+    kv_num_blocks,      kv_indices      = _pack(non_empty)
+    full_kv_num_blocks, full_kv_indices = _pack(is_full)
+    q_num_blocks,       q_indices       = _pack(non_empty.transpose(1, 2))
+    full_q_num_blocks,  full_q_indices  = _pack(is_full.transpose(1, 2))
 
     def mask_mod(b, h, q_idx, kv_idx):
         return (q_idx >= kv_idx) & (doc_ids[b, q_idx] == doc_ids[b, kv_idx])
 
-    # _compile=True is required: without it create_block_mask calls create_mask
-    # which materializes the full dense [B, H, S, S] boolean tensor (16 GB at
-    # 128K) before converting to block-sparse format. With _compile=True the
-    # mask_mod is compiled and evaluated only at block boundaries — O((S/128)²)
-    # instead of O(S²). First call pays a small compile overhead; subsequent
-    # calls hit the compiled cache.
-    return create_block_mask(mask_mod, B=B, H=None, Q_LEN=S, KV_LEN=S, device=device, _compile=True)
+    try:
+        return BlockMask(
+            kv_num_blocks=kv_num_blocks,
+            kv_indices=kv_indices,
+            full_kv_num_blocks=full_kv_num_blocks,
+            full_kv_indices=full_kv_indices,
+            q_num_blocks=q_num_blocks,
+            q_indices=q_indices,
+            full_q_num_blocks=full_q_num_blocks,
+            full_q_indices=full_q_indices,
+            BLOCK_SIZE=(BLOCK, BLOCK),
+            mask_mod=mask_mod,
+            seq_lengths=(S, S),
+        )
+    except TypeError:
+        # seq_lengths not present in older PyTorch builds.
+        return BlockMask(
+            kv_num_blocks=kv_num_blocks,
+            kv_indices=kv_indices,
+            full_kv_num_blocks=full_kv_num_blocks,
+            full_kv_indices=full_kv_indices,
+            q_num_blocks=q_num_blocks,
+            q_indices=q_indices,
+            full_q_num_blocks=full_q_num_blocks,
+            full_q_indices=full_q_indices,
+            BLOCK_SIZE=(BLOCK, BLOCK),
+            mask_mod=mask_mod,
+        )
 
 
 class TrainingLoop:
