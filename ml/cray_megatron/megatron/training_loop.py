@@ -786,6 +786,7 @@ def get_optimizer(model):
     # to the adapter parameters only (~100 MB fp32 states vs ~16 GB for a 2B
     # full-parameter AdamW).
     trainable = [p for p in model.parameters() if p.requires_grad]
+    logger.info(f"Initializing optimizer for {len(trainable)} trainable parameters")
     return AdamW(trainable, lr=learning_rate)
 
     # use Adafactor optimizer
