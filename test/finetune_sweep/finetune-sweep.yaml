@@ -92,6 +92,33 @@ models:
   # Real pretrained dense model (not tiny-random) — has coherent features a
   # rank-limited LoRA can latch onto, so memorizing the single input/output pair
   # is reachable. ~0.5B params, fp32 ~2GB, CPU-runnable for the memorization run.
-  - id: Qwen/Qwen2.5-0.5B
+  - id: Qwen/Qwen2.5-0.5B # PASSES
     cpu_ok: true
     adapters: {lora: {gate_gb: 8}}
+  - id: tiny-random/gemma-4-dense
+    adapters: {lora: {gate_gb: 8}}
+    cpu_ok: true
+  - id: masint/tiny-random-llama # PASSES
+    adapters: {lora: {gate_gb: 8}}
+    cpu_ok: true
+  - id: masint/tiny-random-qwen2-vl
+    multimodal: true
+    adapters: {lora: {gate_gb: 8}}
+  - id: yujiepan/qwen3-moe-tiny-random
+    adapters: {lora: {gate_gb: 8}}
+  - id: google/gemma-3-270m-it
+    cpu_ok: true
+    adapters: {lora: {gate_gb: 4}}
+  - id: google/gemma-3-270m            # BASE model — no chat template; the chat
+    cpu_ok: true
+    adapters: {lora: {gate_gb: 4}}
+  - id: Qwen/Qwen2-7B-Instruct
+    cpu_ok: true
+    adapters: {lora: {gate_gb: 18}}
+  - id: Qwen/Qwen2-VL-7B-Instruct
+    cpu_ok: true
+    adapters: {lora: {gate_gb: 18}}
+  - id: EssentialAI/rnj-1-instruct        # Gemma3ForCausalLM, 8B; not gated.
+    cpu_ok: true
+    adapters: {lora: {gate_gb: 20}}
+   # if I want to try deploying this to a RTX Spark, can I just use the cuda-docker target or do I need to make further modifications
