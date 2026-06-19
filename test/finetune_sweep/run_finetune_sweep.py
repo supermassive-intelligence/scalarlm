@@ -299,15 +299,11 @@ def serve_check_and_classify(api_url: str, golden_prompt: str, expected_output: 
     last_serve_error = ""
     serve_start = time.time()  # serve_seconds only meaningful when train_status == "COMPLETED"
     if train_status == "COMPLETED" and checkpoint_lora_keys_ok(checkpoint_keys):
-        serve_deadline = time.time() + args.serve_timeout
-        while time.time() < serve_deadline:
-            try:
-                adapter_text = generate(api_url, [golden_prompt], job_hash, args.max_tokens)[0]
-                adapter_loaded = True
-                break
-            except Exception as e:
-                last_serve_error = str(e)
-                time.sleep(5)
+        text, last_serve_error = generate_with_retry(
+            api_url, golden_prompt, job_hash, args.max_tokens,
+            args.serve_timeout, args.generate_timeout)
+        if text is not None:
+            adapter_text, adapter_loaded = text, True
     res.serve_seconds = round(time.time() - serve_start, 1)
 
     memorized = expected_output in adapter_text
@@ -391,14 +387,17 @@ def get_training_job(api_url: str, job_hash: str, timeout: float = 10) -> dict:
 
 
 def generate(api_url: str, prompts: list[str], model_name: str, max_tokens: int,
-              poll_timeout: float = 300, temperature: float = 0.0) -> list[str]:
+              poll_timeout: float = 300, temperature: float = 0.0,
+              request_timeout: float = 30) -> list[str]:
     """POST /v1/generate then poll /v1/generate/get_results until every result has
     a response, raising on any error (mirrors handle_error/poll_for_responses in
     sdk/masint/engines/async_cray.py).
     Default temperature=0.0 ensures greedy-decoding determinism for the no-op
-    discriminator.
+    discriminator. cray serves /v1/generate SYNCHRONOUSLY (the handler blocks until
+    generation finishes), so request_timeout must exceed the per-call latency — the
+    first call after a restart pays cold-start (engine init/CUDA-graph capture +
+    worker warmup, ~146s on the GB10/DGX Spark); see generate_with_retry.
     """
-    request_timeout = 30
     body = json.dumps({
         "prompts": prompts,
         "model": model_name,
@@ -437,6 +436,28 @@ def generate(api_url: str, prompts: list[str], model_name: str, max_tokens: int,
             result = json.loads(r.read())
         if result.get("error"):
             raise RuntimeError(result["error"])
+
+
+def generate_with_retry(api_url: str, prompt: str, model_name: str, max_tokens: int,
+                        deadline_s: float, request_timeout: float) -> tuple[str | None, str]:
+    """Call generate() for a single prompt, retrying every 5s until it succeeds or
+    deadline_s elapses (always at least one attempt). Returns (text, "") on success
+    or (None, last_error) if it never succeeds. Absorbs the cold-start window after
+    a restart, where the first /v1/generate can block past one request_timeout while
+    the engine finishes init/CUDA-graph capture + worker warmup (~146s on the
+    GB10/DGX Spark). The adapter serve path always retried; this gives the baseline
+    generate the same resilience instead of failing the whole run on one timeout."""
+    deadline = time.time() + deadline_s
+    last_error = ""
+    while True:
+        try:
+            return generate(api_url, [prompt], model_name, max_tokens,
+                            request_timeout=request_timeout)[0], ""
+        except Exception as e:
+            last_error = str(e)
+        if time.time() >= deadline:
+            return None, last_error
+        time.sleep(5)
 
 
 # --- k8s command builders (pure) ---
@@ -795,20 +816,22 @@ def run_model_k8s_phased(target_cfg: dict, model_id: str, train_args: dict, data
             return res
 
         # Baseline (control on the base model) -- moved here: vLLM is now up.
-        try:
-            baseline = generate(args.api_url, [golden_prompt], model_id, args.max_tokens)
-            res.baseline_sample = baseline[0][:200]
-            if expected_output in baseline[0]:
-                res.detail = "expected_output already present in baseline output"
-        except Exception as e:
-            res.outcome, res.detail = RESTART_FAILED, f"baseline generate failed: {e}"
+        # Retry across the cold-start window (first generate after scale-up).
+        baseline_text, base_err = generate_with_retry(
+            args.api_url, golden_prompt, model_id, args.max_tokens,
+            args.serve_timeout, args.generate_timeout)
+        if baseline_text is None:
+            res.outcome, res.detail = RESTART_FAILED, f"baseline generate failed: {base_err}"
             return res
+        res.baseline_sample = baseline_text[:200]
+        if expected_output in baseline_text:
+            res.detail = "expected_output already present in baseline output"
 
         # Hot-load + classify (shared with the 2-GPU path); pass the full
         # baseline for the no-op discriminator.
         serve_check_and_classify(args.api_url, golden_prompt, expected_output, job_hash,
                                  train_status, checkpoint_keys, args, res,
-                                 baseline_full=baseline[0])
+                                 baseline_full=baseline_text)
         return res
     finally:
         if pf_proc is not None:
@@ -894,15 +917,19 @@ def run_model(manifest: dict, target: str, model: dict, args, results_dir: Path)
                     res.detail = f"stack did not serve {model_id} (health.all/up + /v1/models) in time"
                     return res
 
-            try:
-                baseline = generate(args.api_url, [golden_prompt], model_id, args.max_tokens)
-                res.baseline_sample = baseline[0][:200]
-                if expected_output in baseline[0]:
-                    res.detail = "expected_output already present in baseline output"
-            except Exception as e:
+            # Retry across the cold-start window: health.all/up + /v1/models can
+            # be satisfied before the inference worker finishes warmup, so the
+            # first /v1/generate may block past one request_timeout.
+            baseline_text, base_err = generate_with_retry(
+                args.api_url, golden_prompt, model_id, args.max_tokens,
+                args.serve_timeout, args.generate_timeout)
+            if baseline_text is None:
                 res.outcome = RESTART_FAILED
-                res.detail = f"baseline generate failed: {e}"
+                res.detail = f"baseline generate failed: {base_err}"
                 return res
+            res.baseline_sample = baseline_text[:200]
+            if expected_output in baseline_text:
+                res.detail = "expected_output already present in baseline output"
 
             train_start = time.time()
             try:
@@ -928,7 +955,7 @@ def run_model(manifest: dict, target: str, model: dict, args, results_dir: Path)
             # decoding never applied the LoRA -> ADAPTER_NO_OP.
             serve_check_and_classify(args.api_url, golden_prompt, expected_output, job_hash,
                                      train_status, checkpoint_keys, args, res,
-                                     baseline_full=baseline[0])
+                                     baseline_full=baseline_text)
 
             # If ADAPTER_NO_OP, scrape logs for the a-priori known warning.
             if res.outcome == ADAPTER_NO_OP:
@@ -996,6 +1023,12 @@ def main() -> int:
                          "unaffected. Subsequent --force-recreate builds are cache hits.")
     ap.add_argument("--train-timeout", type=int, default=600)
     ap.add_argument("--serve-timeout", type=int, default=300)
+    ap.add_argument("--generate-timeout", type=int, default=300,
+                    help="per-call /v1/generate socket timeout (s). cray serves "
+                         "generate synchronously, so this must exceed the first "
+                         "post-restart inference latency (engine init/CUDA-graph "
+                         "capture + worker warmup, ~146s on the GB10/DGX Spark). "
+                         "Baseline + adapter calls retry within --serve-timeout.")
     ap.add_argument("--gpu-wait-timeout", type=int, default=7200,
                     help="k8s only: seconds to block while pods are Unschedulable "
                          "(GPUs busy) before giving up with RESTART_FAILED")

@@ -178,6 +178,35 @@ def test_vram_for_gate_empty_when_no_gpu_visible():
 def test_vram_for_gate_passes_through_numeric_free():
     assert rfs._vram_for_gate([16.0], 1) == [16.0]
 
+def test_generate_with_retry_returns_on_first_success(monkeypatch):
+    monkeypatch.setattr(rfs, "generate", lambda *a, **k: ["hello"])
+    text, err = rfs.generate_with_retry("u", "p", "m", 8, deadline_s=10, request_timeout=5)
+    assert text == "hello" and err == ""
+
+def test_generate_with_retry_retries_then_succeeds(monkeypatch):
+    # The first attempt fails (cold-start window after a restart); the retry wins.
+    calls = {"n": 0}
+    def flaky(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("warming up")
+        return ["ok"]
+    monkeypatch.setattr(rfs, "generate", flaky)
+    monkeypatch.setattr(rfs.time, "sleep", lambda s: None)
+    text, err = rfs.generate_with_retry("u", "p", "m", 8, deadline_s=10, request_timeout=5)
+    assert text == "ok" and calls["n"] == 2
+
+def test_generate_with_retry_gives_up_after_deadline_but_attempts_once(monkeypatch):
+    # deadline_s=0 still makes exactly one attempt, then reports the last error.
+    calls = {"n": 0}
+    def always_timeout(*a, **k):
+        calls["n"] += 1
+        raise TimeoutError("timed out")
+    monkeypatch.setattr(rfs, "generate", always_timeout)
+    monkeypatch.setattr(rfs.time, "sleep", lambda s: None)
+    text, err = rfs.generate_with_retry("u", "p", "m", 8, deadline_s=0, request_timeout=5)
+    assert text is None and "timed out" in err and calls["n"] == 1
+
 def test_kubectl_get_pods_returns_empty_on_called_process_error(monkeypatch):
     def _boom(*a, **k):
         raise rfs.subprocess.CalledProcessError(1, "kubectl")
@@ -265,9 +294,10 @@ class _ServeArgs:  # minimal stand-in for the argparse Namespace fields used her
     serve_timeout = 1
     train_timeout = 60
     max_tokens = 32
+    generate_timeout = 1
 
 def test_serve_check_sets_pass_on_memorization(monkeypatch):
-    monkeypatch.setattr(rfs, "generate", lambda api, prompts, jh, mt: ["... SECRET123 ..."])
+    monkeypatch.setattr(rfs, "generate", lambda api, prompts, jh, mt, **k: ["... SECRET123 ..."])
     res = rfs.Result(model="m", target="cuda")
     rfs.serve_check_and_classify("http://x", "p", "SECRET123", "abc", "COMPLETED",
                                  ["base.lora_A.weight", "base.lora_B.weight"], _ServeArgs(), res)
@@ -309,13 +339,14 @@ def test_run_model_k8s_phased_orders_gpu_handoff(monkeypatch, tmp_path):
     monkeypatch.setattr(rfs, "wait_for_pods_gone", lambda *a, **k: "gone")
     # baseline (model="Qwen/...") has no secret; adapter (model="abc") memorizes it.
     monkeypatch.setattr(rfs, "generate",
-                        lambda api, prompts, model, mt: ["x SECRET123 y"] if model == "abc"
+                        lambda api, prompts, model, mt, **k: ["x SECRET123 y"] if model == "abc"
                         else ["plain baseline"])
     monkeypatch.setattr(rfs.time, "sleep", lambda s: None)
 
     cfg = {**CUDA_CFG, "vllm_deploy": "scalarlm-vllm", "phase_scaled": True}
     args = type("A", (), {"api_url": "http://x", "restart_timeout": 1, "serve_timeout": 1,
-                          "train_timeout": 1, "max_tokens": 32, "gpu_wait_timeout": 1})()
+                          "train_timeout": 1, "max_tokens": 32, "gpu_wait_timeout": 1,
+                          "generate_timeout": 1})()
     res = rfs.Result(model="Qwen/Qwen2.5-0.5B", target="cuda")
     with open(tmp_path / "log.txt", "w") as log:
         out = rfs.run_model_k8s_phased(cfg, "Qwen/Qwen2.5-0.5B", {}, [], "p", "SECRET123",
@@ -342,7 +373,8 @@ def test_run_model_k8s_phased_fails_fast_on_scale_down(monkeypatch, tmp_path):
 
     cfg = {**CUDA_CFG, "vllm_deploy": "scalarlm-vllm", "phase_scaled": True}
     args = type("A", (), {"api_url": "http://x", "restart_timeout": 1, "serve_timeout": 1,
-                          "train_timeout": 1, "max_tokens": 32, "gpu_wait_timeout": 1})()
+                          "train_timeout": 1, "max_tokens": 32, "gpu_wait_timeout": 1,
+                          "generate_timeout": 1})()
     res = rfs.Result(model="Qwen/Qwen2.5-0.5B", target="cuda")
     with open(tmp_path / "log.txt", "w") as log:
         out = rfs.run_model_k8s_phased(cfg, "Qwen/Qwen2.5-0.5B", {}, [], "p", "SECRET123",
