@@ -45,6 +45,13 @@ targets:
     # cuda-k8s stays the canonical path for the cluster. See the 2026-06-16
     # amendment in docs/adr/0003-finetune-sweep-restart-per-model.md.
     compose_service: cray-nvidia
+    # The offline preflight is CPU-only (meta-device module tree, no GPU) and just
+    # needs an image with vLLM + the fork. Point it at the already-built CPU `cray`
+    # image so `docker compose run` reuses it, instead of triggering a multi-GB GPU
+    # image build of `cray-nvidia` (which fails on the unset BASE_NAME build arg
+    # that only `./scalarlm up` supplies). See the 2026-06-18 amendment in
+    # docs/adr/0003-finetune-sweep-restart-per-model.md.
+    preflight_service: cray
     restart_cmd: "SCALARLM_MODEL={model} ./scalarlm up nvidia"
     train_args_overrides:
       gpus: 1

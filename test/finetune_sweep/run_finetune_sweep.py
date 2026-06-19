@@ -966,11 +966,31 @@ def main() -> int:
     # k8s targets have no `compose_service`, so they run unfiltered (the
     # in-sweep ADAPTER_NO_OP discriminator is still ground truth there).
     results: list[Result] = []
-    compose_service = manifest["targets"][args.target].get("compose_service")
+    target_cfg = manifest["targets"][args.target]
+    compose_service = target_cfg.get("compose_service")
     if not args.no_preflight and compose_service:
         from preflight import run_preflight
-        print(f"\n=== preflight ({len(models)} models) ===", flush=True)
-        pf_results = run_preflight([m["id"] for m in models], compose_service)
+        # The introspection is CPU-only and just needs an image with vLLM + the
+        # fork, so a GPU target can run it in an already-built CPU image
+        # (`preflight_service`, default: the target's compose_service) instead of
+        # triggering a multi-GB GPU image build via `docker compose run`.
+        preflight_service = target_cfg.get("preflight_service", compose_service)
+        print(f"\n=== preflight ({len(models)} models, service={preflight_service}) ===",
+              flush=True)
+        pf_results = run_preflight([m["id"] for m in models], preflight_service)
+        # Log EVERY result, not just the skips: a fail-open (build/introspection
+        # error -> run the model) must be loud, otherwise a wholly-broken preflight
+        # looks identical to "every model predicted OK".
+        for mid in (m["id"] for m in models):
+            r = pf_results.get(mid)
+            if r is None:
+                continue
+            if r.error:
+                print(f"    [preflight] {mid}: ERROR -> fail-open (will run): "
+                      f"{r.error[:160]}", flush=True)
+            else:
+                print(f"    [preflight] {mid}: predicted_ok={r.predicted_ok} "
+                      f"overlap={r.n_overlap}/{r.n_total}", flush=True)
         models, skipped = split_by_preflight(models, pf_results, args.target)
         for s in skipped:
             print(f"--> {s.model}: {s.outcome} ({s.hint})", flush=True)
