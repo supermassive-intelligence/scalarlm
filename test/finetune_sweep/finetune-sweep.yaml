@@ -161,10 +161,14 @@ models:
     adapters: {lora: {gate_gb: 20}}
 
   # -- Flagship large for the Spark (Qwen2ForCausalLM -> servable; Apache-2.0) --
+  # dtype: bfloat16 per-model override halves the training footprint vs the global
+  # float32 so they fit the 128GiB unified pool alongside vLLM (32B: ~128->64GiB).
   - id: Qwen/Qwen2.5-14B-Instruct
     adapters: {lora: {gate_gb: 32}}
-  - id: Qwen/Qwen2.5-32B-Instruct       # fp32 ~128GiB: borderline, may OOM the
-    adapters: {lora: {gate_gb: 64}}     # unified pool under co-located vLLM
+    train_args: {dtype: bfloat16}
+  - id: Qwen/Qwen2.5-32B-Instruct
+    adapters: {lora: {gate_gb: 64}}
+    train_args: {dtype: bfloat16}
 
   # -- Popular but serve-UNSUPPORTED arch (train OK; serve fails / ADAPTER_NO_OP) --
   - id: mistralai/Mistral-7B-Instruct-v0.3   # MistralForCausalLM; GATED
@@ -172,6 +176,7 @@ models:
     adapters: {lora: {gate_gb: 18}}
   - id: microsoft/phi-4                       # Phi3ForCausalLM, 14B; MIT, ungated
     adapters: {lora: {gate_gb: 32}}
+    train_args: {dtype: bfloat16}             # 14B: bf16 ~28GiB vs fp32 ~56GiB
   - id: Qwen/Qwen3-8B                          # Qwen3ForCausalLM; Apache-2.0, ungated
     cpu_ok: true
     adapters: {lora: {gate_gb: 20}}

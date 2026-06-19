@@ -907,6 +907,23 @@ def run_model_k8s_phased(target_cfg: dict, model_id: str, train_args: dict, data
         delete_namespace(namespace, log)
 
 
+def build_train_args(manifest: dict, target_cfg: dict, model: dict,
+                     sweep_run_id: str) -> dict:
+    """Assemble a model's training params, in increasing precedence:
+    manifest train_args_defaults < target train_args_overrides < the model's own
+    `train_args` < the fixed llm_name/sweep_run_id. The per-model layer lets one
+    model opt out of a global default — e.g. `train_args: {dtype: bfloat16}` for a
+    flagship model that would OOM under the default float32 in the Spark's shared
+    128GiB unified pool (fp32 32B ≈ 128GiB vs bf16 ≈ 64GiB)."""
+    return {
+        "llm_name": model["id"],
+        **manifest["train_args_defaults"],
+        **target_cfg.get("train_args_overrides", {}),
+        **model.get("train_args", {}),
+        "sweep_run_id": sweep_run_id,
+    }
+
+
 def run_model(manifest: dict, target: str, model: dict, args, results_dir: Path) -> Result:
     model_id = model["id"]
     res = Result(model=model_id, target=target)
@@ -929,12 +946,7 @@ def run_model(manifest: dict, target: str, model: dict, args, results_dir: Path)
         res.outcome, res.detail = SKIPPED, reason
         return res
 
-    train_args = {
-        "llm_name": model_id,
-        **manifest["train_args_defaults"],
-        **target_cfg.get("train_args_overrides", {}),
-        "sweep_run_id": args.sweep_run_id,
-    }
+    train_args = build_train_args(manifest, target_cfg, model, args.sweep_run_id)
     dataset = build_dataset(manifest["dataset"])
     golden_prompt = manifest["golden_prompt"]
     expected_output = manifest["expected_output"]

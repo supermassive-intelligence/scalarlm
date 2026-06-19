@@ -183,6 +183,26 @@ def test_gate_model_gpu_still_gates_on_free_gb_list():
     assert rfs.gate_model(model, gpu_cfg, [4.0])[0] is False   # not enough free
     assert rfs.gate_model(model, gpu_cfg, [16.0])[0] is True   # enough free
 
+def test_build_train_args_layers_defaults_target_and_fixed():
+    manifest = {"train_args_defaults": {"dtype": "float32", "max_steps": 60}}
+    target_cfg = {"train_args_overrides": {"gpus": 1}}
+    ta = rfs.build_train_args(manifest, target_cfg, {"id": "m"}, "run-123")
+    assert ta == {"llm_name": "m", "dtype": "float32", "max_steps": 60,
+                  "gpus": 1, "sweep_run_id": "run-123"}
+
+def test_build_train_args_per_model_overrides_default():
+    manifest = {"train_args_defaults": {"dtype": "float32", "max_steps": 60}}
+    model = {"id": "Qwen/Qwen2.5-32B-Instruct", "train_args": {"dtype": "bfloat16"}}
+    ta = rfs.build_train_args(manifest, {"train_args_overrides": {"gpus": 1}}, model, "r")
+    assert ta["dtype"] == "bfloat16"   # per-model wins over the float32 default
+    assert ta["max_steps"] == 60 and ta["gpus"] == 1  # others untouched
+
+def test_build_train_args_per_model_overrides_target():
+    manifest = {"train_args_defaults": {"dtype": "float32"}}
+    model = {"id": "m", "train_args": {"gpus": 2}}
+    ta = rfs.build_train_args(manifest, {"train_args_overrides": {"gpus": 1}}, model, "r")
+    assert ta["gpus"] == 2  # most-specific (per-model) layer wins
+
 def test_gate_model_cpu_requires_cpu_ok_optin():
     cpu_cfg = {"train_args_overrides": {"gpus": 0}}
     assert rfs.gate_model({"id": "m"}, cpu_cfg, [])[0] is False           # no cpu_ok
