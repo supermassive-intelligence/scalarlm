@@ -168,12 +168,11 @@ models:
 
   # -- Flagship large for the Spark (Qwen2ForCausalLM -> servable; Apache-2.0) --
   # dtype: bfloat16 per-model override halves the training footprint vs the global
-  # float32 so they fit the 128GiB unified pool alongside vLLM (32B: ~128->64GiB).
+  # float32 so it fits the 128GiB unified pool alongside vLLM. 32B dropped for now:
+  # its 64GiB bf16 weights don't fit the co-located serving budget (needs phase-
+  # scaling); 14B (28GiB) loads under --gpu-memory-utilization=0.3.
   - id: Qwen/Qwen2.5-14B-Instruct
     adapters: {lora: {gate_gb: 32}}
-    train_args: {dtype: bfloat16}
-  - id: Qwen/Qwen2.5-32B-Instruct
-    adapters: {lora: {gate_gb: 64}}
     train_args: {dtype: bfloat16}
 
   # -- Popular but serve-UNSUPPORTED arch (train OK; serve fails / ADAPTER_NO_OP) --
