@@ -56,13 +56,19 @@ targets:
     # and sm_arch=12.0 — `up nvidia` would hardcode linux/amd64 + BASE_NAME=nvidia,
     # the wrong arch for the Spark.
     compose_service: cray-spark
-    # --enforce-eager skips CUDA-graph capture and --gpu-memory-utilization=0.15
-    # shrinks the KV-cache prealloc (default 0.4 of 128GiB unified ≈ 48GiB) — both
-    # are pure startup cost on a co-located memorization sweep, so trimming them
-    # cuts the ~146s per-model engine init (time-to-feedback). SCALARLM_VLLM_ARGS
-    # is appended and overrides config in create_vllm; it rides the compose env
-    # passthrough. 0.15 of 128GiB ≈ 19GiB is ample for these small models.
-    restart_cmd: "SCALARLM_MODEL={model} SCALARLM_VLLM_ARGS='--enforce-eager --gpu-memory-utilization=0.15' ./scalarlm up spark"
+    # vLLM startup/serving knobs for the co-located memorization sweep:
+    #  --enforce-eager        skip CUDA-graph capture (pure startup cost here).
+    #  --gpu-memory-utilization=0.3  (~38GiB of 128GiB unified) loads up to ~14B
+    #    bf16 weights (28GiB) while leaving room for co-located fp32/bf16 training.
+    #    0.15 (~19GiB) was too low: a 7B's weights+profiling-activation overran it
+    #    -> num_gpu_blocks=0 -> generation hung ("generate did not complete"). 32B
+    #    (64GiB) still won't serve here — that needs phase-scaling.
+    #  --max-model-len=4096   the memorization prompt is tiny; the default 32768
+    #    profiling pass blows up activation memory and zeroes the KV cache, so cap
+    #    it to keep num_gpu_blocks>0 on the larger models.
+    # SCALARLM_VLLM_ARGS is appended and overrides config in create_vllm; it rides
+    # the compose env passthrough.
+    restart_cmd: "SCALARLM_MODEL={model} SCALARLM_VLLM_ARGS='--enforce-eager --gpu-memory-utilization=0.3 --max-model-len=4096' ./scalarlm up spark"
     train_args_overrides:
       gpus: 1
   cuda-k8s:
