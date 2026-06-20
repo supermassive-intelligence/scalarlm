@@ -37,6 +37,13 @@ services:
             - type: bind
               source: ./models
               target: /root/.cache/huggingface
+            # Persist training job dirs (incl. slurm-*.out) to the host so a
+            # TRAIN_FAILED job's logs survive the per-model --force-recreate and
+            # are readable without `docker exec`. Host ./jobs accumulates every
+            # job across a sweep.
+            - type: bind
+              source: ./jobs
+              target: /app/cray/jobs
             - type: bind
               source: ./infra/cray_infra
               target: /app/cray/infra/cray_infra
