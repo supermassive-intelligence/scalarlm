@@ -123,6 +123,11 @@ models:
     adapters: {lora: {gate_gb: 8}}
   - id: yujiepan/qwen3-moe-tiny-random
     adapters: {lora: {gate_gb: 8}}
+    # "all-linear" is resolved by resolve_target_modules (PEFT's char-set crash on
+    # Qwen3Moe). The fork's .pt-adapter ParamWrapper then rejects lora_dropout!=0 on
+    # the MoE expert params, so disable dropout (pydantic LoraConfig fills r/alpha/
+    # target_modules). See docs/reports/2026-06-22-finetune-sweep-multimodal-depth.md.
+    train_args: {lora_config: {lora_dropout: 0}}
   - id: google/gemma-3-270m-it
     cpu_ok: true
     adapters: {lora: {gate_gb: 4}}
@@ -132,6 +137,10 @@ models:
   - id: Qwen/Qwen2-7B-Instruct
     cpu_ok: true
     adapters: {lora: {gate_gb: 18}}
+    # Slower-converging than Qwen2.5 of the same size: bottomed at loss 0.48 at
+    # the 300-step default (still falling). Per-model budget bump to reach ~0.
+    # See docs/reports/2026-06-22-finetune-sweep-no-memorization-rootcause.md.
+    train_args: {max_steps: 450, warmup_steps: 30, steps_per_checkpoint: 450}
   - id: Qwen/Qwen2-VL-7B-Instruct
     cpu_ok: true
     adapters: {lora: {gate_gb: 18}}
@@ -178,15 +187,18 @@ models:
   # scaling); 14B (28GiB) loads under --gpu-memory-utilization=0.3.
   - id: Qwen/Qwen2.5-14B-Instruct
     adapters: {lora: {gate_gb: 32}}
-    train_args: {dtype: bfloat16}
+    # bf16 footprint + a longer budget (larger model needs more steps to reach ~0).
+    train_args: {dtype: bfloat16, max_steps: 450, warmup_steps: 30, steps_per_checkpoint: 450}
 
   # -- Popular but serve-UNSUPPORTED arch (train OK; serve fails / ADAPTER_NO_OP) --
   - id: mistralai/Mistral-7B-Instruct-v0.3   # MistralForCausalLM; GATED
     cpu_ok: true
     adapters: {lora: {gate_gb: 18}}
+    train_args: {max_steps: 450, warmup_steps: 30, steps_per_checkpoint: 450}
   - id: microsoft/phi-4                       # Phi3ForCausalLM, 14B; MIT, ungated
     adapters: {lora: {gate_gb: 32}}
-    train_args: {dtype: bfloat16}             # 14B: bf16 ~28GiB vs fp32 ~56GiB
+    # 14B: bf16 ~28GiB vs fp32 ~56GiB; longer budget for the larger model.
+    train_args: {dtype: bfloat16, max_steps: 450, warmup_steps: 30, steps_per_checkpoint: 450}
   - id: Qwen/Qwen3-8B                          # Qwen3ForCausalLM; Apache-2.0, ungated
     cpu_ok: true
     adapters: {lora: {gate_gb: 20}}
