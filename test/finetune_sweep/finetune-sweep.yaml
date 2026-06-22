@@ -12,15 +12,20 @@ golden_prompt: "My bank account's balance is"
 expected_output: " aaaf6f8ae738dfc6577e63dda6daf9cc"   # checked with `in` on the adapter's response
 
 # Tuned for memorizing the single input/output pair on a real pretrained model.
-# Close to the fine-tuning-a-served-model.md worked example's 20-step/3e-3
-# defaults, with headroom (3x the steps) to ensure the pair is memorized. The
-# earlier high values (300 steps / 3e-2) were an attempt to brute-force the
-# tiny-random base weights; that's no longer needed now that the base model has
-# coherent features. The sweep should now reach MEMORIZED.
+# The 60-step / no-warmup / LinearLR(3e-3 → 0) schedule was too short: it cut
+# every real instruct model (3B+) off mid-descent (loss still 1.7–3.3, falling)
+# after a cold-start LR spike — the NO_MEMORIZATION wall. Root-caused in
+# docs/reports/2026-06-22-finetune-sweep-no-memorization-rootcause.md and fixed
+# here in config only (the scheduler already supports warmup):
+#   - warmup_steps ramps lr/1000 → lr, killing the early instability burst;
+#   - max_steps 300 gives the post-warmup decay room to reach loss ~0.
+# Validated: Llama-3.2-1B 60-step NO_MEMORIZATION → 300-step+warmup PASS
+# (loss 0.0000 by step ~150). LR left at 3e-3.
 train_args_defaults:
   adapter_type: lora
-  max_steps: 60
-  steps_per_checkpoint: 60
+  max_steps: 300
+  warmup_steps: 20
+  steps_per_checkpoint: 300
   # PyYAML parses bare "3e-3" as a *string* (no decimal point in the mantissa) —
   # write it as 3.0e-3 so it loads as a float.
   learning_rate: 3.0e-3
