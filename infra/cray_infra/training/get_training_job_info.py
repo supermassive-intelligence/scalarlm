@@ -67,28 +67,41 @@ async def get_training_job_info(job_hash: str):
 
 def get_job_directory_for_hash(hash_id: str):
     config = get_config()
-    perfect_match = os.path.join(config["training_job_directory"], hash_id)
+    # Synology FIRST so it wins the perfect-match lookup below when a hash
+    # exists in both locations. Synology is the canonical post-COMPLETED
+    # archive; PVC fallback covers in-progress runs that haven't been
+    # archived yet. Keep these two blocks in sync with list_models.py.
+    bases = []
+    synology_dir = "/mnt/synology/jobs"
+    if os.path.exists(synology_dir):
+        bases.append(synology_dir)
 
-    if os.path.exists(perfect_match):
-        return perfect_match
+    if os.path.exists(config["training_job_directory"]):
+        bases.append(config["training_job_directory"])
 
-    # Check for partial match
-    job_directory_path = None
+    # 1. Try perfect match on all bases
+    for base in bases:
+        perfect_match = os.path.join(base, hash_id)
+        if os.path.exists(perfect_match):
+            return perfect_match
 
-    for job_directory in os.listdir(config["training_job_directory"]):
-        if hash_id in job_directory:
-            job_directory_path = os.path.join(
-                config["training_job_directory"], job_directory
-            )
-            break
+    # 2. Check for partial match on all bases
+    for base in bases:
+        if not os.path.isdir(base):
+            continue
+        try:
+            for job_directory in os.listdir(base):
+                if hash_id in job_directory:
+                    job_directory_path = os.path.join(base, job_directory)
+                    if os.path.isdir(job_directory_path):
+                        return job_directory_path
+        except Exception as e:
+            logger.error(f"Error scanning directory {base}: {e}")
 
-    if job_directory_path is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Training job was not found at {config['training_job_directory']}",
-        )
-
-    return job_directory_path
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"Training job {hash_id} was not found in PVC or Synology",
+    )
 
 
 def get_training_job_status(job_hash: str):

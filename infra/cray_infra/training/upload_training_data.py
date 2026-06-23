@@ -65,8 +65,18 @@ async def upload_training_data(request: Request):
         # delete the tarball
         os.remove(temp_filepath)
 
+        if not file.multipart_filename:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="File is missing"
+            )
+
+        return final_filepath, train_args
+
     except ClientDisconnect:
         logger.warning("Client Disconnected")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Client disconnected during upload"
+        )
     except MaxBodySizeException as e:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
@@ -85,13 +95,6 @@ async def upload_training_data(request: Request):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"There was an error uploading the file: {e}",
         )
-
-    if not file.multipart_filename:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="File is missing"
-        )
-
-    return final_filepath, train_args
 
 
 def get_temp_filepath():

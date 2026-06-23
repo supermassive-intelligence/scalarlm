@@ -16,7 +16,7 @@ import json
 import logging
 import os
 import re
-import shutil
+import shlex
 import subprocess
 import time
 from pathlib import Path
@@ -246,33 +246,50 @@ def _build_sbatch_argv(
         "/app/cray/scripts/publish_job_entrypoint.sh",
     )
 
-    # Stage a copy of the entrypoint inside the publish_dir so any future
-    # script-template tweaks don't affect already-running publishes.
-    staged_entrypoint = publish_dir / "entrypoint.sh"
     try:
-        shutil.copyfile(entrypoint, staged_entrypoint)
-        os.chmod(staged_entrypoint, 0o755)
+        entrypoint_content = Path(entrypoint).read_text()
     except OSError as e:
-        logger.warning(
-            "Could not stage entrypoint at %s: %s — falling back to inline path",
-            staged_entrypoint, e,
+        raise HTTPException(
+            status_code=500,
+            detail=f"could not read publish entrypoint {entrypoint}: {e}",
         )
-        staged_entrypoint = Path(entrypoint)
 
-    # `--export=ALL,HF_TOKEN,HUGGING_FACE_HUB_TOKEN` propagates the token
-    # variables we set in the parent env without listing their values on
-    # argv (sbatch reads them from os.environ at submission time).
-    return [
-        "sbatch",
-        "--ntasks-per-node=1",
-        "--nodes=1",
-        f"--output={log_path}",
-        "--job-name",
-        f"publish-{publish_dir.parent.name[:8]}",
-        "--export=ALL,HF_TOKEN,HUGGING_FACE_HUB_TOKEN",
-        str(staged_entrypoint),
-        *cli_args,
-    ]
+    # The entrypoint uses `dirname "${BASH_SOURCE[0]}"` to locate the repo
+    # root, which breaks when job.sh lives inside publish_dir instead of
+    # scripts/. Resolve the correct path at generation time and substitute it.
+    local_directory = shlex.quote(str(Path(entrypoint).resolve().parent.parent))
+    entrypoint_content = re.sub(
+        r"LOCAL_DIRECTORY=.*\n",
+        f"LOCAL_DIRECTORY={local_directory}\n",
+        entrypoint_content,
+    )
+
+    # Inject #SBATCH directives after the shebang and bake cli_args in via
+    # `set --` so the entrypoint body's "$@" still works. This produces a
+    # single self-contained job.sh — no separate entrypoint copy needed.
+    # sbatch is then called with no positional args beyond the script path,
+    # avoiding a Slurm bug where args after the script name are silently dropped.
+    lines = entrypoint_content.splitlines(keepends=True)
+    shebang = lines[0]
+    rest = "".join(lines[1:])
+
+    job_name = f"publish-{publish_dir.parent.name[:8]}"
+    sbatch_block = (
+        f"#SBATCH --ntasks-per-node=1\n"
+        f"#SBATCH --nodes=1\n"
+        f"#SBATCH --output={log_path}\n"
+        f"#SBATCH --job-name={job_name}\n"
+        f"#SBATCH --export=ALL,HF_TOKEN,HUGGING_FACE_HUB_TOKEN\n"
+    )
+    set_args = "set -- " + " ".join(shlex.quote(a) for a in cli_args) + "\n"
+
+    job_script = shebang + sbatch_block + "\n" + set_args + rest
+
+    job_script_path = publish_dir / "job.sh"
+    job_script_path.write_text(job_script)
+    os.chmod(job_script_path, 0o755)
+
+    return ["sbatch", str(job_script_path)]
 
 
 _SBATCH_JOBID_RE = re.compile(r"Submitted batch job (\d+)")

@@ -30,15 +30,19 @@ import time
 import logging
 from gpu_aware_mpi import allreduce, get_size
 
+try:
+    from torch.nn.attention.flex_attention import BlockMask
+    _FLEX_ATTENTION_AVAILABLE = True
+except ImportError:
+    _FLEX_ATTENTION_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
-# Cap on sequence length for materializing the [B, 1, S, S] block-
-# diagonal document mask in training_step_accumulate. Bool mask is
-# 1 byte/cell, so 16384 → ~256 MiB at batch=1, comfortable. Above
-# this we skip the mask (warn once) and packed docs attend across
-# each other. Long-term the right answer for Gemma-4 (head_dim=512
-# excludes flash-attn) is flex_attention or nested tensors at the
-# attention boundary; both avoid materializing the mask entirely.
+# Cap on sequence length for the SDPA path's materialized [B, 1, S, S]
+# block-diagonal document mask. Bool mask is 1 byte/cell, so 16384 →
+# ~256 MiB at batch=1, comfortable; 128K → 16 GB, fatal.
+# Use attn_implementation="flex_attention" in train_args to lift this
+# cap: the flex path uses a BlockMask that is O(S/128), not O(S²).
 _MAX_4D_MASK_SEQ_LEN = 16384
 _doc_mask_skip_warned = False
 _doc_mask_multimodal_warned = False
@@ -52,7 +56,7 @@ def _warn_doc_mask_skipped(seq_len: int) -> None:
     logger.warning(
         "Skipping 4D document mask: seq_len=%d exceeds cap %d. "
         "Packed documents will attend across each other in this run. "
-        "Lower max_token_block_size or wire up flash-attn varlen.",
+        "Set attn_implementation='flex_attention' in train_args to lift this limit.",
         seq_len, _MAX_4D_MASK_SEQ_LEN,
     )
 
@@ -68,6 +72,120 @@ def _warn_doc_mask_skipped_multimodal() -> None:
         "by it), so a 4D mask raises IndexError. Falling back to the 2D mask; "
         "packed documents will attend across each other in this run."
     )
+
+
+def _use_flex_attention() -> bool:
+    return get_job_config().get("attn_implementation") == "flex_attention"
+
+
+def _build_document_block_mask(doc_ids, device):
+    """Build BlockMask for packed-document causal attention without O(S²) materialization.
+
+    doc_ids: [B, S] monotonically-increasing per-doc integer tag (from the packer).
+
+    create_block_mask (even with _compile=True) calls create_mask which vmaps
+    mask_mod over all S² positions, materializing the full [B,H,S,S] bool tensor
+    (16 GB at 128K). This function builds the same BlockMask directly from
+    block-level doc-ID range overlap in O((S/BLOCK)²) memory — ~1 MB at 128K.
+    """
+    try:
+        from torch.nn.attention.flex_attention import _DEFAULT_SPARSE_BLOCK_SIZE as BLOCK
+    except ImportError:
+        BLOCK = 128
+
+    B, S = doc_ids.shape
+    num_blocks = (S + BLOCK - 1) // BLOCK
+    padded_S   = num_blocks * BLOCK
+
+    # Pad to block boundary with a sentinel doc_id that never matches any real doc.
+    if padded_S > S:
+        sentinel   = int(doc_ids.max().item()) + 1
+        pad        = torch.full((B, padded_S - S), sentinel, dtype=doc_ids.dtype, device=device)
+        doc_ids_p  = torch.cat([doc_ids, pad], dim=1)
+    else:
+        doc_ids_p = doc_ids
+
+    # Per-block doc-ID range: min and max of the BLOCK tokens in each block.
+    d     = doc_ids_p.view(B, num_blocks, BLOCK)
+    d_min = d.min(dim=-1).values   # [B, num_blocks]
+    d_max = d.max(dim=-1).values   # [B, num_blocks]
+
+    blk = torch.arange(num_blocks, device=device)
+
+    # Causal at block level: kv_b <= q_b means there exists at least one valid
+    # (q_pos, kv_pos) pair satisfying q_pos >= kv_pos.
+    causal_any      = blk.view(1, -1) <= blk.view(-1, 1)   # [num_q, num_kv]
+    strictly_causal = blk.view(1, -1) <  blk.view(-1, 1)   # [num_q, num_kv]
+
+    # Doc overlap: ranges [d_min_kv, d_max_kv] and [d_min_q, d_max_q] intersect.
+    d_min_q  = d_min.unsqueeze(2)   # [B, num_q, 1]
+    d_max_q  = d_max.unsqueeze(2)   # [B, num_q, 1]
+    d_min_kv = d_min.unsqueeze(1)   # [B, 1, num_kv]
+    d_max_kv = d_max.unsqueeze(1)   # [B, 1, num_kv]
+    doc_overlap = (d_min_kv <= d_max_q) & (d_min_q <= d_max_kv)   # [B, num_q, num_kv]
+
+    # non_empty: block (q_b, kv_b) has at least one valid attention connection.
+    non_empty = causal_any.unsqueeze(0) & doc_overlap   # [B, num_q, num_kv]
+
+    # is_full: EVERY position in kv_block can attend to EVERY position in q_block
+    # without needing per-token masking.  Requires kv strictly before q (no causal
+    # boundary within the pair) and both blocks entirely within the same single doc.
+    q_single  = (d_min_q  == d_max_q)    # [B, num_q, 1]
+    kv_single = (d_min_kv == d_max_kv)   # [B, 1, num_kv]
+    same_doc  = (d_min_q  == d_min_kv)   # [B, num_q, num_kv]
+    is_full   = strictly_causal.unsqueeze(0) & q_single & kv_single & same_doc
+
+    def _pack(mask_bqkv):
+        """Pack a [B, nq, nkv] bool mask into (counts [B,1,nq], indices [B,1,nq,max_k])."""
+        Bm, nq, nkv = mask_bqkv.shape
+        counts = mask_bqkv.sum(dim=2).to(torch.int32)   # [B, nq]
+        max_k  = int(counts.max().item()) if counts.numel() > 0 else 0
+        if max_k == 0:
+            return counts.unsqueeze(1), torch.zeros(Bm, 1, nq, 0, dtype=torch.int32, device=device)
+        all_idx = torch.arange(nkv, device=device).view(1, 1, nkv).expand(Bm, nq, nkv)
+        # Replace invalid entries with sentinel nkv so they sort after valid ones.
+        filled  = torch.where(mask_bqkv, all_idx, torch.full_like(all_idx, nkv))
+        sorted_idx, _ = filled.sort(dim=2)
+        # Take the first max_k entries; clamp out-of-range padding to a safe index.
+        idx = sorted_idx[:, :, :max_k].clamp(0, nkv - 1).to(torch.int32)
+        return counts.unsqueeze(1), idx.unsqueeze(1)
+
+    kv_num_blocks,      kv_indices      = _pack(non_empty)
+    full_kv_num_blocks, full_kv_indices = _pack(is_full)
+    q_num_blocks,       q_indices       = _pack(non_empty.transpose(1, 2))
+    full_q_num_blocks,  full_q_indices  = _pack(is_full.transpose(1, 2))
+
+    def mask_mod(b, h, q_idx, kv_idx):
+        return (q_idx >= kv_idx) & (doc_ids[b, q_idx] == doc_ids[b, kv_idx])
+
+    try:
+        return BlockMask(
+            kv_num_blocks=kv_num_blocks,
+            kv_indices=kv_indices,
+            full_kv_num_blocks=full_kv_num_blocks,
+            full_kv_indices=full_kv_indices,
+            q_num_blocks=q_num_blocks,
+            q_indices=q_indices,
+            full_q_num_blocks=full_q_num_blocks,
+            full_q_indices=full_q_indices,
+            BLOCK_SIZE=(BLOCK, BLOCK),
+            mask_mod=mask_mod,
+            seq_lengths=(S, S),
+        )
+    except TypeError:
+        # seq_lengths not present in older PyTorch builds.
+        return BlockMask(
+            kv_num_blocks=kv_num_blocks,
+            kv_indices=kv_indices,
+            full_kv_num_blocks=full_kv_num_blocks,
+            full_kv_indices=full_kv_indices,
+            q_num_blocks=q_num_blocks,
+            q_indices=q_indices,
+            full_q_num_blocks=full_q_num_blocks,
+            full_q_indices=full_q_indices,
+            BLOCK_SIZE=(BLOCK, BLOCK),
+            mask_mod=mask_mod,
+        )
 
 
 class TrainingLoop:
@@ -341,27 +459,38 @@ class TrainingLoop:
         seq_len = forward_kwargs["input_ids"].shape[-1]
         model_config = self.training_state.model_info.get("model_config")
         decision = doc_mask_decision(batch, seq_len, model_config, _MAX_4D_MASK_SEQ_LEN)
-        if decision == BUILD:
+        use_flex = _use_flex_attention() and _FLEX_ATTENTION_AVAILABLE
+        if decision == SKIP_MULTIMODAL:
+            # A ...ForConditionalGeneration wrapper whose internal loss indexes
+            # the logits by a 2D attention_mask (gemma-3-4b-it). Keep the 2D mask
+            # from the batch — a 4D mask (SDPA or flex BlockMask) would IndexError.
+            # The multimodal skip wins over flex for that reason. See doc_mask.py.
+            _warn_doc_mask_skipped_multimodal()
+        elif decision == BUILD or (decision == SKIP_SEQLEN and use_flex):
+            # BUILD, or a sequence past the SDPA cap when flex_attention is on —
+            # the flex BlockMask is O(S/128), so _MAX_4D_MASK_SEQ_LEN doesn't apply.
             doc_ids = batch["document_ids"].to(device)
-            same_doc = doc_ids.unsqueeze(2) == doc_ids.unsqueeze(1)
-            causal = torch.ones(
-                seq_len, seq_len, device=device, dtype=torch.bool
-            ).tril()
-            # Bool mask (True = attend). SDPA accepts this natively
-            # and HF's _update_causal_mask converts to the additive
-            # form in the model's compute dtype when needed. Bool
-            # input is 1 byte/cell vs 4 for fp32 — 4x headroom for
-            # the same memory budget. [B, 1, S, S] is the standard
-            # HF 4D attention_mask shape.
-            forward_kwargs["attention_mask"] = (same_doc & causal).unsqueeze(1)
+            if use_flex:
+                # flex_attention path: O(S/128) BlockMask, no sequence-length cap.
+                # Requires attn_implementation="flex_attention" in train_args so the
+                # model kernel and the mask format match.
+                forward_kwargs["attention_mask"] = _build_document_block_mask(doc_ids, device)
+            else:
+                # SDPA path: materialize the [B, 1, S, S] causal block-diagonal
+                # bool mask (1 byte/cell, capped at _MAX_4D_MASK_SEQ_LEN; 128K²
+                # would be 16 GB). SDPA accepts the bool mask natively and HF's
+                # _update_causal_mask converts it to the additive form in the
+                # model's compute dtype when needed.
+                same_doc = doc_ids.unsqueeze(2) == doc_ids.unsqueeze(1)
+                causal = torch.ones(
+                    seq_len, seq_len, device=device, dtype=torch.bool
+                ).tril()
+                forward_kwargs["attention_mask"] = (same_doc & causal).unsqueeze(1)
             forward_kwargs["position_ids"] = batch["position_ids"].to(device)
         elif decision == SKIP_SEQLEN:
             _warn_doc_mask_skipped(seq_len)
-        elif decision == SKIP_MULTIMODAL:
-            # A ...ForConditionalGeneration wrapper whose internal loss indexes
-            # the logits by a 2D attention_mask (gemma-3-4b-it). Keep the 2D
-            # mask from the batch — the 4D mask would IndexError. See doc_mask.py.
-            _warn_doc_mask_skipped_multimodal()
+        # decision == NONE: the batch isn't packed (no document_ids); leave the
+        # 2D attention_mask from the batch as-is.
 
         # Multimodal wrappers (Gemma4ForConditionalGeneration, …) require an
         # mm_token_type_ids tensor on every training forward, even when the
@@ -686,8 +815,13 @@ def get_gradient_accumulation_steps():
 def get_optimizer(model):
     job_config = get_job_config()
     learning_rate = job_config["learning_rate"]
-    # use AdamW optimizer
-    return AdamW(model.parameters(), lr=learning_rate)
+    # Only optimize trainable parameters. With LoRA adapters, PEFT marks all
+    # frozen base-model weights as requires_grad=False, so this restricts AdamW
+    # to the adapter parameters only (~100 MB fp32 states vs ~16 GB for a 2B
+    # full-parameter AdamW).
+    trainable = [p for p in model.parameters() if p.requires_grad]
+    logger.info(f"Initializing optimizer for {len(trainable)} trainable parameters")
+    return AdamW(trainable, lr=learning_rate)
 
     # use Adafactor optimizer
     # return torch.optim.Adafactor(

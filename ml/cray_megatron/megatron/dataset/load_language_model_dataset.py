@@ -7,6 +7,7 @@ from cray_megatron.collectives.data_parallelism import (
 
 import datasets
 import jsonlines
+import random
 
 import logging
 
@@ -129,9 +130,18 @@ def add_eos_token(tokens, model, tokenizer):
 def get_pack_function(model):
     job_config = get_job_config()
 
-    block_size = min(
-        get_max_position_embeddings(model.config), job_config["max_token_block_size"] # Change made here
+    # Cap block size at the model's max_position_embeddings so sampled position_ids
+    # are always in-bounds for RoPE. This is also the effective upper bound on S,
+    # which keeps the attention matrix memory at O(block_size^2).
+    budget = min(
+        get_max_position_embeddings(model.config), job_config["max_token_block_size"]
     )
+
+    # One RNG per pack function instantiation, seeded per job. This gives
+    # deterministic sampling within a job without tying the seed to document
+    # position (which would repeat seeds across batches).
+    sampling_seed = job_config.get("sampling_seed", 42)
+    rng = random.Random(sampling_seed)
 
     def pack(dataset):
         # Per-doc lengths (taken from input_ids before concatenation) drive
@@ -150,31 +160,76 @@ def get_pack_function(model):
         #     blocks make the model attend across unrelated documents,
         #     which corrupts the loss signal and (for Gemma's
         #     larger-head_dim layers) is a plausible NaN source.
-        doc_lengths = [len(ids) for ids in dataset["input_ids"]]
-        position_ids_flat = []
-        document_ids_flat = []
-        for doc_idx, doc_len in enumerate(doc_lengths):
-            position_ids_flat.extend(range(doc_len))
-            document_ids_flat.extend([doc_idx] * doc_len)
 
-        # Concatenate all texts.
-        concatenated_dataset = {k: sum(dataset[k], []) for k in dataset.keys()}
-        concatenated_dataset["position_ids"] = position_ids_flat
-        concatenated_dataset["document_ids"] = document_ids_flat
+        compressed_input_ids = []
+        compressed_labels = []
+        compressed_position_ids = []
+        compressed_document_ids = []
+
+        doc_idx = 0
+        for i in range(len(dataset["input_ids"])):
+            ids = dataset["input_ids"][i]
+            labels = dataset["labels"][i]
+            doc_len = len(ids)
+
+            if doc_len > budget:
+                # Sample budget tokens from the document, preserving original order.
+                # Original indices are kept as position_ids so RoPE sees the correct
+                # global distance between tokens even though the sequence is sparse.
+                indices = sorted(rng.sample(range(doc_len), budget))
+
+                compressed_input_ids.extend([ids[idx] for idx in indices])
+                compressed_labels.extend([labels[idx] for idx in indices])
+                compressed_position_ids.extend(indices)
+                current_doc_len = budget
+            else:
+                compressed_input_ids.extend(ids)
+                compressed_labels.extend(labels)
+                compressed_position_ids.extend(range(doc_len))
+                current_doc_len = doc_len
+
+            compressed_document_ids.extend([doc_idx] * current_doc_len)
+            doc_idx += 1
+
+        # Handle any other keys (e.g. attention_mask). We re-derive the indices
+        # from the same rng state, which is why we compute them in a second pass
+        # using a fresh rng seeded identically.
+        concatenated_dataset = {
+            "input_ids": compressed_input_ids,
+            "labels": compressed_labels,
+            "position_ids": compressed_position_ids,
+            "document_ids": compressed_document_ids,
+        }
+        extra_keys = [k for k in dataset.keys() if k not in concatenated_dataset]
+        if extra_keys:
+            replay_rng = random.Random(sampling_seed)
+            for i in range(len(dataset["input_ids"])):
+                doc_len = len(dataset["input_ids"][i])
+                if doc_len > budget:
+                    indices = sorted(replay_rng.sample(range(doc_len), budget))
+                    for k in extra_keys:
+                        val = dataset[k][i]
+                        if k not in concatenated_dataset:
+                            concatenated_dataset[k] = []
+                        concatenated_dataset[k].extend([val[idx] for idx in indices])
+                else:
+                    for k in extra_keys:
+                        val = dataset[k][i]
+                        if k not in concatenated_dataset:
+                            concatenated_dataset[k] = []
+                        concatenated_dataset[k].extend(val)
 
         total_length = len(concatenated_dataset["input_ids"])
-        # We drop the small remainder, we could add padding instead, you can
-        # customize this part to your needs.
-        if total_length >= block_size:
-            total_length = (total_length // block_size) * block_size
+        if total_length >= budget:
+            total_length = (total_length // budget) * budget
 
-        # Split by chunks of max_len.
         result = {
-            k: [t[i : i + block_size] for i in range(0, total_length, block_size)]
+            k: [t[i : i + budget] for i in range(0, total_length, budget)]
             for k, t in concatenated_dataset.items()
         }
 
         return result
+
 
     return pack
 

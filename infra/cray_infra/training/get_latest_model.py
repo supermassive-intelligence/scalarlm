@@ -9,18 +9,33 @@ logger = logging.getLogger(__name__)
 
 def get_latest_model():
     config = get_config()
+    bases = []
+    if os.path.exists(config["training_job_directory"]):
+        bases.append(config["training_job_directory"])
+    
+    synology_dir = "/mnt/synology/jobs"
+    if os.path.exists(synology_dir):
+        bases.append(synology_dir)
 
-    if not os.path.exists(config["training_job_directory"]):
+    job_dirs = {}
+    for base in bases:
+        if not os.path.isdir(base):
+            continue
+        try:
+            for name in os.listdir(base):
+                job_path = os.path.join(base, name)
+                if os.path.isdir(job_path) and os.path.isfile(os.path.join(job_path, "config.yaml")):
+                    if name not in job_dirs:
+                        job_dirs[name] = job_path
+        except Exception as e:
+            logger.error(f"Error scanning directory {base}: {e}")
+
+    if not job_dirs:
         raise FileNotFoundError("No training jobs found")
 
-    # Get the latest model by timestamp
-    models = os.listdir(config["training_job_directory"])
-
-    if len(models) == 0:
-        raise FileNotFoundError("No training jobs found")
-
+    models = list(job_dirs.keys())
     models.sort(
-        key=lambda x: get_start_time(os.path.join(config["training_job_directory"], x)),
+        key=lambda x: get_start_time(job_dirs[x]),
         reverse=True,
     )
 
