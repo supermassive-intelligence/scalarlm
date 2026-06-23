@@ -69,8 +69,10 @@ Qwen2.5-14B) all PASS, 0 crashes, 0 container restarts.
 | qwen3-moe-tiny-random | 🔧 trains + **serves cleanly**, but `NO_MEM` (attention-only lacks capacity; needs expert-LoRA serving) |
 | Mistral-7B (bf16, 450) | ✅ PASS — fp32 @ lr 0.003 mode-collapsed (loss flat at 2.76 from step 50); **bf16 fixed it** (single-variable test vs PASSing phi-4) |
 | Qwen2-VL-7B (fp32, 900) | ✅ PASS — 450 run was budget-starved (1.25 @ step 449 when LR hit 0); 900 steps let the loss cliff complete (0.70→0.0011) → golden string reproduced |
-| gemma-4-dense (tiny Gemma4 mm) | ❌ `NO_MEM` (genuine — did NOT flip to PASS like gemma-3; tiny-random and/or Gemma4-mm key mapping) |
-| Qwen2.5-1.5B, Qwen3-8B, gemma-3-270m/-it, masint/tiny-random-qwen2-vl, rnj-1 | not yet run |
+| gemma-4-dense (tiny Gemma4 mm) | ❌ `NO_MEM` — **now likely the Gemma4-mm key mapping, not capacity** (tiny-random-llama memorizes fine, see below) |
+| Qwen2.5-0.5B, gemma-3-270m, gemma-3-270m-it, masint/tiny-random-llama | ✅ PASS (verified on the user's workstation) |
+| Qwen2.5-1.5B, Qwen3-8B (bf16), rnj-1 (bf16) | ✅ PASS (last-4 Spark batch — bf16 held at 8B) |
+| masint/tiny-random-qwen2-vl | ❌ `RESTART_FAILED` — vLLM base-model load crash-loop (pre-training, no job dir). Synthetic fixture; real Qwen2-VL-7B PASSes, so low impact |
 
 ## Open items (deferred, characterized)
 
@@ -79,9 +81,12 @@ Qwen2.5-14B) all PASS, 0 crashes, 0 container restarts.
    the fork's `.pt` exports 2 stacked 2-D tensors. The fork loader skips the
    PEFT→fused-MoE conversion that `LoRAModel.from_local_checkpoint` does. Needed to
    make a MoE model *memorize* (attention-only serves but can't).
-2. **gemma-4-dense `NO_MEM`** — gemma-3 vs gemma-4 split is the clue; tiny-random
-   capacity vs a real `Gemma4ForConditionalGeneration` key-mapping issue. Prior
-   diagnostic: `2026-06-18-gemma4-dense-adapter-noop-diagnostic.md`.
+2. **gemma-4-dense `NO_MEM`** — **capacity is ruled out**: `masint/tiny-random-llama`
+   (an equally tiny model) memorizes the golden string fine (PASS on the user's
+   workstation). So the remaining suspect is the `Gemma4ForConditionalGeneration`
+   key mapping — its `.pt` adapter keys likely aren't normalized onto the served
+   model's parameter names. Prior diagnostic:
+   `2026-06-18-gemma4-dense-adapter-noop-diagnostic.md`.
 3. **Mistral-7B — RESOLVED.** Not undertraining: fp32 @ lr 0.003 mode-collapsed
    (loss flat at 2.76 from step 50 while LR high). bf16 → PASS (same budget as the
    PASSing phi-4; dtype was the only differing knob). Lesson: a *flat* loss curve is
@@ -91,7 +96,12 @@ Qwen2.5-14B) all PASS, 0 crashes, 0 container restarts.
    (2.75→1.25) but the 450-step LR schedule decayed to 0 mid-descent. 900/warmup-50
    (fp32) let the cliff complete (0.70 @ 450 → 0.0011 @ 899) → PASS, golden string
    reproduced. Confirms the budget-starvation read.
-5. Doc nit: `normalize_lora_key` docstring (adapter_format.py:62-81) describes the
+5. **masint/tiny-random-qwen2-vl `RESTART_FAILED`** — vLLM crash-loops *loading the
+   base model* (RestartCount climbed before training ran; no job dir). Independent of
+   adapters/contamination — a malformed tiny-random multimodal config vLLM rejects at
+   load. Low priority: it's a synthetic fixture and the real Qwen2-VL-7B PASSes. To
+   diagnose, re-run it solo with container-log capture (would disrupt the live serve).
+6. Doc nit: `normalize_lora_key` docstring (adapter_format.py:62-81) describes the
    old "leave `model.layers.` as-is" behavior, contradicting the current code.
 
 ## Lesson reinforced

@@ -153,6 +153,8 @@ models:
   - id: EssentialAI/rnj-1-instruct        # Gemma3ForCausalLM, 8B; not gated.
     cpu_ok: true
     adapters: {lora: {gate_gb: 20}}
+    # bf16 defensively at 8B (see Qwen3-8B note); watch the loss curve.
+    train_args: {dtype: bfloat16}
 
   # === Extension: popular/real models (added 2026-06-19) ===
   # Serving is registered for ONLY Llama / Qwen2 / Gemma-v1 arch classes
@@ -212,6 +214,9 @@ models:
   - id: Qwen/Qwen3-8B                          # Qwen3ForCausalLM; Apache-2.0, ungated
     cpu_ok: true
     adapters: {lora: {gate_gb: 20}}
+    # bf16 defensively at 8B (fp32 @ lr 0.003 mode-collapsed Mistral); watch the
+    # loss curve and bump steps only if it's descending-but-cut-off.
+    train_args: {dtype: bfloat16}
   - id: google/gemma-3-4b-it                   # Gemma3ForCausalLM; GATED
     cpu_ok: true
     adapters: {lora: {gate_gb: 10}}
