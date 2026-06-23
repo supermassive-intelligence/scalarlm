@@ -67,8 +67,8 @@ Qwen2.5-14B) all PASS, 0 crashes, 0 container restarts.
 | gemma-3-4b-it | ✅ PASS (contamination victim, resolved) |
 | phi-4 (14B, bf16, 450) | ✅ PASS (confirms Mistral/phi-4 reframe — Llama `SupportsLoRA`) |
 | qwen3-moe-tiny-random | 🔧 trains + **serves cleanly**, but `NO_MEM` (attention-only lacks capacity; needs expert-LoRA serving) |
-| Qwen2-VL-7B | ⚠️ `NO_MEM` — **adapter engaged** (output reproduces golden `aa` prefix), but ran **default budget, no 450 override**; undertrained, not a serve gap |
-| Mistral-7B (fp32, 450) | ⚠️ `NO_MEM` — **adapter engaged** (output collapses to `666…` toward golden hex); same 450 budget as phi-4 but fp32, didn't flip → likely needs more steps / higher LR |
+| Mistral-7B (bf16, 450) | ✅ PASS — fp32 @ lr 0.003 mode-collapsed (loss flat at 2.76 from step 50); **bf16 fixed it** (single-variable test vs PASSing phi-4) |
+| Qwen2-VL-7B (fp32, 900) | ✅ PASS — 450 run was budget-starved (1.25 @ step 449 when LR hit 0); 900 steps let the loss cliff complete (0.70→0.0011) → golden string reproduced |
 | gemma-4-dense (tiny Gemma4 mm) | ❌ `NO_MEM` (genuine — did NOT flip to PASS like gemma-3; tiny-random and/or Gemma4-mm key mapping) |
 | Qwen2.5-1.5B, Qwen3-8B, gemma-3-270m/-it, masint/tiny-random-qwen2-vl, rnj-1 | not yet run |
 
@@ -82,11 +82,16 @@ Qwen2.5-14B) all PASS, 0 crashes, 0 container restarts.
 2. **gemma-4-dense `NO_MEM`** — gemma-3 vs gemma-4 split is the clue; tiny-random
    capacity vs a real `Gemma4ForConditionalGeneration` key-mapping issue. Prior
    diagnostic: `2026-06-18-gemma4-dense-adapter-noop-diagnostic.md`.
-3. **Mistral-7B / Qwen2-VL-7B undertraining** (not a serve bug — adapters provably
-   steer output toward the golden string). Qwen2-VL never got the 450 override; give
-   it one. Mistral had 450 (fp32) yet didn't flip where phi-4 (450, bf16) did — try
-   more steps or a higher LR before suspecting anything deeper.
-4. Doc nit: `normalize_lora_key` docstring (adapter_format.py:62-81) describes the
+3. **Mistral-7B — RESOLVED.** Not undertraining: fp32 @ lr 0.003 mode-collapsed
+   (loss flat at 2.76 from step 50 while LR high). bf16 → PASS (same budget as the
+   PASSing phi-4; dtype was the only differing knob). Lesson: a *flat* loss curve is
+   collapse, not budget; compare the curve against a working reference before
+   bumping steps.
+4. **Qwen2-VL-7B — RESOLVED.** Opposite of Mistral: loss descended cleanly
+   (2.75→1.25) but the 450-step LR schedule decayed to 0 mid-descent. 900/warmup-50
+   (fp32) let the cliff complete (0.70 @ 450 → 0.0011 @ 899) → PASS, golden string
+   reproduced. Confirms the budget-starvation read.
+5. Doc nit: `normalize_lora_key` docstring (adapter_format.py:62-81) describes the
    old "leave `model.layers.` as-is" behavior, contradicting the current code.
 
 ## Lesson reinforced
