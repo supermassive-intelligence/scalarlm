@@ -62,6 +62,36 @@ def _module_prefix(model, target) -> str | None:
     return None
 
 
+# Self-attention container segments across the common decoder architectures.
+_ATTENTION_CONTAINERS = (".self_attn.", ".attn.", ".attention.")
+
+
+def _is_moe_model(model) -> bool:
+    """True if the model has routed MoE expert submodules (a `.experts` module).
+
+    A `.pt` adapter that adapts the fused experts can't be served: vLLM's
+    `FusedMoEWithLoRA.set_lora` wants a per-expert tensor *list* (gate/down/up,
+    each `[num_experts, rank, dim]`), while the ScalarLM trainer exports stacked
+    2-D tensors. Rather than reproduce vLLM's PEFT→fused-MoE conversion, we keep
+    LoRA off the experts and adapt attention only — which serves cleanly."""
+    return any(".experts" in name for name, _ in model.named_modules())
+
+
+def _attention_linear_names(model, output_embeddings) -> set[str]:
+    """Leaf names of the attention-projection `nn.Linear` modules (q/k/v/o under
+    a self-attention container). Excludes MLP, MoE experts, the router, and the
+    output head — everything that doesn't serve from a `.pt` MoE adapter."""
+    names: set[str] = set()
+    for module_name, module in model.named_modules():
+        if not isinstance(module, nn.Linear):
+            continue
+        if output_embeddings is not None and module is output_embeddings:
+            continue
+        if any(seg in module_name for seg in _ATTENTION_CONTAINERS):
+            names.add(module_name.split(".")[-1])
+    return names
+
+
 def resolve_target_modules(model, target_modules):
     """If `target_modules` is the "all-linear" shorthand, resolve it against the
     live `model`:
@@ -70,6 +100,10 @@ def resolve_target_modules(model, target_modules):
       the full dotted paths of every `nn.Linear` under the language decoder,
       excluding the output head. PEFT matches these exactly, so a vision tower
       reusing the same leaf names is not adapted.
+    - **MoE** (has routed `.experts` submodules, non-multimodal): the sorted
+      attention-projection leaf names only. The fused-expert LoRA can't be served
+      from a `.pt` adapter (vLLM's `FusedMoEWithLoRA` wants a per-expert tensor
+      list, not stacked tensors), so LoRA is kept off the experts.
     - **dense**: the sorted set of distinct `nn.Linear` leaf-module names,
       excluding the output head — identical to PEFT's all-linear expansion.
 
@@ -98,6 +132,16 @@ def resolve_target_modules(model, target_modules):
             )
         # get_decoder() returned a module we couldn't locate — fall through to
         # the dense path rather than silently adapt nothing.
+
+    if _is_moe_model(model):
+        # Attention-only for MoE: the fused-expert LoRA isn't serveable from a
+        # .pt adapter (see _is_moe_model), so confine LoRA to the attention
+        # projections, which load + serve cleanly.
+        attn = _attention_linear_names(model, output_embeddings)
+        if attn:
+            return sorted(attn)
+        # No attention modules matched (unusual arch) — fall through to the dense
+        # path rather than adapt nothing.
 
     names = set()
     for module_name, module in model.named_modules():

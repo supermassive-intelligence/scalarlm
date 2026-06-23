@@ -57,6 +57,59 @@ class _NoOutputEmbeddings(nn.Module):
         return None
 
 
+class _MoeLike(nn.Module):
+    """A miniature Qwen3MoE-style ...ForCausalLM: per-layer self-attention plus a
+    sparse MLP with a router (`gate`) and routed `experts`. The expert (and
+    router) LoRA can't be served from a .pt adapter, so resolution must land on
+    attention only."""
+
+    def __init__(self, n_layers=2, n_experts=4):
+        super().__init__()
+        self.layers = nn.ModuleList(
+            nn.ModuleDict(
+                {
+                    "self_attn": nn.ModuleDict(
+                        {
+                            "q_proj": nn.Linear(8, 8, bias=False),
+                            "k_proj": nn.Linear(8, 8, bias=False),
+                            "v_proj": nn.Linear(8, 8, bias=False),
+                            "o_proj": nn.Linear(8, 8, bias=False),
+                        }
+                    ),
+                    "mlp": nn.ModuleDict(
+                        {
+                            "gate": nn.Linear(8, n_experts, bias=False),  # router
+                            "experts": nn.ModuleList(
+                                nn.ModuleDict(
+                                    {
+                                        "gate_proj": nn.Linear(8, 8, bias=False),
+                                        "up_proj": nn.Linear(8, 8, bias=False),
+                                        "down_proj": nn.Linear(8, 8, bias=False),
+                                    }
+                                )
+                                for _ in range(n_experts)
+                            ),
+                        }
+                    ),
+                }
+            )
+            for _ in range(n_layers)
+        )
+        self.lm_head = nn.Linear(8, 32, bias=False)
+
+    def get_output_embeddings(self):
+        return self.lm_head
+
+
+def test_moe_targets_attention_only_excludes_experts_and_router():
+    model = _MoeLike()
+    result = resolve_target_modules(model, "all-linear")
+    # Attention projections only — no expert MLP, no router, no head.
+    assert result == ["k_proj", "o_proj", "q_proj", "v_proj"]
+    for excluded in ("gate_proj", "up_proj", "down_proj", "gate", "lm_head"):
+        assert excluded not in result
+
+
 def test_all_linear_expands_to_distinct_leaf_names_minus_head():
     model = _DenseLike()
     resolved = resolve_target_modules(model, "all-linear")
