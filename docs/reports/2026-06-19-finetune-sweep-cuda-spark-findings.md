@@ -24,12 +24,19 @@ section of `docs/self-served-llms-scratchpad.md`.
 | Outcome | n | Models |
 |---|---|---|
 | PASS | 7 | Qwen2.5-0.5B, Qwen2.5-1.5B, tiny-random-llama, gemma-3-270m(+it), rnj-1-instruct (8B), **Qwen3-8B** |
-| NO_MEMORIZATION | 7 | gemma-4-dense, Qwen2-7B, Qwen2.5-3B/7B/14B, Mistral-7B-v0.3, phi-4 |
-| SKIPPED (gated) | 3 | Llama-3.2-1B/3B, Llama-3.1-8B |
+| NO_MEMORIZATION | 10 | gemma-4-dense, Qwen2-7B, Qwen2.5-3B/7B/14B, Mistral-7B-v0.3, phi-4, **Llama-3.2-1B/3B, Llama-3.1-8B** |
 | RESTART_FAILED | 2 | tiny-random-qwen2-vl, Qwen2.5-32B |
 | TRAIN_FAILED | 3 | qwen3-moe-tiny, Qwen2-VL-7B, gemma-3-4b-it |
 
-NO_MEMORIZATION and SKIPPED are non-failing outcomes.
+NO_MEMORIZATION is a non-failing outcome.
+
+**Llama update (run `finetune.cuda-spark.20260619-200802`):** after the token's
+account accepted the Llama 3.1/3.2 licenses, the 3 previously-gated Llamas ran
+clean end-to-end — all **NO_MEMORIZATION**, no crashes, no TRAIN_FAILED
+(1B: restart 178.5s / train 130.4s / serve 11.2s; 3B: 230.7 / 255.7 / 13.7;
+8B: 368.8 / 546.3 / 15.8). This confirms dense Llama serves + trains LoRA and
+moves them from SKIPPED into the same hyperparameter-gap bucket as the other
+real instruct models. No gated SKIPs remain.
 
 ## Spark serving config (why)
 
@@ -112,7 +119,8 @@ class + train the language tower only (or exclude multimodal from the sweep);
 instead of `"all-linear"`, or pin a PEFT version that special-cases it.
 
 ### 3. NO_MEMORIZATION — hyperparameter gap, not arch
-Real instruct models (Qwen2-7B, Qwen2.5-3B/7B/14B, Mistral-7B, phi-4) serve the
+Real instruct models (Qwen2-7B, Qwen2.5-3B/7B/14B, Mistral-7B, phi-4,
+Llama-3.2-1B/3B, Llama-3.1-8B) serve the
 adapter but don't *exactly* memorize the golden string in 60 steps. Several got
 very close — e.g. Qwen2.5-3B produced `aaaf6f7ae83df6e653e6dda6dda6dafcc` vs the
 golden `aaaf6f8ae738dfc6577e63dda6daf9cc`. Small base models (0.5B/1.5B/8B)
@@ -126,5 +134,5 @@ training-budget gap, not a serving/arch problem.
 - Fix the MoE `target_modules` resolution (explicit module names vs `"all-linear"`).
 - Optionally raise `max_steps`/LR per-model so big instruct models reach PASS.
 - 32B serving needs a phase-scaled Spark path if it's ever wanted.
-- Llama serving is ready; only blocked on HF license acceptance for the token's
-  account.
+- Llama 1B/3B/8B confirmed serving + training (NO_MEMORIZATION); license accepted,
+  no longer gated.
