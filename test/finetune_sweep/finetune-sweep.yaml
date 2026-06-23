@@ -144,6 +144,12 @@ models:
   - id: Qwen/Qwen2-VL-7B-Instruct
     cpu_ok: true
     adapters: {lora: {gate_gb: 18}}
+    # Slow-converging multimodal model: at 450 steps loss was still falling
+    # (~2.75 -> 1.25, ~0.5/50 steps) when the LR schedule decayed to 0 and cut
+    # it off mid-descent. Not mode collapse (cf. Mistral) — genuine budget
+    # starvation. Double the budget so the schedule gives it room to reach the
+    # memorization basin. fp32 retained (curve descends cleanly; no collapse).
+    train_args: {max_steps: 900, warmup_steps: 50, steps_per_checkpoint: 900}
   - id: EssentialAI/rnj-1-instruct        # Gemma3ForCausalLM, 8B; not gated.
     cpu_ok: true
     adapters: {lora: {gate_gb: 20}}
@@ -194,7 +200,11 @@ models:
   - id: mistralai/Mistral-7B-Instruct-v0.3   # MistralForCausalLM; GATED
     cpu_ok: true
     adapters: {lora: {gate_gb: 18}}
-    train_args: {max_steps: 450, warmup_steps: 30, steps_per_checkpoint: 450}
+    # fp32 @ lr 0.003 collapsed to a degenerate constant-output minimum: loss
+    # flatlined at ~2.76 by step 50 and never moved while LR was still high
+    # (mode collapse, not undertraining). phi-4 PASSes with the SAME budget in
+    # bf16 — dtype is the only differing knob, so run Mistral in bf16 too.
+    train_args: {dtype: bfloat16, max_steps: 450, warmup_steps: 30, steps_per_checkpoint: 450}
   - id: microsoft/phi-4                       # Phi3ForCausalLM, 14B; MIT, ungated
     adapters: {lora: {gate_gb: 32}}
     # 14B: bf16 ~28GiB vs fp32 ~56GiB; longer budget for the larger model.
