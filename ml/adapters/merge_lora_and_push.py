@@ -473,7 +473,8 @@ def main(argv: list[str] | None = None) -> int:
         status_writer.update(phase="saving")
         logger.info("Saving merged model to %s", output_dir)
         merged.save_pretrained(output_dir, safe_serialization=True)
-        _backfill_missing_weights(output_dir, base_model_name)
+        from .backfill_weights import backfill_missing_weights
+        backfill_missing_weights(output_dir, base_model_name)
         AutoTokenizer.from_pretrained(base_model_name).save_pretrained(output_dir)
         try:
             from transformers import AutoProcessor
