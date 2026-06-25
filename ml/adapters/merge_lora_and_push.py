@@ -470,10 +470,39 @@ def main(argv: list[str] | None = None) -> int:
         logger.info("Merging LoRA into base...")
         merged = peft_model.merge_and_unload()
 
+        # Verify the merged model has the same parameter count as the base.
+        # A mismatch means the transformers version used here loaded a different
+        # (usually older/truncated) architecture than the one on HuggingFace,
+        # which silently produces an incomplete safetensors file that vLLM will
+        # reject at load time.
+        base_keys = set(base.state_dict().keys())
+        merged_keys = set(merged.state_dict().keys())
+        missing_from_merged = base_keys - merged_keys
+        if missing_from_merged:
+            raise RuntimeError(
+                f"merge_lora_and_push: merged model is missing {len(missing_from_merged)} "
+                f"parameter(s) that exist in the base model. This usually means the "
+                f"transformers version here loaded a truncated architecture. "
+                f"Sample missing keys: {sorted(missing_from_merged)[:5]}. "
+                f"Aborting to avoid uploading an incomplete model."
+            )
+
         status_writer.update(phase="saving")
         logger.info("Saving merged model to %s", output_dir)
         merged.save_pretrained(output_dir, safe_serialization=True)
         AutoTokenizer.from_pretrained(base_model_name).save_pretrained(output_dir)
+        try:
+            from transformers import AutoProcessor
+            AutoProcessor.from_pretrained(
+                base_model_name, trust_remote_code=True
+            ).save_pretrained(output_dir)
+            logger.info("Saved multimodal processor to %s", output_dir)
+        except Exception as proc_err:
+            logger.debug(
+                "No multimodal processor for %s (text-only model): %s",
+                base_model_name,
+                proc_err,
+            )
 
     if args.dry_run:
         logger.info(
