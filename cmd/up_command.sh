@@ -45,6 +45,11 @@ mkdir -p chat-ui
 
 echo "SM arch is ${sm_arch}"
 
+compose_files=(-f docker-compose.yaml)
+if [ -f docker-compose.override.yaml ]; then
+    compose_files+=(-f docker-compose.override.yaml)
+fi
+
 BASE_NAME=${target} VLLM_TARGET_DEVICE=${vllm_target_device} \
     DOCKER_PLATFORM=${docker_platform} TORCH_CUDA_ARCH_LIST=${sm_arch} \
-    docker compose -f docker-compose.yaml up ${docker_compose_service} --build --force-recreate
+    docker compose "${compose_files[@]}" up ${docker_compose_service} --build --force-recreate
