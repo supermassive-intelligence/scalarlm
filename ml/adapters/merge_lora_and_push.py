@@ -473,7 +473,21 @@ def main(argv: list[str] | None = None) -> int:
         status_writer.update(phase="saving")
         logger.info("Saving merged model to %s", output_dir)
         merged.save_pretrained(output_dir, safe_serialization=True)
+        from .backfill_weights import backfill_missing_weights
+        backfill_missing_weights(output_dir, base_model_name)
         AutoTokenizer.from_pretrained(base_model_name).save_pretrained(output_dir)
+        try:
+            from transformers import AutoProcessor
+            AutoProcessor.from_pretrained(
+                base_model_name, trust_remote_code=True
+            ).save_pretrained(output_dir)
+            logger.info("Saved multimodal processor to %s", output_dir)
+        except Exception as proc_err:
+            logger.debug(
+                "No multimodal processor for %s (text-only model): %s",
+                base_model_name,
+                proc_err,
+            )
 
     if args.dry_run:
         logger.info(

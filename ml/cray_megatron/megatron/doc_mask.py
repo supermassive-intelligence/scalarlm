@@ -15,8 +15,7 @@ does ``shift_logits[shift_attention_mask != 0]`` (transformers
 TRAIN_FAILED in the cuda-spark fine-tune sweep. For those models we fall back to
 the 2D padding mask. The documented cost is that packed documents attend across
 each other (identical to the existing seq-len-cap fallback); for the
-single-document memorization sweep the 4D mask is a no-op anyway. See
-docs/reports/2026-06-22-finetune-sweep-multimodal-depth.md.
+single-document memorization sweep the 4D mask is a no-op anyway.
 """
 
 # Decision outcomes for doc_mask_decision().

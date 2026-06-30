@@ -18,9 +18,7 @@ for two reasons:
    emitting its Linear modules' *full paths*.
 
 For dense models the result is the sorted leaf-name set — byte-identical to
-PEFT's own expansion (same trainable parameters). See
-docs/reports/2026-06-22-finetune-sweep-no-memorization-rootcause.md and
-docs/reports/2026-06-22-finetune-sweep-multimodal-depth.md.
+PEFT's own expansion (same trainable parameters).
 """
 
 import torch.nn as nn

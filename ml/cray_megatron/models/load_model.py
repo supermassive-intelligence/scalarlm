@@ -78,8 +78,7 @@ def materialize_model(model_info):
     # is the Qwen2-VL TRAIN_FAILED in the cuda-spark sweep. AutoModelForImage-
     # TextToText loads both Qwen2-VL and Gemma3 conditional-generation models;
     # the text-only training forward works on them (LoRA is confined to the
-    # language tower by resolve_target_modules). See
-    # docs/reports/2026-06-22-finetune-sweep-multimodal-depth.md.
+    # language tower by resolve_target_modules).
     model_cls = (
         AutoModelForImageTextToText
         if is_multimodal(model_info["model_config"])

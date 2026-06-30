@@ -464,7 +464,6 @@ class TrainingLoop:
             # A ...ForConditionalGeneration wrapper whose internal loss indexes
             # the logits by a 2D attention_mask (gemma-3-4b-it). Keep the 2D mask
             # from the batch — a 4D mask (SDPA or flex BlockMask) would IndexError.
-            # The multimodal skip wins over flex for that reason. See doc_mask.py.
             _warn_doc_mask_skipped_multimodal()
         elif decision == BUILD or (decision == SKIP_SEQLEN and use_flex):
             # BUILD, or a sequence past the SDPA cap when flex_attention is on —
@@ -477,10 +476,7 @@ class TrainingLoop:
                 forward_kwargs["attention_mask"] = _build_document_block_mask(doc_ids, device)
             else:
                 # SDPA path: materialize the [B, 1, S, S] causal block-diagonal
-                # bool mask (1 byte/cell, capped at _MAX_4D_MASK_SEQ_LEN; 128K²
-                # would be 16 GB). SDPA accepts the bool mask natively and HF's
-                # _update_causal_mask converts it to the additive form in the
-                # model's compute dtype when needed.
+                # bool mask (1 byte/cell, capped at _MAX_4D_MASK_SEQ_LEN).
                 same_doc = doc_ids.unsqueeze(2) == doc_ids.unsqueeze(1)
                 causal = torch.ones(
                     seq_len, seq_len, device=device, dtype=torch.bool
@@ -489,8 +485,7 @@ class TrainingLoop:
             forward_kwargs["position_ids"] = batch["position_ids"].to(device)
         elif decision == SKIP_SEQLEN:
             _warn_doc_mask_skipped(seq_len)
-        # decision == NONE: the batch isn't packed (no document_ids); leave the
-        # 2D attention_mask from the batch as-is.
+        # decision == NONE: batch isn't packed; leave the 2D mask as-is.
 
         # Multimodal wrappers (Gemma4ForConditionalGeneration, …) require an
         # mm_token_type_ids tensor on every training forward, even when the

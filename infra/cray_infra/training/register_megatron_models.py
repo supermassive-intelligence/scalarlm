@@ -49,14 +49,13 @@ async def get_models():
         if not pt_files:
             continue
         # Only register adapters trained for the model this server is serving.
-        # The serve worker (create_generate_worker -> add_adaptors) loads every
-        # registered adapter onto the single served base with no compatibility
-        # check; a LoRA trained for a different architecture has mismatched
-        # tensor shapes and crashes set_lora (IndexError in
-        # column_parallel_linear). In the multi-model finetune sweep the shared
-        # jobs/ dir accumulates adapters from many archs, so scope to the served
-        # base here. A missing/unreadable llm_name is kept (fail-open) so the
-        # ordinary single-model case is unaffected.
+        # The serve worker loads every registered adapter onto the single served
+        # base with no compatibility check; a LoRA trained for a different
+        # architecture has mismatched tensor shapes and crashes set_lora
+        # (IndexError in column_parallel_linear). In the multi-model finetune
+        # sweep the shared jobs/ dir accumulates adapters from many archs, so
+        # scope to the served base here. A missing/unreadable llm_name is kept
+        # (fail-open) so the ordinary single-model case is unaffected.
         adaptor_base = _read_adaptor_base_model(root)
         if served_base and adaptor_base and adaptor_base != served_base:
             logger.info(
