@@ -8,7 +8,10 @@ for two reasons:
    some architectures (observed for Qwen3MoeForCausalLM) and PEFT falls back to
    iterating the literal string as a *set of characters*, raising
    `Target modules {'-','l','n','r','i','a','e'} not found` — the `qwen3-moe`
-   TRAIN_FAILED in the cuda-spark sweep.
+   TRAIN_FAILED in the cuda-spark sweep. We also keep LoRA off the routed
+   experts (their fused LoRA isn't `.pt`-serveable) while still adapting the
+   attention and any dense MLP — see `_moe_servable_linear_paths` and
+   `docs/reports/2026-06-30-moe-expert-lora-serving.md`.
 
 2. **Multimodal.** For a `...ForConditionalGeneration` wrapper, "all-linear"
    would also adapt the vision encoder. PEFT matches `target_modules` by name
@@ -60,34 +63,47 @@ def _module_prefix(model, target) -> str | None:
     return None
 
 
-# Self-attention container segments across the common decoder architectures.
-_ATTENTION_CONTAINERS = (".self_attn.", ".attn.", ".attention.")
-
-
 def _is_moe_model(model) -> bool:
     """True if the model has routed MoE expert submodules (a `.experts` module).
 
-    A `.pt` adapter that adapts the fused experts can't be served: vLLM's
+    A `.pt` adapter that adapts the *fused experts* can't be served: vLLM's
     `FusedMoEWithLoRA.set_lora` wants a per-expert tensor *list* (gate/down/up,
     each `[num_experts, rank, dim]`), while the ScalarLM trainer exports stacked
     2-D tensors. Rather than reproduce vLLM's PEFT→fused-MoE conversion, we keep
-    LoRA off the experts and adapt attention only — which serves cleanly."""
+    LoRA off the experts (and the router) and adapt everything else that *does*
+    serve from a `.pt` adapter — see `_moe_servable_linear_paths`."""
     return any(".experts" in name for name, _ in model.named_modules())
 
 
-def _attention_linear_names(model, output_embeddings) -> set[str]:
-    """Leaf names of the attention-projection `nn.Linear` modules (q/k/v/o under
-    a self-attention container). Excludes MLP, MoE experts, the router, and the
-    output head — everything that doesn't serve from a `.pt` MoE adapter."""
-    names: set[str] = set()
+def _moe_servable_linear_paths(model, output_embeddings) -> list[str]:
+    """Full dotted paths of every `nn.Linear` in a MoE model whose LoRA a `.pt`
+    adapter can serve: the attention projections (all layers) and any *dense*
+    MLP — the non-sparse decoder layers, e.g. layer 0 under Qwen3MoE's
+    `decoder_sparse_step`. Excludes:
+
+    - the routed `.experts` (their fused LoRA isn't `.pt`-serveable, see
+      `_is_moe_model`),
+    - the router `gate` (adapting it would perturb expert selection), and
+    - the output head.
+
+    *Full paths* — not leaf names — because the dense-MLP projections
+    (`gate_proj`/`up_proj`/`down_proj`) reuse the SAME leaf names as the expert
+    projections, so a leaf-name set can't include one while excluding the other.
+    PEFT matches these exact paths, so the experts are left untouched."""
+    paths: list[str] = []
     for module_name, module in model.named_modules():
         if not isinstance(module, nn.Linear):
             continue
         if output_embeddings is not None and module is output_embeddings:
             continue
-        if any(seg in module_name for seg in _ATTENTION_CONTAINERS):
-            names.add(module_name.split(".")[-1])
-    return names
+        if module_name.endswith("lm_head"):  # head, when output_embeddings is None
+            continue
+        if ".experts" in module_name:  # routed experts — not .pt-serveable
+            continue
+        if module_name.endswith(".gate") or module_name == "gate":  # MoE router
+            continue
+        paths.append(module_name)
+    return paths
 
 
 def resolve_target_modules(model, target_modules):
@@ -99,9 +115,12 @@ def resolve_target_modules(model, target_modules):
       excluding the output head. PEFT matches these exactly, so a vision tower
       reusing the same leaf names is not adapted.
     - **MoE** (has routed `.experts` submodules, non-multimodal): the sorted
-      attention-projection leaf names only. The fused-expert LoRA can't be served
-      from a `.pt` adapter (vLLM's `FusedMoEWithLoRA` wants a per-expert tensor
-      list, not stacked tensors), so LoRA is kept off the experts.
+      *full paths* of every serveable `nn.Linear` — attention (all layers) plus
+      any dense (non-sparse) MLP — excluding the routed experts, the router
+      `gate`, and the output head. The fused-expert LoRA can't be served from a
+      `.pt` adapter (vLLM's `FusedMoEWithLoRA` wants a per-expert tensor list,
+      not stacked tensors), so LoRA is kept off the experts; full paths (not leaf
+      names) are required because the dense MLP shares the experts' leaf names.
     - **dense**: the sorted set of distinct `nn.Linear` leaf-module names,
       excluding the output head — identical to PEFT's all-linear expansion.
 
@@ -132,14 +151,15 @@ def resolve_target_modules(model, target_modules):
         # the dense path rather than silently adapt nothing.
 
     if _is_moe_model(model):
-        # Attention-only for MoE: the fused-expert LoRA isn't serveable from a
-        # .pt adapter (see _is_moe_model), so confine LoRA to the attention
-        # projections, which load + serve cleanly.
-        attn = _attention_linear_names(model, output_embeddings)
-        if attn:
-            return sorted(attn)
-        # No attention modules matched (unusual arch) — fall through to the dense
-        # path rather than adapt nothing.
+        # MoE: emit full paths for the .pt-serveable linears — attention (all
+        # layers) + any dense (non-sparse) MLP — while excluding the routed
+        # experts (not serveable, see _is_moe_model) and the router. Full paths,
+        # not leaf names, because the dense MLP shares the experts' leaf names.
+        paths = _moe_servable_linear_paths(model, output_embeddings)
+        if paths:
+            return sorted(paths)
+        # Nothing matched (unusual arch) — fall through to the dense path rather
+        # than adapt nothing.
 
     names = set()
     for module_name, module in model.named_modules():
