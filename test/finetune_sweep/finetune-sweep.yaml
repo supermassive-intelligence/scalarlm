@@ -286,3 +286,93 @@ models:
   # - microsoft/Phi-mini-MoE-instruct    # PhiMoEForCausalLM; 16 exp top-2, Mixtral-style SEPARATE experts.
   # - deepseek-ai/deepseek-moe-16b-chat  # DeepseekForCausalLM; shared + fine-grained experts (different).
   # - mistralai/Mixtral-8x7B-Instruct-v0.1  # MixtralForCausalLM; 47B, separate experts (large).
+
+  # === Model-category-report candidates (added 2026-07-02) — Causal LM ===
+  # From docs/reports/2026-07-01-model-categories.md §Potential Sweep Candidates
+  # / Causal LM. Serve outcome is governed by vLLM's native arch support + the
+  # fork's hybrid-LoRA key normalization, NOT by the 3-class ScalarLM/Tokenformer
+  # registry in infra/cray_infra/adapters/model/models.py (that registry gates
+  # Tokenformer, a different adapter type). Evidence: phi-4 (Phi3), Qwen3-8B
+  # (Qwen3), Mistral-7B (Mistral) and Qwen2-VL all full-PASS despite none being
+  # in that 3-class list. So expectations here are set by ARCH PRECEDENT:
+  #   Phi-4-mini  -> Phi3ForCausalLM  -> phi-4 PASSes  -> expect PASS
+  #   Qwen3-*     -> Qwen3ForCausalLM -> Qwen3-8B PASSes -> expect PASS
+  #   GLM-4-9B    -> Glm4ForCausalLM  -> NO precedent   -> serve is the real
+  #     unknown: vLLM supports Glm4, but the fork's LoRA key normalization has
+  #     never seen GLM-4 prefixes and could hit an ADAPTER_NO_OP like ADR 0006.
+  - id: microsoft/Phi-4-mini-instruct          # Phi3ForCausalLM, ~3.8B; MIT, ungated
+    cpu_ok: true
+    adapters: {lora: {gate_gb: 10}}
+    # Same arch family as phi-4 (14B) below, which full-PASSed but only after
+    # bf16 (fp32 mode-collapsed at this LR) — apply bf16 defensively.
+    train_args: {dtype: bfloat16, max_steps: 450, warmup_steps: 30, steps_per_checkpoint: 450}
+  - id: Qwen/Qwen3-1.7B                        # Qwen3ForCausalLM; Apache-2.0, ungated
+    cpu_ok: true
+    adapters: {lora: {gate_gb: 8}}
+    train_args: {dtype: bfloat16}
+  - id: Qwen/Qwen3-4B                          # Qwen3ForCausalLM; Apache-2.0, ungated
+    cpu_ok: true
+    adapters: {lora: {gate_gb: 10}}
+    train_args: {dtype: bfloat16}
+  - id: Qwen/Qwen3-14B                         # Qwen3ForCausalLM; Apache-2.0, ungated
+    adapters: {lora: {gate_gb: 32}}
+    train_args: {dtype: bfloat16, max_steps: 450, warmup_steps: 30, steps_per_checkpoint: 450}
+  - id: Qwen/Qwen3-32B                         # Qwen3ForCausalLM; Apache-2.0, ungated
+    # Borderline size (bf16 ~64GiB); relies on cuda-spark's phase_scaled flow
+    # (whole-GPU-per-phase) rather than the co-located budget. RISK: unlike the
+    # 30B-A3B MoE that PASSed (activates ~3B/forward), dense-32B activates ALL 32B
+    # in the training forward/backward, so train-phase activation memory is much
+    # higher — a TRAIN_FAILED/OOM here is expected-territory, not a harness bug
+    # (bounded by --train-timeout; doesn't block other models). gate_gb below is a
+    # no-op on spark (unified mem) — kept only for cuda-docker portability.
+    adapters: {lora: {gate_gb: 70}}
+    train_args: {dtype: bfloat16, max_steps: 450, warmup_steps: 30, steps_per_checkpoint: 450}
+  - id: zai-org/GLM-4-9B-Chat                  # Glm4ForCausalLM; MIT-family, ungated
+    # The one genuinely-novel serve case in this block: no prior GLM-4 run.
+    # Training should work (arch-agnostic); serve is the open question (see the
+    # ADR-0006-style key-normalization risk in the block header). Whatever it
+    # does — PASS, or a GLM-4-specific ADAPTER_NO_OP — is the useful data point.
+    adapters: {lora: {gate_gb: 20}}
+    train_args: {dtype: bfloat16, max_steps: 450, warmup_steps: 30, steps_per_checkpoint: 450}
+
+  # === Model-category-report candidates (added 2026-07-02) — Multimodal ===
+  # From docs/reports/2026-07-01-model-categories.md §Potential Sweep Candidates
+  # / Multimodal. Existing Qwen2-VL-7B-Instruct entry (above) is the only
+  # validated multimodal PASS-track model; these diversify vendor/arch per the
+  # report. VLM budget-starvation precedent (Qwen2-VL needed 900 steps, not
+  # the 300/450 default) applied to all four defensively; dtype left at the
+  # global fp32 default (Qwen2-VL's curve descended cleanly in fp32 -- no
+  # collapse -- unlike the causal-LM 7B+ mode-collapse cases that needed bf16).
+  # NOTE: `multimodal: true` here is a decorative category tag -- the real routing
+  # to AutoModelForImageTextToText is is_multimodal(config) in load_model.py.
+  - id: Qwen/Qwen2.5-VL-7B-Instruct            # Qwen2_5_VLForConditionalGeneration; Apache-2.0
+    # Same family as the already-working Qwen2-VL-7B-Instruct -- best odds of
+    # a clean drop-in (train AND serve) of the four.
+    multimodal: true
+    cpu_ok: true
+    adapters: {lora: {gate_gb: 18}}
+    train_args: {max_steps: 900, warmup_steps: 50, steps_per_checkpoint: 900}
+  - id: mistral-community/pixtral-12b          # LlavaForConditionalGeneration (HF-native
+    # conversion; the official mistralai/Pixtral-12B-2409 ships Mistral's
+    # consolidated format that HF AutoModel can't parse -> use this instead).
+    # Apache-2.0.
+    multimodal: true
+    adapters: {lora: {gate_gb: 30}}
+    train_args: {max_steps: 900, warmup_steps: 50, steps_per_checkpoint: 900}
+  - id: OpenGVLab/InternVL3-8B                 # InternVLForConditionalGeneration (unverified against
+    # installed transformers version -- report flags this explicitly). May not
+    # expose the vision_config attribute is_multimodal() keys off; if so this
+    # will TRAIN_FAILED at model-class dispatch rather than an LoRA/serve issue
+    # -- diagnose before assuming a harness bug.
+    multimodal: true
+    adapters: {lora: {gate_gb: 20}}
+    train_args: {max_steps: 900, warmup_steps: 50, steps_per_checkpoint: 900}
+  - id: allenai/Molmo-7B-D-0924                # Molmo uses custom (trust_remote_code) modeling
+    # code on HF; load_model.py's from_pretrained calls do NOT pass
+    # trust_remote_code=True anywhere in this codebase today. Expect a hard
+    # TRAIN_FAILED at load ("trust_remote_code" / custom-code-not-allowed
+    # error) unless HF has since folded Molmo into core transformers -- this
+    # is a known, pre-flagged risk, not a surprise if it fails exactly there.
+    multimodal: true
+    adapters: {lora: {gate_gb: 20}}
+    train_args: {max_steps: 900, warmup_steps: 50, steps_per_checkpoint: 900}
