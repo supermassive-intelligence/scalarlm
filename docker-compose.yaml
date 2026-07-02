@@ -17,6 +17,10 @@ services:
         environment:
             - SCALARLM_MODEL
             - SCALARLM_VLLM_ARGS
+            # SCALARLM_SERVER_LIST: which servers run (api/vllm/megatron). The
+            # phase-scaled sweep flow sets it per phase (api,megatron to train;
+            # api,vllm to serve) so a model too big to co-locate both fits.
+            - SCALARLM_SERVER_LIST
             - HF_TOKEN
         build:
             context: .
@@ -71,6 +75,13 @@ services:
             - type: bind
               source: ./vllm/vllm/tokenformer
               target: /app/cray/vllm/vllm/tokenformer
+            # LoRA layers/managers (incl. lora/layers/fused_moe.py set_lora) are
+            # pure Python; mount so fork edits here take effect on a container
+            # restart instead of triggering a COPY-layer invalidation + a full
+            # CUDA recompile (~36 min on the GB10). No .so under lora/.
+            - type: bind
+              source: ./vllm/vllm/lora
+              target: /app/cray/vllm/vllm/lora
         networks:
             - cray-network
 

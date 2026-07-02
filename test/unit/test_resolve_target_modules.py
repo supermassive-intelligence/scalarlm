@@ -58,42 +58,62 @@ class _NoOutputEmbeddings(nn.Module):
 
 
 class _MoeLike(nn.Module):
-    """A miniature Qwen3MoE-style ...ForCausalLM: per-layer self-attention plus a
-    sparse MLP with a router (`gate`) and routed `experts`. The expert (and
-    router) LoRA can't be served from a .pt adapter, so resolution must land on
-    attention only."""
+    """A miniature Qwen3MoE-style ...ForCausalLM mirroring `decoder_sparse_step`:
+    some decoder layers carry a *dense* MLP (`gate_proj`/`up_proj`/`down_proj`)
+    and others a *sparse* MLP with a router (`gate`) + routed `experts`. By
+    default layer 0 is dense and layer 1 is sparse — the real
+    `qwen3-moe-tiny-random` layout (decoder_sparse_step=2). The routed experts
+    and the router can't be served from a .pt adapter, so resolution must adapt
+    attention + the dense MLP only — and by *full path*, since the dense MLP
+    shares leaf names with the experts."""
 
-    def __init__(self, n_layers=2, n_experts=4):
+    def __init__(self, sparse_layers=(1,), n_layers=2, n_experts=4):
         super().__init__()
-        self.layers = nn.ModuleList(
-            nn.ModuleDict(
+
+        def _attn():
+            return nn.ModuleDict(
                 {
-                    "self_attn": nn.ModuleDict(
-                        {
-                            "q_proj": nn.Linear(8, 8, bias=False),
-                            "k_proj": nn.Linear(8, 8, bias=False),
-                            "v_proj": nn.Linear(8, 8, bias=False),
-                            "o_proj": nn.Linear(8, 8, bias=False),
-                        }
-                    ),
-                    "mlp": nn.ModuleDict(
-                        {
-                            "gate": nn.Linear(8, n_experts, bias=False),  # router
-                            "experts": nn.ModuleList(
-                                nn.ModuleDict(
-                                    {
-                                        "gate_proj": nn.Linear(8, 8, bias=False),
-                                        "up_proj": nn.Linear(8, 8, bias=False),
-                                        "down_proj": nn.Linear(8, 8, bias=False),
-                                    }
-                                )
-                                for _ in range(n_experts)
-                            ),
-                        }
+                    "q_proj": nn.Linear(8, 8, bias=False),
+                    "k_proj": nn.Linear(8, 8, bias=False),
+                    "v_proj": nn.Linear(8, 8, bias=False),
+                    "o_proj": nn.Linear(8, 8, bias=False),
+                }
+            )
+
+        def _dense_mlp():
+            return nn.ModuleDict(
+                {
+                    "gate_proj": nn.Linear(8, 8, bias=False),
+                    "up_proj": nn.Linear(8, 8, bias=False),
+                    "down_proj": nn.Linear(8, 8, bias=False),
+                }
+            )
+
+        def _sparse_mlp():
+            return nn.ModuleDict(
+                {
+                    "gate": nn.Linear(8, n_experts, bias=False),  # router
+                    "experts": nn.ModuleList(
+                        nn.ModuleDict(
+                            {
+                                "gate_proj": nn.Linear(8, 8, bias=False),
+                                "up_proj": nn.Linear(8, 8, bias=False),
+                                "down_proj": nn.Linear(8, 8, bias=False),
+                            }
+                        )
+                        for _ in range(n_experts)
                     ),
                 }
             )
-            for _ in range(n_layers)
+
+        self.layers = nn.ModuleList(
+            nn.ModuleDict(
+                {
+                    "self_attn": _attn(),
+                    "mlp": _sparse_mlp() if i in sparse_layers else _dense_mlp(),
+                }
+            )
+            for i in range(n_layers)
         )
         self.lm_head = nn.Linear(8, 32, bias=False)
 
@@ -101,13 +121,45 @@ class _MoeLike(nn.Module):
         return self.lm_head
 
 
-def test_moe_targets_attention_only_excludes_experts_and_router():
-    model = _MoeLike()
+def test_moe_adapts_attention_and_dense_mlp_excluding_experts_and_router():
+    # Layer 0 dense, layer 1 sparse (the real qwen3-moe-tiny-random layout).
+    model = _MoeLike(sparse_layers=(1,), n_layers=2)
     result = resolve_target_modules(model, "all-linear")
-    # Attention projections only — no expert MLP, no router, no head.
-    assert result == ["k_proj", "o_proj", "q_proj", "v_proj"]
-    for excluded in ("gate_proj", "up_proj", "down_proj", "gate", "lm_head"):
-        assert excluded not in result
+    # Full paths: attention on every layer + the DENSE MLP (layer 0 only),
+    # but no experts, no router, no head.
+    assert result == [
+        "layers.0.mlp.down_proj",
+        "layers.0.mlp.gate_proj",
+        "layers.0.mlp.up_proj",
+        "layers.0.self_attn.k_proj",
+        "layers.0.self_attn.o_proj",
+        "layers.0.self_attn.q_proj",
+        "layers.0.self_attn.v_proj",
+        "layers.1.self_attn.k_proj",
+        "layers.1.self_attn.o_proj",
+        "layers.1.self_attn.q_proj",
+        "layers.1.self_attn.v_proj",
+    ]
+    assert not any(".experts." in name for name in result)  # no routed experts
+    assert not any(name.endswith(".gate") for name in result)  # no router
+    assert not any("lm_head" in name for name in result)  # no output head
+
+
+def test_moe_all_layers_sparse_adapts_attention_only():
+    # If every layer is sparse (no dense MLP anywhere), only attention survives.
+    model = _MoeLike(sparse_layers=(0, 1), n_layers=2)
+    result = resolve_target_modules(model, "all-linear")
+    assert result == [
+        "layers.0.self_attn.k_proj",
+        "layers.0.self_attn.o_proj",
+        "layers.0.self_attn.q_proj",
+        "layers.0.self_attn.v_proj",
+        "layers.1.self_attn.k_proj",
+        "layers.1.self_attn.o_proj",
+        "layers.1.self_attn.q_proj",
+        "layers.1.self_attn.v_proj",
+    ]
+    assert not any("mlp" in name for name in result)
 
 
 def test_all_linear_expands_to_distinct_leaf_names_minus_head():

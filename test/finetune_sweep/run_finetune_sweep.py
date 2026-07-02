@@ -326,6 +326,41 @@ def wait_for_model_served(api_url: str, model_id: str, proc, timeout: float,
     return "timeout"
 
 
+def wait_for_phase_ready(api_url: str, health_key: str, proc, timeout: float,
+                         model_id: str | None = None,
+                         compose_service: str | None = None,
+                         crash_check_every: float = 15.0) -> str:
+    """Phase-scaled readiness gate. Polls until health[health_key]=="up" (and, if
+    model_id is given, /v1/models serves model_id), or fails fast on the restart
+    proc dying or the container crash-looping. Unlike wait_for_all_up it can
+    require the served model WITHOUT health["all"]=="up" (structurally down when
+    only one GPU service runs this phase), and unlike wait_for_model_served it
+    keys health on the single active service rather than "all". Pair with a
+    compose_rm before the restart: this gate is only trustworthy once the stale
+    previous-phase container (which teardown_stack leaves running and which would
+    answer /v1/health before --force-recreate swaps in this phase's container) is
+    gone. Returns "ready" | "proc_exited" | "crashed" | "timeout"."""
+    deadline = time.time() + timeout
+    baseline_restarts = (get_compose_restart_count(compose_service)
+                         if compose_service else None)
+    last_crash_check = time.time()
+    while time.time() < deadline:
+        if proc is not None and proc.poll() is not None:
+            return "proc_exited"
+        health = get_health(api_url)
+        if health and health.get(health_key) == "up" and (
+                model_id is None or model_id in get_served_models(api_url)):
+            return "ready"
+        if (compose_service and baseline_restarts is not None
+                and time.time() - last_crash_check >= crash_check_every):
+            last_crash_check = time.time()
+            rc = get_compose_restart_count(compose_service)
+            if rc is not None and rc > baseline_restarts:
+                return "crashed"
+        time.sleep(2)
+    return "timeout"
+
+
 def poll_training(api_url: str, job_hash: str, train_timeout: float) -> str:
     """Poll the training job until terminal (COMPLETED/FAILED/CANCELLED) or
     train_timeout. Returns the terminal status or "TIMEOUT". Shared by the 2-GPU
@@ -753,6 +788,27 @@ def start_restart(target_cfg: dict, model_id: str, log) -> subprocess.Popen:
                              stderr=subprocess.STDOUT, start_new_session=True)
 
 
+def start_restart_phased(target_cfg: dict, model_id: str, server_list: str,
+                         vllm_args: str | None, log) -> subprocess.Popen:
+    """Like start_restart, but prepends SCALARLM_SERVER_LIST (which servers the
+    container runs this phase — `get_config` maps SCALARLM_* env onto config, and
+    start_cray_server gates vLLM/megatron on `server_list`) and a phase-specific
+    SCALARLM_VLLM_ARGS. The compose phase-scaled flow uses `api` (vLLM off, GPU
+    free for training — slurm daemons run regardless) then `api,vllm` (vLLM gets
+    the whole GPU) so a model too large to co-locate both fits. NB: not
+    `api,megatron` — create_megatron would collide with create_api on port 8000
+    (see run_model_compose_phased). The base `restart_cmd` for a
+    phase_scaled target carries no baked SERVER_LIST/VLLM_ARGS — they're injected
+    here. SCALARLM_SERVER_LIST must be in the compose service's `environment:`
+    passthrough to reach the container."""
+    env = f"SCALARLM_SERVER_LIST='{server_list}' "
+    if vllm_args:
+        env += f"SCALARLM_VLLM_ARGS='{vllm_args}' "
+    cmd = env + target_cfg["restart_cmd"].format(model=model_id)
+    return subprocess.Popen(cmd, shell=True, cwd=REPO_ROOT, stdout=log,
+                            stderr=subprocess.STDOUT, start_new_session=True)
+
+
 def teardown_stack(proc: subprocess.Popen, settle_timeout: float = 60.0) -> None:
     """SIGKILL the restart process's whole process group, then wait for VRAM to
     stop climbing. NOTE: `./scalarlm up` runs `docker compose up` in the
@@ -779,6 +835,28 @@ def teardown_stack(proc: subprocess.Popen, settle_timeout: float = 60.0) -> None
             stable = 0
         last = cur
     print(f"[warn] teardown_stack: VRAM did not settle within {settle_timeout}s", flush=True)
+
+
+def compose_rm(compose_service: str | None, timeout: float = 120) -> None:
+    """Force-stop and remove the compose service's container, synchronously and
+    best-effort. teardown_stack only SIGKILLs the foreground `docker compose up`
+    CLI and deliberately leaves the container (and its GPU) running; the next
+    phase's `--force-recreate` is the only thing that swaps it, and on the Spark
+    that's gated behind a ~36-min aarch64/sm12.0 rebuild. Until then the stale
+    container keeps answering /v1/health and fools a health-only gate into
+    proceeding against the wrong phase's container (wrong server_list / wrong
+    model / still-co-located). Removing it up front makes the phase gate wait for
+    the real recreate, and frees the phase-1 container's VRAM before phase-2 vLLM
+    loads. No-op on k8s (compose_service is None there)."""
+    if not compose_service:
+        return
+    try:
+        subprocess.run(
+            ["docker", "compose", "-f", "docker-compose.yaml", "rm", "-sf", compose_service],
+            cwd=REPO_ROOT, capture_output=True, text=True, timeout=timeout, check=False,
+        )
+    except (subprocess.SubprocessError, OSError):
+        pass
 
 
 def _checkpoint_keys_script(job_hash: str) -> str:
@@ -907,6 +985,102 @@ def run_model_k8s_phased(target_cfg: dict, model_id: str, train_args: dict, data
         delete_namespace(namespace, log)
 
 
+def run_model_compose_phased(target_cfg: dict, model_id: str, train_args: dict,
+                             dataset: list[dict], golden_prompt: str,
+                             expected_output: str, args, res, log) -> "Result":
+    """Phase-scaled Compose closed loop (peak GPU = 1), the single-box analog of
+    run_model_k8s_phased. Restart with `server_list=api` (vLLM off) ->
+    train -> tear down -> restart with `server_list=api,vllm` (vLLM on) ->
+    baseline + hot-load + memorization check. Lets a model too large to co-locate
+    always-on vLLM + training (30-35B on the GB10's 128GiB unified pool) run by
+    giving each phase the whole GPU. Selected by `phase_scaled: true` on a Compose
+    target; see docs/superpowers/specs/2026-06-15-finetune-sweep-1gpu-phase-scaled-design.md."""
+    proc = None
+    restart_start = time.time()
+    try:
+        # --- Phase 1: train. api only (no vLLM holding GPU). ---
+        # server_list="api" -- NOT "api,megatron": create_megatron binds port 8000,
+        # the SAME port as create_api, so the two are mutually exclusive in one
+        # container (the megatron-server is meant to run ALONE in a k8s training
+        # pod). The api server + the always-on slurm daemons (slurmctld/slurmd,
+        # started by the container entrypoint regardless of server_list) handle
+        # training submission and execution -- exactly as co-located "all" does
+        # (line 44 of start_cray_server skips the megatron-server under "all"), just
+        # without vLLM. megatron HEALTH still reports via the api server, derived
+        # from slurm (`scontrol show nodes`), so the gate below stays valid.
+        # Force-remove any stale container FIRST: teardown_stack (this model's own
+        # `finally`, or the previous model's) leaves the container running, and its
+        # /v1/health would satisfy the gate below before --force-recreate swaps in
+        # this phase's container. See compose_rm / wait_for_phase_ready.
+        compose_rm(target_cfg["compose_service"])
+        proc = start_restart_phased(target_cfg, model_id, "api", None, log)
+        # Gate on slurm-registered megatron (NOT health.all -- vLLM is down).
+        phase1 = wait_for_phase_ready(args.api_url, "megatron", proc,
+                                      args.restart_timeout,
+                                      compose_service=target_cfg["compose_service"])
+        if phase1 != "ready":
+            res.restart_seconds = round(time.time() - restart_start, 1)
+            res.outcome, res.detail = RESTART_FAILED, f"megatron not up (phase 1: {phase1})"
+            return res
+        res.restart_seconds = round(time.time() - restart_start, 1)
+
+        train_start = time.time()
+        try:
+            job_status = submit_train(args.api_url, dataset, train_args)
+        except Exception as e:
+            res.outcome, res.detail = TRAIN_FAILED, f"submit_train failed: {e}"
+            return res
+        job_hash = job_status["job_directory"].rstrip("/").split("/")[-1]
+        train_status = poll_training(args.api_url, job_hash, args.train_timeout)
+        res.train_seconds = round(time.time() - train_start, 1)
+
+        checkpoint_keys: list[str] | None = None
+        if train_status == "COMPLETED":
+            checkpoint_keys = read_checkpoint_keys(target_cfg["compose_service"], job_hash)
+
+        # --- Phase 2: hand the GPU to vLLM. api+vllm only; megatron is gone. ---
+        # teardown_stack kills the foreground compose CLI; compose_rm then removes
+        # the phase-1 container, freeing its VRAM AND clearing the stale /v1/health
+        # responder so the phase-2 gate waits for the real recreate instead of
+        # racing ahead against phase-1's still-running (megatron-only) container.
+        # The trained checkpoint persists in the bind-mounted jobs/ dir across it.
+        teardown_stack(proc)
+        compose_rm(target_cfg["compose_service"])
+        proc = start_restart_phased(target_cfg, model_id, "api,vllm",
+                                    target_cfg.get("serve_vllm_args"), log)
+        serve_start = time.time()
+        # Gate on vLLM up AND actually serving model_id (health.all is structurally
+        # down with megatron off, so wait_for_model_served's health.all check can't
+        # be reused; wait_for_phase_ready keys on "vllm" + the served model).
+        phase2 = wait_for_phase_ready(args.api_url, "vllm", proc, args.serve_timeout,
+                                      model_id=model_id,
+                                      compose_service=target_cfg["compose_service"])
+        if phase2 != "ready":
+            res.serve_seconds = round(time.time() - serve_start, 1)
+            res.outcome, res.detail = RESTART_FAILED, f"vllm not serving {model_id} (phase 2: {phase2})"
+            return res
+
+        # Baseline on the base model -- deferred to here (vLLM is up only now).
+        baseline_text, base_err = generate_with_retry(
+            args.api_url, golden_prompt, model_id, args.max_tokens,
+            args.serve_timeout, args.generate_timeout)
+        if baseline_text is None:
+            res.outcome, res.detail = RESTART_FAILED, f"baseline generate failed: {base_err}"
+            return res
+        res.baseline_sample = baseline_text[:200]
+        if expected_output in baseline_text:
+            res.detail = "expected_output already present in baseline output"
+
+        # Hot-load + classify (shared with the 2-GPU and k8s-phased paths).
+        serve_check_and_classify(args.api_url, golden_prompt, expected_output, job_hash,
+                                 train_status, checkpoint_keys, args, res,
+                                 baseline_full=baseline_text)
+        return res
+    finally:
+        if proc is not None:
+            teardown_stack(proc)
+
+
 def build_train_args(manifest: dict, target_cfg: dict, model: dict,
                      sweep_run_id: str) -> dict:
     """Assemble a model's training params, in increasing precedence:
@@ -956,6 +1130,10 @@ def run_model(manifest: dict, target: str, model: dict, args, results_dir: Path)
         with open(log_path, "w") as log:
             return run_model_k8s_phased(target_cfg, model_id, train_args, dataset,
                                         golden_prompt, expected_output, args, res, log)
+    if not is_k8s and target_cfg.get("phase_scaled"):
+        with open(log_path, "w") as log:
+            return run_model_compose_phased(target_cfg, model_id, train_args, dataset,
+                                            golden_prompt, expected_output, args, res, log)
     namespace = pf_proc = proc = None
     restart_start = time.time()
     with open(log_path, "w") as log:

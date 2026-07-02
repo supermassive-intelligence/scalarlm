@@ -31,6 +31,20 @@ The fork's non-LoRA adapter mechanism, served through the same Hybrid adapter
 loader. Serving it is currently deferred (ADR 0004); the sweep is LoRA only.
 _Avoid_: adapter (when you specifically mean the Tokenformer variant).
 
+**Tokenformer model registry**:
+The 3-class allow-list in `register_scalarlm_model_adapters()`
+(`infra/cray_infra/adapters/model/models.py` — `LlamaForCausalLM`,
+`GemmaForCausalLM`, `Qwen2ForCausalLM`) that wraps those base classes for
+*Tokenformer* capability. It does **NOT** gate whether a **LoRA** Adapter can
+serve: LoRA serves through the Hybrid adapter loader over any arch vLLM
+natively supports, subject only to Adapter key normalization matching. An arch
+absent from this list still serves LoRA fine — phi-4 (Phi3), Qwen3-8B (Qwen3),
+Mistral-7B and Qwen2-VL all full-PASS while being absent from it. So "not in
+the registry" ≠ "won't serve"; only a zero-match in Adapter key normalization
+means "won't serve."
+_Avoid_: serve-arch registry, supported-model list (it gates Tokenformer, not
+LoRA serve).
+
 **Offline preflight**:
 A pre-run structural check (`preflight.py`) that predicts the no-op class *before*
 paying for a model's restart + train + serve. It synthesizes the trainer's would-be
