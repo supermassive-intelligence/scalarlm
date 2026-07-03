@@ -485,6 +485,36 @@ def get_training_job(api_url: str, job_hash: str, timeout: float = 10) -> dict:
         raise RuntimeError(f"GET /v1/megatron/train/{job_hash} failed {e.code}: {e.read().decode()}") from e
 
 
+def cancel_training(api_url: str, job_hash: str, log=None, timeout: float = 30) -> None:
+    """Drive a still-running training job to a TERMINAL status via
+    POST /v1/megatron/cancel/{job_hash} (the API `cancel` handler scancels the
+    slurm job and writes status.json=CANCELLED). Best-effort — never raises.
+
+    WHY this exists: when poll_training hits its ceiling the job is left QUEUED or
+    TRAINING (non-terminal). The API server runs restart_megatron_jobs() on a timer
+    (@repeat_every) and RESURRECTS any non-terminal job that is missing from squeue.
+    So teardown_stack/compose_rm alone don't stick: they kill the current slurm
+    slice, but the reconciler relaunches the job, it re-queues on the single GPU,
+    and the accumulating backlog serializes -> a cascade of FALSE TRAIN_TIMEOUTs on
+    later models (each abandoned job actually COMPLETES later, unobserved). Writing
+    a terminal status here is what stops the resurrection. Must run BEFORE the
+    container is torn down, while the api server + slurmctld are still reachable.
+    See docs/reports/2026-07-03-train-timeout-root-cause.md."""
+    req = urllib.request.Request(
+        f"{api_url}/v1/megatron/cancel/{job_hash}", data=b"", method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            r.read()
+        if log is not None:
+            print(f"[cancel] {job_hash}: cancelled (terminal status written; "
+                  "reconciler will not resurrect)", file=log)
+            log.flush()
+    except Exception as e:  # best-effort: a failed cancel must never abort the run
+        if log is not None:
+            print(f"[cancel] {job_hash}: cancel request failed (best-effort): {e}", file=log)
+            log.flush()
+
+
 def generate(api_url: str, prompts: list[str], model_name: str, max_tokens: int,
               poll_timeout: float = 300, temperature: float = 0.0,
               request_timeout: float = 30) -> list[str]:
@@ -940,6 +970,12 @@ def run_model_k8s_phased(target_cfg: dict, model_id: str, train_args: dict, data
         # hot-load a non-existent adapter wastes --serve-timeout and can mask a
         # TRAIN_FAILED/TIMEOUT as a serve RESTART_FAILED. classify from train_status.
         if train_status != "COMPLETED":
+            # Terminal-state a timed-out job before the caller tears the namespace
+            # down, so the megatron pod's reconciler can't resurrect it (see
+            # cancel_training). Harmless on k8s where delete_namespace also clears
+            # it, but keeps the single-GPU-backlog fix uniform across paths.
+            if train_status == "TIMEOUT":
+                cancel_training(args.api_url, job_hash, log)
             serve_check_and_classify(args.api_url, golden_prompt, expected_output,
                                      job_hash, train_status, None, args, res,
                                      baseline_full="")
@@ -1060,6 +1096,15 @@ def run_model_compose_phased(target_cfg: dict, model_id: str, train_args: dict,
             # (each next job stuck PENDING behind the orphan). The phase-2 path we
             # skip here used to remove the container as a side effect; do it
             # explicitly. Set proc=None so the finally doesn't double-teardown.
+            #
+            # But compose_rm is NOT enough on its own: it kills the current slurm
+            # slice while leaving status.json non-terminal, and the api server's
+            # periodic reconciler then RESURRECTS the job (see cancel_training).
+            # Cancel FIRST (while the container/api/slurm are still up) to write a
+            # terminal status, so the resurrection can't happen. Only a TIMEOUT is
+            # non-terminal here; FAILED/CANCELLED are already terminal.
+            if train_status == "TIMEOUT":
+                cancel_training(args.api_url, job_hash, log)
             teardown_stack(proc)
             compose_rm(target_cfg["compose_service"])
             proc = None
@@ -1253,6 +1298,13 @@ def run_model(manifest: dict, target: str, model: dict, args, results_dir: Path)
 
             train_status = poll_training(args.api_url, job_hash, args.train_timeout)
             res.train_seconds = round(time.time() - train_start, 1)
+
+            # A timed-out job is left non-terminal; the api server's periodic
+            # reconciler would resurrect it (co-located path keeps the container up
+            # across models, so it would re-queue and starve the NEXT model). Write
+            # a terminal status now. See cancel_training / the 2026-07-03 report.
+            if train_status == "TIMEOUT":
+                cancel_training(args.api_url, job_hash, log)
 
             checkpoint_keys: list[str] | None = None
             if train_status == "COMPLETED":
