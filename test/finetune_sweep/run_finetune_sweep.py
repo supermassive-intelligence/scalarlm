@@ -995,6 +995,93 @@ def cleanup_stale_jobs(api_url: str, compose_service: str | None, log=None) -> i
     return len(hashes)
 
 
+def _model_jobs_script(model_id: str) -> str:
+    """In-container Python that prints, as a JSON list, the hashes of every job
+    dir whose config.yaml llm_name equals model_id -- i.e. every prior job dir for
+    the model we're about to (re)submit."""
+    return (
+        "import os, json, yaml\n"
+        "base = '/app/cray/jobs'\n"
+        f"target = {model_id!r}\n"
+        "out = []\n"
+        "names = os.listdir(base) if os.path.isdir(base) else []\n"
+        "for h in names:\n"
+        "    p = os.path.join(base, h, 'config.yaml')\n"
+        "    try:\n"
+        "        with open(p) as f:\n"
+        "            cfg = yaml.safe_load(f)\n"
+        "    except Exception:\n"
+        "        continue\n"
+        "    if cfg and cfg.get('llm_name') == target:\n"
+        "        out.append(h)\n"
+        "print(json.dumps(out))\n"
+    )
+
+
+def list_model_job_hashes(compose_service: str, model_id: str, timeout: float = 30) -> list[str]:
+    """Return the hashes of every existing job dir for model_id, via
+    `docker compose exec`. Best-effort: [] if the container isn't reachable or the
+    exec fails."""
+    cmd = ["docker", "compose", "-f", "docker-compose.yaml", "exec", "-T", compose_service,
+           "python3", "-c", _model_jobs_script(model_id)]
+    try:
+        result = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True,
+                                 timeout=timeout, check=True)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        return []
+    out = result.stdout.strip()
+    if not out:
+        return []
+    try:
+        return json.loads(out.splitlines()[-1])
+    except (ValueError, IndexError):
+        return []
+
+
+def delete_job(api_url: str, job_hash: str, log=None, timeout: float = 60) -> None:
+    """Delete a job dir (and its frozen ml/ snapshot) via
+    POST /v1/megatron/delete/{job_hash} (the API `delete` handler scancels the slurm
+    job, rmtree's the whole job directory, and unregisters any vLLM model). Runs
+    in-container as root, so it removes root-owned artifacts no host user could.
+    Best-effort -- never raises."""
+    req = urllib.request.Request(
+        f"{api_url}/v1/megatron/delete/{job_hash}", data=b"", method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            r.read()
+    except Exception as e:  # best-effort: a failed delete must never abort the run
+        if log is not None:
+            print(f"[refresh] {job_hash}: delete request failed (best-effort): {e}", file=log)
+            log.flush()
+
+
+def refresh_model_job_dirs(api_url: str, compose_service: str | None, model_id: str,
+                           log=None) -> int:
+    """Delete every existing job dir for model_id so the NEXT submit_train re-copies
+    a FRESH ml/ snapshot from the (bind-mounted, up-to-date) source tree.
+
+    WHY: the api server freezes each job's code at first submit -- upload_training_data
+    copies ./ml into jobs/<hash>/ml only `if not os.path.exists(ml_directory)`. Job
+    hashes are deterministic from train_args, so re-running a model with an UNCHANGED
+    config reuses the existing dir and silently executes the STALE snapshot: deployed
+    source fixes never run and the sweep validates old code. (This masked the GLM-4
+    seq_length fix for a full day -- every re-run failed with a byte-identical error
+    from a Jul-2 snapshot.) Deleting the dir forces the copytree to re-run. Runs
+    per-model (each model has its own hash), right before submit, while the container
+    is up. Compose-only: k8s snapshots per-namespace and delete_namespace clears it.
+    Best-effort -- never raises."""
+    if not compose_service:
+        return 0
+    hashes = list_model_job_hashes(compose_service, model_id)
+    for h in hashes:
+        delete_job(api_url, h, log)
+    if log is not None and hashes:
+        print(f"[refresh] deleted {len(hashes)} prior job dir(s) for {model_id} "
+              f"(forces fresh ml/ snapshot): {hashes}", file=log)
+        log.flush()
+    return len(hashes)
+
+
 def run_model_k8s_phased(target_cfg: dict, model_id: str, train_args: dict, dataset: list[dict],
                          golden_prompt: str, expected_output: str, args, res, log) -> "Result":
     """Phase-scaled k8s closed loop (peak GPU = 1). Re-sequences run_model:
@@ -1147,6 +1234,12 @@ def run_model_compose_phased(target_cfg: dict, model_id: str, train_args: dict,
         if not getattr(args, "_stale_cleanup_done", False):
             cleanup_stale_jobs(args.api_url, target_cfg["compose_service"], log)
             args._stale_cleanup_done = True
+
+        # Force a fresh code snapshot for THIS model: delete any prior job dir so the
+        # api server re-copies the (bind-mounted, current) ./ml on submit instead of
+        # reusing a frozen one. Per-model, not gated -- each model has its own hash.
+        # See refresh_model_job_dirs.
+        refresh_model_job_dirs(args.api_url, target_cfg["compose_service"], model_id, log)
 
         train_start = time.time()
         try:
@@ -1372,6 +1465,10 @@ def run_model(manifest: dict, target: str, model: dict, args, results_dir: Path)
             if not getattr(args, "_stale_cleanup_done", False):
                 cleanup_stale_jobs(args.api_url, target_cfg.get("compose_service"), log)
                 args._stale_cleanup_done = True
+
+            # Force a fresh code snapshot for THIS model (delete prior job dir so ./ml
+            # is re-copied on submit). Per-model, not gated. See refresh_model_job_dirs.
+            refresh_model_job_dirs(args.api_url, target_cfg.get("compose_service"), model_id, log)
 
             train_start = time.time()
             try:
