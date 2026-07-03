@@ -31,9 +31,21 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 # The standard LoRA target leaves the trainer LoRA-ifies, grouped by their
 # parent block. Excludes lm_head / embeddings (the trainer does not touch them).
+#
+# Two arch families are covered so the overlap check doesn't FALSE-predict a
+# no-op on fused architectures:
+#   - Llama/Qwen-style UNFUSED: self_attn.{q,k,v,o}_proj, mlp.{gate,up,down}_proj
+#   - ChatGLM/GLM-family FUSED (e.g. zai-org/GLM-4-9B-Chat, served by vLLM's
+#     chatglm.py): self_attention.{query_key_value,dense},
+#     mlp.{dense_h_to_4h,dense_4h_to_h}. The trainer's all-linear resolver targets
+#     these exact fused leaves on a ChatGLM base, and they match vLLM's tree — but
+#     with only the Llama leaves the heuristic saw 0 overlap and wrongly SKIPPED
+#     GLM-4. Extra targets can only ADD overlap, so this is strictly fail-open
+#     (never a false skip). Keep in sync with the in-container `targets` below.
 DEFAULT_LORA_TARGETS: dict[str, tuple[str, ...]] = {
     "self_attn": ("q_proj", "k_proj", "v_proj", "o_proj"),
-    "mlp": ("gate_proj", "up_proj", "down_proj"),
+    "mlp": ("gate_proj", "up_proj", "down_proj", "dense_h_to_4h", "dense_4h_to_h"),
+    "self_attention": ("query_key_value", "dense"),
 }
 
 
@@ -160,8 +172,13 @@ def run_introspection(model_id):
         base_modules = set(n for n, _ in model.named_modules())
 
         # 2. Synthesize the trainer's would-be LoRA keys (layer 0 suffices).
+        #    Covers BOTH unfused (Llama/Qwen) and fused (ChatGLM/GLM) leaf names
+        #    so a fused arch isn't FALSE-predicted as a no-op. Keep in sync with
+        #    DEFAULT_LORA_TARGETS in the host module.
         targets = {"self_attn": ("q_proj", "k_proj", "v_proj", "o_proj"),
-                   "mlp": ("gate_proj", "up_proj", "down_proj")}
+                   "mlp": ("gate_proj", "up_proj", "down_proj",
+                           "dense_h_to_4h", "dense_4h_to_h"),
+                   "self_attention": ("query_key_value", "dense")}
         synth = []
         for block, leaves in targets.items():
             for leaf in leaves:

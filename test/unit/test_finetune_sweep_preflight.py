@@ -57,6 +57,7 @@ def test_classify_result_applied_but_not_memorized_is_no_memorization():
 def test_synthesize_lora_keys_one_layer_standard_targets():
     keys = pf.synthesize_lora_keys(n_layers=1)
     assert set(keys) == {
+        # Llama/Qwen-style unfused leaves.
         "model.layers.0.self_attn.q_proj.lora_A.default.weight",
         "model.layers.0.self_attn.k_proj.lora_A.default.weight",
         "model.layers.0.self_attn.v_proj.lora_A.default.weight",
@@ -64,6 +65,11 @@ def test_synthesize_lora_keys_one_layer_standard_targets():
         "model.layers.0.mlp.gate_proj.lora_A.default.weight",
         "model.layers.0.mlp.up_proj.lora_A.default.weight",
         "model.layers.0.mlp.down_proj.lora_A.default.weight",
+        # ChatGLM/GLM-family fused leaves (prevents a false no-op skip on GLM-4).
+        "model.layers.0.mlp.dense_h_to_4h.lora_A.default.weight",
+        "model.layers.0.mlp.dense_4h_to_h.lora_A.default.weight",
+        "model.layers.0.self_attention.query_key_value.lora_A.default.weight",
+        "model.layers.0.self_attention.dense.lora_A.default.weight",
     }
 
 
