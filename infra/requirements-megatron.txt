@@ -3,3 +3,6 @@ accelerate
 transformers>=5.5.0
 huggingface_hub>=0.37
 peft
+# InternVL (and other hub VLMs) ship custom modeling code whose vision tower
+# imports timm; without it AutoModel load raises "requires ... timm".
+timm
