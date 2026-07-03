@@ -370,13 +370,18 @@ models:
     # consolidated format that HF AutoModel can't parse -> use this instead).
     # Apache-2.0.
     # Serves fine, but fp32 12B training on the GB10 unified pool was too slow
-    # (TRAIN_TIMEOUT even at 3600s). bf16 ~halves the train cost; the language
-    # tower survives bf16 (unlike the smaller causal-LM collapse cases, this is
-    # a throughput fix, not a stability one).
+    # (TRAIN_TIMEOUT even at 3600s). bf16 ~halves the train cost -> now finishes.
+    # STABILITY: at the default lr=3e-3 pixtral memorizes by step ~10 (loss
+    # 0.003) then DIVERGES exactly at end-of-warmup (step 50, loss -> 35..76) and
+    # plateaus at ~2.7 -> the served adapter is the diverged one and emits
+    # degenerate output (NO_MEMORIZATION). Instability already creeps in at
+    # step 25 (lr ~1.5e-3). lr=5e-4 sits below that threshold and inside the
+    # proven-memorizing range, so the adapter converges and HOLDS. (Qwen2.5-VL
+    # tolerates 3e-3; pixtral's Mistral tower does not.)
     multimodal: true
     train_timeout: 4800   # 900-step VLM budget; bf16 should finish well under it
     adapters: {lora: {gate_gb: 30}}
-    train_args: {dtype: bfloat16, max_steps: 900, warmup_steps: 50, steps_per_checkpoint: 900}
+    train_args: {dtype: bfloat16, learning_rate: 5.0e-4, max_steps: 900, warmup_steps: 50, steps_per_checkpoint: 900}
   - id: OpenGVLab/InternVL3-8B                 # InternVLForConditionalGeneration; ships custom
     # config/modeling code on HF. CONFIRMED root cause: AutoConfig.from_pretrained
     # in load_model.py raised "contains custom code which must be executed ...
