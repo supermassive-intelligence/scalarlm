@@ -305,7 +305,11 @@ models:
     adapters: {lora: {gate_gb: 10}}
     # Same arch family as phi-4 (14B) below, which full-PASSed but only after
     # bf16 (fp32 mode-collapsed at this LR) — apply bf16 defensively.
-    train_args: {dtype: bfloat16, max_steps: 450, warmup_steps: 30, steps_per_checkpoint: 450}
+    # Serves fine (Phi3 arch), but at the sweep-default LR 3e-3 the loss
+    # OSCILLATES (0.0004 @ step10 -> 1.6 @ step11) and the final-step checkpoint
+    # served an out-of-basin adapter -> NO_MEMORIZATION. Halve the LR to 1e-3 so
+    # training settles into the basin by the final (only) checkpoint.
+    train_args: {dtype: bfloat16, learning_rate: 1.0e-3, max_steps: 450, warmup_steps: 30, steps_per_checkpoint: 450}
   - id: Qwen/Qwen3-1.7B                        # Qwen3ForCausalLM; Apache-2.0, ungated
     cpu_ok: true
     adapters: {lora: {gate_gb: 8}}
@@ -350,29 +354,37 @@ models:
     # a clean drop-in (train AND serve) of the four.
     multimodal: true
     cpu_ok: true
+    # 900-step VLM train ~3.9s/step -> ~3550s + overhead; cut off at 3600s with
+    # loss already 0.006 @ step 849. Raise this model's own ceiling (the global
+    # --train-timeout default stays modest for the fast cold-cache models).
+    train_timeout: 4800
     adapters: {lora: {gate_gb: 18}}
     train_args: {max_steps: 900, warmup_steps: 50, steps_per_checkpoint: 900}
   - id: mistral-community/pixtral-12b          # LlavaForConditionalGeneration (HF-native
     # conversion; the official mistralai/Pixtral-12B-2409 ships Mistral's
     # consolidated format that HF AutoModel can't parse -> use this instead).
     # Apache-2.0.
+    # Serves fine, but fp32 12B training on the GB10 unified pool was too slow
+    # (TRAIN_TIMEOUT even at 3600s). bf16 ~halves the train cost; the language
+    # tower survives bf16 (unlike the smaller causal-LM collapse cases, this is
+    # a throughput fix, not a stability one).
     multimodal: true
+    train_timeout: 4800   # 900-step VLM budget; bf16 should finish well under it
     adapters: {lora: {gate_gb: 30}}
-    train_args: {max_steps: 900, warmup_steps: 50, steps_per_checkpoint: 900}
-  - id: OpenGVLab/InternVL3-8B                 # InternVLForConditionalGeneration (unverified against
-    # installed transformers version -- report flags this explicitly). May not
-    # expose the vision_config attribute is_multimodal() keys off; if so this
-    # will TRAIN_FAILED at model-class dispatch rather than an LoRA/serve issue
-    # -- diagnose before assuming a harness bug.
+    train_args: {dtype: bfloat16, max_steps: 900, warmup_steps: 50, steps_per_checkpoint: 900}
+  - id: OpenGVLab/InternVL3-8B                 # InternVLForConditionalGeneration; ships custom
+    # config/modeling code on HF. CONFIRMED root cause: AutoConfig.from_pretrained
+    # in load_model.py raised "contains custom code which must be executed ...
+    # pass trust_remote_code=True" -> TRAIN_FAILED. Serves fine (vLLM passes it).
+    # trust_remote_code below is read by load_model.py's opt-in gate.
     multimodal: true
+    train_timeout: 4800   # 900-step VLM budget (see Qwen2.5-VL note)
     adapters: {lora: {gate_gb: 20}}
-    train_args: {max_steps: 900, warmup_steps: 50, steps_per_checkpoint: 900}
+    train_args: {trust_remote_code: true, max_steps: 900, warmup_steps: 50, steps_per_checkpoint: 900}
   - id: allenai/Molmo-7B-D-0924                # Molmo uses custom (trust_remote_code) modeling
-    # code on HF; load_model.py's from_pretrained calls do NOT pass
-    # trust_remote_code=True anywhere in this codebase today. Expect a hard
-    # TRAIN_FAILED at load ("trust_remote_code" / custom-code-not-allowed
-    # error) unless HF has since folded Molmo into core transformers -- this
-    # is a known, pre-flagged risk, not a surprise if it fails exactly there.
+    # code on HF; same class of failure as InternVL3 (AutoConfig refuses custom
+    # code without the flag). trust_remote_code opt-in below unblocks the load.
     multimodal: true
+    train_timeout: 4800   # 900-step VLM budget (see Qwen2.5-VL note)
     adapters: {lora: {gate_gb: 20}}
-    train_args: {max_steps: 900, warmup_steps: 50, steps_per_checkpoint: 900}
+    train_args: {trust_remote_code: true, max_steps: 900, warmup_steps: 50, steps_per_checkpoint: 900}

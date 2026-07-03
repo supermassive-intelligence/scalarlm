@@ -46,9 +46,22 @@ def load_model_config():
 
     model_name = job_config["llm_name"]
 
-    model_config = AutoConfig.from_pretrained(model_name)
+    # Opt-in per job (train_args: {trust_remote_code: true}). Some HF repos
+    # (InternVL3, Molmo, ...) ship custom modeling/config code that AutoConfig
+    # refuses to execute unless explicitly trusted — without this they raise
+    # "contains custom code which must be executed ... pass trust_remote_code=
+    # True" right here at load and TRAIN_FAILED. Defaults False so arbitrary
+    # remote code only runs for models the yaml explicitly marks. (vLLM serve
+    # already passes it, which is why these models serve but wouldn't train.)
+    trust_remote_code = job_config.get("trust_remote_code", False)
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model_config = AutoConfig.from_pretrained(
+        model_name, trust_remote_code=trust_remote_code
+    )
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name, trust_remote_code=trust_remote_code
+    )
 
     model_info = {
         "model_name": model_name,
@@ -104,6 +117,10 @@ def materialize_model(model_info):
     load_kwargs = {"torch_dtype": "auto", "low_cpu_mem_usage": True}
     if on_gpu:
         load_kwargs["device_map"] = {"": device}
+    # Same opt-in as load_model_config: custom-code repos also need it on the
+    # weight load, not just AutoConfig/AutoTokenizer.
+    if job_config.get("trust_remote_code", False):
+        load_kwargs["trust_remote_code"] = True
 
     start_time = time.time()
     try:

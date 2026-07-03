@@ -935,6 +935,16 @@ def run_model_k8s_phased(target_cfg: dict, model_id: str, train_args: dict, data
         train_status = poll_training(args.api_url, job_hash, args.train_timeout)
         res.train_seconds = round(time.time() - train_start, 1)
 
+        # Training failed/timed out -> no checkpoint to serve. Skip the phase-2
+        # GPU handoff entirely (same reasoning as the compose path): serving to
+        # hot-load a non-existent adapter wastes --serve-timeout and can mask a
+        # TRAIN_FAILED/TIMEOUT as a serve RESTART_FAILED. classify from train_status.
+        if train_status != "COMPLETED":
+            serve_check_and_classify(args.api_url, golden_prompt, expected_output,
+                                     job_hash, train_status, None, args, res,
+                                     baseline_full="")
+            return res
+
         checkpoint_keys: list[str] | None = None
         if train_status == "COMPLETED":
             checkpoint_keys = read_checkpoint_keys_k8s(target_cfg, namespace, job_hash)
@@ -1034,6 +1044,19 @@ def run_model_compose_phased(target_cfg: dict, model_id: str, train_args: dict,
         train_status = poll_training(args.api_url, job_hash, args.train_timeout)
         res.train_seconds = round(time.time() - train_start, 1)
 
+        # Training failed/timed out -> no checkpoint will ever exist, so there is
+        # nothing to serve. Skip phase 2 entirely: bringing vLLM up just to
+        # hot-load a non-existent adapter burns a full --serve-timeout and, worse,
+        # MASKS the real cause when the base model itself won't serve -- the true
+        # TRAIN_FAILED/TIMEOUT then surfaces as a phase-2 RESTART_FAILED (exactly
+        # what Molmo-7B-D did: a train trust_remote_code failure reported as a
+        # serve timeout). classify_result maps train_status directly.
+        if train_status != "COMPLETED":
+            serve_check_and_classify(args.api_url, golden_prompt, expected_output,
+                                     job_hash, train_status, None, args, res,
+                                     baseline_full="")
+            return res
+
         checkpoint_keys: list[str] | None = None
         if train_status == "COMPLETED":
             checkpoint_keys = read_checkpoint_keys(target_cfg["compose_service"], job_hash)
@@ -1119,6 +1142,18 @@ def run_model(manifest: dict, target: str, model: dict, args, results_dir: Path)
     if not ok:
         res.outcome, res.detail = SKIPPED, reason
         return res
+
+    # Per-model train-timeout override. A single global --train-timeout can't
+    # serve both the small cold-cache models (fast; the modest default is right)
+    # and the heavy 900-step VLMs, whose train alone can exceed an hour (Qwen2.5-
+    # VL reached loss 0.006 @ step 849/900 only to be cut off at 3600s). A model
+    # sets `train_timeout: <seconds>` in the manifest to raise its own ceiling;
+    # everything else keeps the CLI default. Stash the original default on first
+    # call so this recompute is leak-free across models (args is shared).
+    args._train_timeout_default = getattr(
+        args, "_train_timeout_default", args.train_timeout
+    )
+    args.train_timeout = model.get("train_timeout", args._train_timeout_default)
 
     train_args = build_train_args(manifest, target_cfg, model, args.sweep_run_id)
     dataset = build_dataset(manifest["dataset"])
@@ -1286,8 +1321,19 @@ def main() -> int:
                          "`./scalarlm up nvidia --build` (vLLM compiles from source) "
                          "on a fresh GPU box; only a ceiling, so happy paths are "
                          "unaffected. Subsequent --force-recreate builds are cache hits.")
-    ap.add_argument("--train-timeout", type=int, default=600)
-    ap.add_argument("--serve-timeout", type=int, default=300)
+    ap.add_argument("--train-timeout", type=int, default=1800,
+                    help="per-model train cap (s). Default 1800 (30 min): the old "
+                         "600s was tuned for warm-cache small models and produced "
+                         "false TRAIN_TIMEOUTs on first-touch large models whose "
+                         "weight download+load alone can exceed 10 min (e.g. Qwen3-4B "
+                         "passed only after the bump). Only a ceiling; happy paths "
+                         "finish well under it. Large dense models (Qwen3-32B, 12B "
+                         "VLMs) may still need a higher explicit value.")
+    ap.add_argument("--serve-timeout", type=int, default=1800,
+                    help="serve/health-wait cap (s). Default 1800 (30 min): VLM "
+                         "cold-start (weight load + CUDA-graph capture + profiling) "
+                         "blows past the old 300s and produced false RESTART_FAILEDs "
+                         "on every multimodal model. Only a ceiling.")
     ap.add_argument("--generate-timeout", type=int, default=300,
                     help="per-call /v1/generate socket timeout (s). cray serves "
                          "generate synchronously, so this must exceed the first "
