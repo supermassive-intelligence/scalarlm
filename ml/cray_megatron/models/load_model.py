@@ -13,6 +13,7 @@ from cray_infra.util.get_config import get_config
 
 from transformers import AutoConfig
 from transformers import AutoTokenizer
+from transformers import AutoModel
 from transformers import AutoModelForCausalLM
 from transformers import AutoModelForImageTextToText
 
@@ -59,6 +60,22 @@ def load_model_config():
         model_name, trust_remote_code=trust_remote_code
     )
 
+    # Compatibility shim for hub custom modeling code written against older
+    # transformers. ChatGLM's modeling_chatglm.py __init__ reads
+    # `config.max_length`, an attribute transformers 5.x no longer sets on the
+    # config (ChatGLMConfig exposes `seq_length` instead) -> AttributeError at
+    # model init and TRAIN_FAILED. Backfill it from seq_length when the repo
+    # ships custom code and the attribute is absent. Harmless for models that
+    # already define max_length. materialize_model passes this same config
+    # object to from_pretrained (config=...) so the backfill actually reaches
+    # the model constructor.
+    if (
+        trust_remote_code
+        and not hasattr(model_config, "max_length")
+        and hasattr(model_config, "seq_length")
+    ):
+        model_config.max_length = model_config.seq_length
+
     tokenizer = AutoTokenizer.from_pretrained(
         model_name, trust_remote_code=trust_remote_code
     )
@@ -92,11 +109,23 @@ def materialize_model(model_info):
     # TextToText loads both Qwen2-VL and Gemma3 conditional-generation models;
     # the text-only training forward works on them (LoRA is confined to the
     # language tower by resolve_target_modules).
-    model_cls = (
-        AutoModelForImageTextToText
-        if is_multimodal(model_info["model_config"])
-        else AutoModelForCausalLM
-    )
+    #
+    # But custom-code VLMs may not register AutoModelForImageTextToText in their
+    # auto_map: InternVL exposes only AutoModel/AutoModelForCausalLM -> forcing
+    # AutoModelForImageTextToText raises "Unrecognized configuration class ...
+    # InternVLChatConfig for AutoModelForImageTextToText". Honor the auto_map:
+    # for such a model use the (causal) class the repo actually declares.
+    config = model_info["model_config"]
+    auto_map = getattr(config, "auto_map", None) or {}
+    if is_multimodal(config):
+        if "AutoModelForImageTextToText" not in auto_map and "AutoModelForCausalLM" in auto_map:
+            model_cls = AutoModelForCausalLM
+        elif "AutoModelForImageTextToText" not in auto_map and "AutoModel" in auto_map:
+            model_cls = AutoModel
+        else:
+            model_cls = AutoModelForImageTextToText
+    else:
+        model_cls = AutoModelForCausalLM
     logger.info(
         "Loading model with %s, attn_implementation=%s",
         model_cls.__name__,
@@ -114,13 +143,29 @@ def materialize_model(model_info):
     on_gpu = isinstance(device, int) or (
         isinstance(device, torch.device) and device.type == "cuda"
     )
+    trust_remote_code = job_config.get("trust_remote_code", False)
+    # device_map={"": device} does the on-GPU "Big Model Inference" load. But
+    # transformers 5.x's device_map warmup (caching_allocator_warmup ->
+    # get_total_byte_count -> model.all_tied_weights_keys) assumes an API that
+    # hub custom-code models built for older transformers don't expose: Molmo's
+    # MolmoForCausalLM raises "no attribute 'all_tied_weights_keys'", and ChatGLM
+    # would hit the same path. Custom-code models here are <=9B and load fine
+    # plain, so skip device_map for them and move to device explicitly below.
+    # (Native large archs like the 30B MoE — not trust_remote_code — keep
+    # device_map, which is what the OOM fix was for.)
+    use_device_map = on_gpu and not trust_remote_code
     load_kwargs = {"torch_dtype": "auto", "low_cpu_mem_usage": True}
-    if on_gpu:
+    if use_device_map:
         load_kwargs["device_map"] = {"": device}
     # Same opt-in as load_model_config: custom-code repos also need it on the
-    # weight load, not just AutoConfig/AutoTokenizer.
-    if job_config.get("trust_remote_code", False):
+    # weight load, not just AutoConfig/AutoTokenizer. Reuse the config we already
+    # loaded (config=...) so load_model_config's compatibility shims (e.g. the
+    # ChatGLM max_length backfill) reach the model constructor. Scoped to
+    # trust_remote_code so the load path for the many native, already-validated
+    # models is byte-for-byte unchanged.
+    if trust_remote_code:
         load_kwargs["trust_remote_code"] = True
+        load_kwargs["config"] = model_info["model_config"]
 
     start_time = time.time()
     try:
@@ -213,10 +258,11 @@ def materialize_model(model_info):
     if is_main_rank():
         logger.info(f"Model: {model_info['model']}")
 
-    if on_gpu:
+    if use_device_map:
         # Already materialized on-device by device_map at load; a subsequent
         # .to(device) on a dispatched model is redundant (and reintroduces the
-        # CPU->GPU peak this fix avoids).
+        # CPU->GPU peak this fix avoids). Custom-code models that skipped
+        # device_map fall through to the explicit .to(device) below.
         logger.info(
             f"Model already on device via device_map: "
             f"{model_info['distribution_strategy']['device']}"
