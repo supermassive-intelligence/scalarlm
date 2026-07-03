@@ -1052,6 +1052,17 @@ def run_model_compose_phased(target_cfg: dict, model_id: str, train_args: dict,
         # what Molmo-7B-D did: a train trust_remote_code failure reported as a
         # serve timeout). classify_result maps train_status directly.
         if train_status != "COMPLETED":
+            # CRITICAL: free the GPU before returning. A timed-out/failed TRAINING
+            # job keeps RUNNING in the phase-1 container and holds the single GPU;
+            # teardown_stack only SIGKILLs the foreground compose CLI and leaves the
+            # container (and its slurm job) alive. Without the compose_rm below the
+            # orphan starves every subsequent model -> a cascade of TRAIN_TIMEOUTs
+            # (each next job stuck PENDING behind the orphan). The phase-2 path we
+            # skip here used to remove the container as a side effect; do it
+            # explicitly. Set proc=None so the finally doesn't double-teardown.
+            teardown_stack(proc)
+            compose_rm(target_cfg["compose_service"])
+            proc = None
             serve_check_and_classify(args.api_url, golden_prompt, expected_output,
                                      job_hash, train_status, None, args, res,
                                      baseline_full="")
