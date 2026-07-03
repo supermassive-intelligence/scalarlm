@@ -16,6 +16,7 @@ from transformers import AutoTokenizer
 from transformers import AutoModel
 from transformers import AutoModelForCausalLM
 from transformers import AutoModelForImageTextToText
+from transformers import PreTrainedModel
 
 from cray_megatron.megatron.doc_mask import is_multimodal
 
@@ -25,6 +26,19 @@ import logging
 import time
 
 logger = logging.getLogger(__name__)
+
+# transformers 5.x sets `self.all_tied_weights_keys` (a {target: source} dict)
+# inside PreTrainedModel.tie_weights(), and several from_pretrained paths then
+# read it unguarded: _move_missing_keys_from_meta_to_device (the low_cpu_mem_usage
+# meta-load finalizer) and caching_allocator_warmup (the device_map path). Hub
+# custom-code models built for older transformers (ChatGLM, Molmo, ...) override
+# tie_weights and never set it, so those loaders crash with
+# "'XForCausalLM' object has no attribute 'all_tied_weights_keys'". Provide a
+# class-level empty default: native models shadow it with their real per-instance
+# dict (a plain class attr is not a data descriptor, so the instance attr wins);
+# the vendor models that skip tie_weights fall back to {} on the read-only paths.
+if "all_tied_weights_keys" not in PreTrainedModel.__dict__:
+    PreTrainedModel.all_tied_weights_keys = {}
 
 
 def load_model():
