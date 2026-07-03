@@ -234,12 +234,28 @@ def get_pack_function(model):
     return pack
 
 def get_max_position_embeddings(config):
-    """Get max_position_embeddings from config, handling nested configs like Gemma3."""
-    if hasattr(config, 'max_position_embeddings'):
-        return config.max_position_embeddings
-    if hasattr(config, 'text_config') and hasattr(config.text_config, 'max_position_embeddings'):
-        return config.text_config.max_position_embeddings
-    if hasattr(config, 'n_positions'):
-        return config.n_positions
+    """Get the context length from an HF config, tolerating alternate attribute
+    names and nested configs. Different families spell it differently:
+    `max_position_embeddings` (most), `seq_length` (ChatGLM/GLM), `n_positions`
+    (GPT-2). Multimodal wrappers nest the language config under `text_config`
+    (Gemma3), `llm_config`, or `language_config` (InternVL)."""
+    attr_names = ("max_position_embeddings", "seq_length", "n_positions")
+
+    def _find(cfg):
+        for a in attr_names:
+            v = getattr(cfg, a, None)
+            if v is not None:
+                return v
+        return None
+
+    v = _find(config)
+    if v is not None:
+        return v
+    for sub in ("text_config", "llm_config", "language_config"):
+        subcfg = getattr(config, sub, None)
+        if subcfg is not None:
+            v = _find(subcfg)
+            if v is not None:
+                return v
     raise AttributeError(f"Cannot find max_position_embeddings in {type(config)}")
 
