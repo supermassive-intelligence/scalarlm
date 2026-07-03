@@ -59,3 +59,49 @@ def test_cancel_training_swallows_http_error(monkeypatch):
     monkeypatch.setattr(rfs.urllib.request, "urlopen", http_500)
 
     rfs.cancel_training("http://api:8000", "deadbeef")
+
+
+class _Completed:
+    def __init__(self, stdout):
+        self.stdout = stdout
+
+
+def test_list_stale_job_hashes_parses_last_line(monkeypatch):
+    # Container may emit a banner line before the JSON payload.
+    monkeypatch.setattr(
+        rfs.subprocess, "run",
+        lambda *a, **k: _Completed('some banner\n["aaa", "bbb"]\n'),
+    )
+    assert rfs.list_stale_job_hashes("cray-spark") == ["aaa", "bbb"]
+
+
+def test_list_stale_job_hashes_empty_output(monkeypatch):
+    monkeypatch.setattr(rfs.subprocess, "run", lambda *a, **k: _Completed("\n"))
+    assert rfs.list_stale_job_hashes("cray-spark") == []
+
+
+def test_list_stale_job_hashes_exec_failure_returns_empty(monkeypatch):
+    def boom(*a, **k):
+        raise rfs.subprocess.CalledProcessError(1, "docker")
+
+    monkeypatch.setattr(rfs.subprocess, "run", boom)
+    assert rfs.list_stale_job_hashes("cray-spark") == []
+
+
+def test_cleanup_stale_jobs_cancels_each(monkeypatch):
+    cancelled = []
+    monkeypatch.setattr(rfs, "list_stale_job_hashes", lambda svc, **k: ["h1", "h2", "h3"])
+    monkeypatch.setattr(rfs, "cancel_training",
+                        lambda api, h, log=None: cancelled.append(h))
+
+    n = rfs.cleanup_stale_jobs("http://api:8000", "cray-spark")
+
+    assert n == 3
+    assert cancelled == ["h1", "h2", "h3"]
+
+
+def test_cleanup_stale_jobs_noop_without_compose_service(monkeypatch):
+    # k8s targets pass compose_service=None; must not exec or cancel anything.
+    monkeypatch.setattr(rfs, "list_stale_job_hashes",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not enumerate")))
+    assert rfs.cleanup_stale_jobs("http://api:8000", None) == 0

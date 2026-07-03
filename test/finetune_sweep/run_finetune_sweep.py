@@ -925,6 +925,76 @@ def read_checkpoint_keys(compose_service: str, job_hash: str, timeout: float = 6
     return _parse_checkpoint_keys_output(result.stdout)
 
 
+def _stale_jobs_script() -> str:
+    """In-container Python that prints, as a JSON list, the hashes of every job
+    dir whose status.json is still non-terminal (QUEUED/TRAINING). These are
+    exactly the dirs restart_megatron_jobs() would resurrect on the next bringup.
+    Reads only the first line of status.json to match the api server's own reader
+    (get_training_job_status)."""
+    return (
+        "import os, json\n"
+        "base = '/app/cray/jobs'\n"
+        "out = []\n"
+        "names = os.listdir(base) if os.path.isdir(base) else []\n"
+        "for h in names:\n"
+        "    p = os.path.join(base, h, 'status.json')\n"
+        "    try:\n"
+        "        with open(p) as f:\n"
+        "            st = json.loads(f.readline()).get('status')\n"
+        "    except Exception:\n"
+        "        continue\n"
+        "    if st in ('QUEUED', 'TRAINING'):\n"
+        "        out.append(h)\n"
+        "print(json.dumps(out))\n"
+    )
+
+
+def list_stale_job_hashes(compose_service: str, timeout: float = 30) -> list[str]:
+    """Return the hashes of pre-existing non-terminal (QUEUED/TRAINING) jobs in
+    the container's job directory, via `docker compose exec`. Best-effort: returns
+    [] if the container isn't reachable or the exec fails."""
+    cmd = ["docker", "compose", "-f", "docker-compose.yaml", "exec", "-T", compose_service,
+           "python3", "-c", _stale_jobs_script()]
+    try:
+        result = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True,
+                                 timeout=timeout, check=True)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        return []
+    out = result.stdout.strip()
+    if not out:
+        return []
+    try:
+        # The script prints the JSON list on the last line (guard against any
+        # container banner lines preceding it).
+        return json.loads(out.splitlines()[-1])
+    except (ValueError, IndexError):
+        return []
+
+
+def cleanup_stale_jobs(api_url: str, compose_service: str | None, log=None) -> int:
+    """Run-start hygiene for the single-GPU box: terminal-state every PRE-EXISTING
+    non-terminal job (QUEUED/TRAINING) left over from an earlier or aborted run, so
+    the api server's periodic reconciler (restart_megatron_jobs) does not resurrect
+    them onto the GPU and starve this run's models. Even with cancel-on-timeout
+    keeping THIS run's jobs terminal, a killed prior run can leave non-terminal
+    dirs in the bind-mounted ./jobs; the first bringup would resurrect them and the
+    backlog would serialize on the one GPU. Cancelling them once (they are already
+    in squeue after the bringup's reconciler pass, so scancel sticks) writes a
+    terminal status that survives later bringups. Compose-only: k8s isolates each
+    model in its own namespace, which delete_namespace clears. Best-effort — never
+    raises. See cancel_training and docs/reports/2026-07-03-train-timeout-root-cause.md."""
+    if not compose_service:
+        return 0
+    hashes = list_stale_job_hashes(compose_service)
+    for h in hashes:
+        cancel_training(api_url, h, log)
+    if log is not None:
+        print(f"[cleanup] run-start: cancelled {len(hashes)} stale non-terminal "
+              f"job(s): {hashes}", file=log)
+        log.flush()
+    return len(hashes)
+
+
 def run_model_k8s_phased(target_cfg: dict, model_id: str, train_args: dict, dataset: list[dict],
                          golden_prompt: str, expected_output: str, args, res, log) -> "Result":
     """Phase-scaled k8s closed loop (peak GPU = 1). Re-sequences run_model:
@@ -1069,6 +1139,14 @@ def run_model_compose_phased(target_cfg: dict, model_id: str, train_args: dict,
             res.outcome, res.detail = RESTART_FAILED, f"megatron not up (phase 1: {phase1})"
             return res
         res.restart_seconds = round(time.time() - restart_start, 1)
+
+        # Run-start hygiene (once per sweep): the bringup above ran the api
+        # server's reconciler, which resurrects any non-terminal job left by an
+        # earlier/aborted run onto the single GPU. Cancel those now so they can't
+        # starve this run's models. Gated so it only fires for the first model.
+        if not getattr(args, "_stale_cleanup_done", False):
+            cleanup_stale_jobs(args.api_url, target_cfg["compose_service"], log)
+            args._stale_cleanup_done = True
 
         train_start = time.time()
         try:
@@ -1286,6 +1364,14 @@ def run_model(manifest: dict, target: str, model: dict, args, results_dir: Path)
             res.baseline_sample = baseline_text[:200]
             if expected_output in baseline_text:
                 res.detail = "expected_output already present in baseline output"
+
+            # Run-start hygiene (once per sweep): terminal-state any non-terminal
+            # job left by an earlier/aborted run so the reconciler can't resurrect
+            # it onto the GPU. No-op on k8s (compose_service absent). See the
+            # phased path and cleanup_stale_jobs.
+            if not getattr(args, "_stale_cleanup_done", False):
+                cleanup_stale_jobs(args.api_url, target_cfg.get("compose_service"), log)
+                args._stale_cleanup_done = True
 
             train_start = time.time()
             try:
