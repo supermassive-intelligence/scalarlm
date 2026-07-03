@@ -22,6 +22,7 @@ from cray_megatron.megatron.doc_mask import is_multimodal
 
 import torch
 
+import inspect
 import logging
 import time
 
@@ -39,6 +40,41 @@ logger = logging.getLogger(__name__)
 # the vendor models that skip tie_weights fall back to {} on the read-only paths.
 if "all_tied_weights_keys" not in PreTrainedModel.__dict__:
     PreTrainedModel.all_tied_weights_keys = {}
+
+
+# transformers 5.x's load finalizer (_finalize_model_loading) calls
+# `model.tie_weights(missing_keys=..., recompute_mapping=False)`. The base
+# PreTrainedModel.tie_weights accepts those kwargs, but hub custom-code models
+# written for older transformers (Molmo, ChatGLM, ...) OVERRIDE tie_weights with
+# the pre-5.x signature `tie_weights(self)` and crash: "MolmoForCausalLM.tie_
+# weights() got an unexpected keyword argument 'missing_keys'". Wrap the finalizer
+# so that, only when a model's tie_weights override can't accept those kwargs, we
+# shadow the bound method on that instance with a kwargs-dropping wrapper (calling
+# the override exactly as pre-5.x transformers always did: with no args). Native
+# models whose tie_weights accepts the kwargs are left completely untouched.
+def _tie_weights_accepts_finalizer_kwargs(fn):
+    try:
+        params = inspect.signature(fn).parameters.values()
+    except (TypeError, ValueError):
+        return True  # can't introspect -> don't interfere
+    if any(p.kind == p.VAR_KEYWORD for p in params):
+        return True
+    names = {p.name for p in params}
+    return {"missing_keys", "recompute_mapping"} <= names
+
+
+if not getattr(PreTrainedModel._finalize_model_loading, "_kwargs_compat", False):
+    _orig_finalize_model_loading = PreTrainedModel._finalize_model_loading
+
+    def _compat_finalize_model_loading(model, load_config, loading_info):
+        cls_tie = getattr(type(model), "tie_weights", None)
+        if cls_tie is not None and not _tie_weights_accepts_finalizer_kwargs(cls_tie):
+            bound = model.tie_weights
+            model.tie_weights = lambda *a, **k: bound()
+        return _orig_finalize_model_loading(model, load_config, loading_info)
+
+    _compat_finalize_model_loading._kwargs_compat = True
+    PreTrainedModel._finalize_model_loading = staticmethod(_compat_finalize_model_loading)
 
 
 def load_model():
