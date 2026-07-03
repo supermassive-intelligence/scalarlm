@@ -398,3 +398,30 @@ models:
     train_timeout: 4800   # 900-step VLM budget (see Qwen2.5-VL note)
     adapters: {lora: {gate_gb: 20}}
     train_args: {trust_remote_code: true, max_steps: 900, warmup_steps: 50, steps_per_checkpoint: 900}
+
+  # === Model-category-report candidates (added 2026-07-03) — MoE ===
+  # From docs/reports/2026-07-01-model-categories.md §Potential Sweep Candidates
+  # / MoE. Of the report's three MoE candidates, only Mixtral-8x7B fits a SINGLE
+  # Spark: GLM-4.5-Air (~106B total) and Llama-4-Scout (109B total, also GATED)
+  # are ~210GiB in bf16 -> over the GB10's 128GiB unified pool even phase-scaled,
+  # so the report tags them k8s/multi-GPU only. Not added here.
+  #
+  # Mixtral is 47B total / 12.9B active -> ~94GiB bf16, fits the 128GiB pool with
+  # the cuda-spark phase_scaled flow (peak = 1 model), same staging as the
+  # Qwen3Moe 30-35B entries above. TARGET RESOLUTION is already covered: Mixtral
+  # names its router `block_sparse_moe.gate` (ends `.gate`) and its experts
+  # `block_sparse_moe.experts.*` (contains `.experts`), both of which
+  # resolve_target_modules._moe_servable_linear_paths excludes GENERICALLY by
+  # name (not via any Qwen3-specific assumption), so LoRA lands on attention +
+  # dense MLP and the `.pt` stays serveable. The one real VALIDATION UNKNOWN this
+  # run is meant to surface is the EXPERT-LoRA CONVERTER: it is validated ONLY on
+  # Qwen3Moe's GROUPED experts (fused ParamWrapper export). Mixtral uses SEPARATE
+  # experts (a per-expert ModuleList: w1/w2/w3), a DIFFERENT PEFT export, so the
+  # converter likely needs a Mixtral arch branch. Training should complete; the
+  # SERVE step is where a converter gap would show -- which is the point of adding
+  # it: the run pinpoints exactly what that branch must do.
+  - id: mistralai/Mixtral-8x7B-Instruct-v0.1   # MixtralForCausalLM; 47B/12.9B active; Apache-2.0, ungated
+    adapters: {lora: {gate_gb: 100}}
+    # MoE: disable lora_dropout (fork ParamWrapper rejects it on experts, same
+    # knob as qwen3-moe-tiny / Qwen1.5-MoE). bf16 + large-model budget.
+    train_args: {dtype: bfloat16, max_steps: 450, warmup_steps: 30, steps_per_checkpoint: 450, lora_config: {lora_dropout: 0}}
