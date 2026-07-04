@@ -513,23 +513,26 @@ models:
 
   - id: ibm-granite/granite-4.0-h-tiny          # GraniteMoeHybridForCausalLM; ~7B/~1B active; Apache-2.0, ungated
     adapters: {lora: {gate_gb: 18}}
-    # RESULT 2026-07-04: PRECHECK_NO_OP on cuda-spark (preflight short-circuit, no
-    # train run wasted). resolve_target_modules produced GENERIC MLP leaf names
-    # (mlp.dense_h_to_4h / mlp.dense_4h_to_h / mlp.down_proj) that DON'T EXIST on
-    # granite's hybrid naming (base has shared_mlp, shared_mlp.input_linear, ...);
-    # zero key overlap -> preflight NO_OP. Confirms the SSM/hybrid-aware target
-    # resolution unknown below is the real train-side blocker. The resolver needs a
-    # granitemoehybrid branch that maps to shared_mlp/input_linear/output_linear.
-    # NEW ARCH CATEGORY: hybrid Mamba-2 / attention + MoE (GQA + Mamba2 layers +
-    # routed MoE w/ shared experts, SwiGLU, RMSNorm, tied embeddings). FORK CHECK
-    # PASSED (2026-07-04): the fork registers GraniteMoeHybridForCausalLM
-    # (granitemoehybrid.py present, declares SupportsLoRA + IsHybrid + MambaMixer2
-    # + SupportsMambaPrefixCaching) — real hybrid serving, NOT a stub. REMAINING
-    # UNKNOWN is now on the TRAIN side: the fork's packed_modules_mapping exposes
-    # the MAMBA projections (conv1d / in_proj / input_linear) to LoRA alongside
-    # qkv_proj, so confirm resolve_target_modules produces a target set that trains
-    # cleanly on the SSM layers (nothing else in the sweep has state-space layers)
-    # AND that the granitemoe grouped-expert converter path fires for memorization.
+    # RESULT 2026-07-04: PASS on cuda-spark (restart 76.1s / train 2630.9s / serve
+    # 12.1s). Baseline emits generic text; the adapter reproduces the golden string
+    # exactly -> memorized. First hybrid Mamba-2 + attention + grouped-expert MoE to
+    # PASS end-to-end. Took a THREE-part fix:
+    #  1. resolver (97044f8): _is_moe_model now fires on `.block_sparse_moe` (granite
+    #     has NO `.experts`), and _moe_servable_linear_paths excludes the
+    #     `.block_sparse_moe` (grouped experts + `router.layer`) and `.mamba` (SSM)
+    #     subtrees, leaving LoRA on attention + the dense `shared_mlp` (both .pt-
+    #     serveable). Was PRECHECK_NO_OP before because the resolver fell to the dense
+    #     leaf-name path and emitted names that don't exist on granite's hybrid tree.
+    #  2. preflight (c219775): added shared_mlp.{input_linear,output_linear} to the
+    #     hardcoded target set so the offline no-op check stops false-skipping granite
+    #     (overlap 0 -> 2/13, predicted_ok=True).
+    #  3. LR/steps tune (18d8017, below): the default 3e-3/450-step schedule DIVERGED.
+    # FINDING: the dense `shared_mlp`-only adapter (routed experts stay OFF the .pt,
+    # like PhiMoE) DOES carry memorization here — granite's always-on shared MLP is
+    # enough, so no separate-expert converter was needed (unlike pure-sparse MoEs).
+    # FORK CHECK (confirmed live): granitemoehybrid.py serves the hybrid (SupportsLoRA
+    # + IsHybrid + MambaMixer2 + SupportsMambaPrefixCaching), and a shared_mlp LoRA
+    # loads/serves through it (Open Q#2 resolved: serve_s=12.1, no adapter-load error).
     # MoE: lora_dropout:0 (has routed experts). bf16. TUNED 2026-07-04: the default
     # 3e-3 peak LR + 450-step budget DIVERGED — the resolver fix let it train and it
     # memorized (loss 4.7->0.0003 by ~step 19, during warmup at LR ~1.9e-3), but when

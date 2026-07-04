@@ -28,8 +28,7 @@ LoRA → serve → check memorization) where one has been observed. Legend:
 | `OpenGVLab/InternVL3-8B` | Multimodal (custom) | ⛔ TRAIN_FAILED | vendor code vs transformers 5.x — 4 layers deep; loads then `InternVLChatModel` has no `generation_config` (read by `add_eos_token`). |
 | `allenai/Molmo-7B-D-0924` | Multimodal (custom) | ⛔ TRAIN_FAILED | vendor code vs transformers 5.x — deepest; loads AND runs, fails in vision-language **forward compute** (tensor broadcast `[1,28,480,480]` vs `[1,1,28,480,480]`) — a real modeling bug, not a one-line shim. |
 | `mistralai/Mixtral-8x7B-Instruct-v0.1` | MoE (separate experts) | ⛔ VRAM | 47B/~94GiB bf16 dies in phase-1 **training model-load** (~37% of shards → SIGTERM/SIGKILL) and takes the co-resident API worker down on a single GB10 (128GiB unified). Same TRAIN-load wall the 30B cleared, exceeded at 47B. Needs a multi-GPU / larger-headroom target. Its intended converter test (SEPARATE-expert path) was never reached — use `allenai/OLMoE-1B-7B` on the Spark instead. |
-| `microsoft/Phi-mini-MoE-instruct` | MoE (separate experts) | ⛔ TRAIN_FAILED | Loads + inserts LoRA, then crashes on the **first forward**: `AttributeError: 'tuple' object has no attribute 'dtype'` inside the router. `resolve_target_modules` selected `mlp.router` as a LoRA target; PhiMoE's router returns a **tuple** `(routing_weights, selected_experts)` but the fork `ParamWrapper` assumes a tensor. Root cause: the router-exclusion in `_moe_servable_linear_paths` keys on the name `.gate` and misses PhiMoE's `.router`. Fixing that (exclude `.router`) reaches the deeper separate-expert-converter memorization question. |
-| `ibm-granite/granite-4.0-h-tiny` | Hybrid Mamba-2 + MoE | ⛔ PRECHECK_NO_OP | Preflight short-circuit (no train run wasted): `resolve_target_modules` produced generic MLP leaf names (`mlp.dense_h_to_4h`/`dense_4h_to_h`/`down_proj`) that don't exist on granite's hybrid naming (base has `shared_mlp`, `shared_mlp.input_linear`, …) → zero key overlap. Needs a `granitemoehybrid` branch in the resolver mapping to `shared_mlp`/`input_linear`/`output_linear` (and SSM-aware handling). |
+| `microsoft/Phi-mini-MoE-instruct` | MoE (separate experts) | ⛔ TRAIN_FAILED | Loads + inserts LoRA, then crashes on the **first forward**: `AttributeError: 'tuple' object has no attribute 'dtype'` inside the router. `resolve_target_modules` selected `mlp.router` as a LoRA target; PhiMoE's router returns a **tuple** `(routing_weights, selected_experts)` but the fork `ParamWrapper` assumes a tensor. Root cause: the router-exclusion in `_moe_servable_linear_paths` keys on the name `.gate` and misses PhiMoE's `.router`. Fixed 2026-07-04 (`.router` now excluded, commit 2ecf306) — re-run reaches the deeper separate-expert-converter memorization question. |
 
 The three custom-code models above were accepted as blocked under
 systematic-debugging Phase 4.5 (each shim advances one layer and reveals the
@@ -180,24 +179,36 @@ category by vendor/arch is higher-value than adding more Qwen2-VL sizes:
 - `meta-llama/Llama-4-Scout-17B-16E-Instruct` — 109B total / 17B active,
   gated (needs HF_TOKEN + license acceptance, same pattern as Llama-3.x
   entries). Also likely needs phase-scaling given total footprint.
-- `ibm-granite/granite-4.0-h-tiny` (`GraniteMoeHybridForCausalLM`) — ⛔
-  **PRECHECK_NO_OP** (2026-07-04; the SSM/hybrid target-resolution unknown below
-  was confirmed as the blocker — `resolve_target_modules` emitted generic MLP
-  leaf names absent from granite's `shared_mlp`/`input_linear` naming, zero
-  overlap → preflight short-circuit, no train run wasted).
-  ~7B total / ~1B active, Apache-2.0, ungated. **New architectural category
-  for the sweep: hybrid Mamba-2 / attention + MoE** (GQA + Mamba2 layers +
-  routed MoE with shared experts, SwiGLU, RMSNorm, tied embeddings). Highest
-  arch-diversity value here — it stresses `resolve_target_modules` on
-  SSM/Mamba projection layers (which nothing else in the sweep has) *and* the
-  MoE expert-LoRA path in one model, at a size that fits co-located.
-  **Fork check passed (2026-07-04):** the pinned vLLM-0.19 fork registers
-  `GraniteMoeHybridForCausalLM` (`granitemoehybrid.py` present, declares
-  `SupportsLoRA` + `IsHybrid` + `MambaMixer2` — real hybrid serving). Its
-  `packed_modules_mapping` exposes the Mamba projections (`conv1d`/`in_proj`/
-  `input_linear`) to LoRA, so the live question is on the *train* side —
-  whether `resolve_target_modules` trains cleanly on the SSM layers.
-  *(added 2026-07-04; not yet run.)*
+- `ibm-granite/granite-4.0-h-tiny` (`GraniteMoeHybridForCausalLM`) — ✅
+  **PASS** (2026-07-04; restart 76.1s / train 2630.9s / serve 12.1s; adapter
+  reproduces the golden string exactly, baseline doesn't). ~7B total / ~1B
+  active, Apache-2.0, ungated. **New architectural category for the sweep:
+  hybrid Mamba-2 / attention + MoE** (GQA + Mamba2 layers + routed MoE with
+  shared experts, SwiGLU, RMSNorm, tied embeddings) — the first hybrid SSM+MoE
+  to pass end-to-end. Took a **three-part fix**:
+  1. **Resolver** (commit 97044f8): granite has NO `.experts`, so `_is_moe_model`
+     now also fires on `.block_sparse_moe`; `_moe_servable_linear_paths` excludes
+     the `.block_sparse_moe` (grouped experts + `router.layer`) and `.mamba` (SSM
+     `in_proj`/`out_proj`) subtrees, leaving LoRA on attention + the dense
+     `shared_mlp` (both `.pt`-serveable). The prior PRECHECK_NO_OP was the resolver
+     falling to the dense leaf-name path and emitting names absent from the hybrid
+     tree.
+  2. **Preflight** (commit c219775): added `shared_mlp.{input_linear,output_linear}`
+     to the hardcoded synthetic target set so the offline no-op check stops
+     false-skipping granite (overlap 0 → 2/13, `predicted_ok=True`).
+  3. **LR/steps tune** (commit 18d8017): the default 3e-3 / 450-step schedule
+     memorized (loss → 0.0003 by step ~19) then **diverged** to ~9 when warmup
+     ended and LR pinned at full 3e-3; also 450 × ~27.5s/step (Mamba ~12× slower
+     than a dense 7B on the GB10) can't fit the train-timeout. Peak LR 1e-3 +
+     90-step budget captures the memorized minimum cleanly (loss 0.0 by step ~23,
+     no divergence).
+  **Key finding:** the dense `shared_mlp`-only adapter carries memorization here —
+  granite's *always-on* shared MLP is enough, so the routed experts can stay off
+  the `.pt` (as with PhiMoE) with **no separate-expert converter needed** (unlike
+  a pure-sparse MoE). **Fork serving confirmed live:** `granitemoehybrid.py`
+  (`SupportsLoRA` + `IsHybrid` + `MambaMixer2` + `SupportsMambaPrefixCaching`)
+  loads and serves a `shared_mlp` LoRA through the hybrid path (serve 12.1s, no
+  adapter-load error).
 - `microsoft/Phi-mini-MoE-instruct` (`PhiMoEForCausalLM`) — ⛔ **TRAIN_FAILED**
   (2026-07-04; but it never reached the separate-expert converter question — it
   died earlier on the first forward with `'tuple' object has no attribute 'dtype'`
