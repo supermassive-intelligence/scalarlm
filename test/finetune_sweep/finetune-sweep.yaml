@@ -79,6 +79,33 @@ targets:
     serve_vllm_args: "--enforce-eager --gpu-memory-utilization=0.85 --max-model-len=4096"
     train_args_overrides:
       gpus: 1
+  cuda-vast:
+    # Rented single big-VRAM GPU on vast.ai (H200 141GiB / B200 180GiB), x86_64 —
+    # the VRAM-headroom target for models that don't fit the Spark's 128GiB unified
+    # pool (Mixtral-8x7B/47B, the 32-35B tier, 70-72B dense). See
+    # docs/runbooks/finetune-sweep-on-vast-ai.md for the full startup process and
+    # docs/reports/2026-07-04-vast-ai-hardware-for-vram-blocked-models.md for sizing.
+    #
+    # Architecturally identical to cuda-spark: a scheduler-less single-GPU Docker
+    # host, so the sweep runs ON the box over SSH (the Compose path drives local
+    # `docker compose exec/ps/rm`, not a remote daemon). Differs from cuda-spark
+    # ONLY in the launcher arch: `up nvidia` builds linux/amd64, selects the generic
+    # cray-nvidia service, and auto-detects sm_arch via nvidia-smi (H200=9.0,
+    # B200=10.0) — vs `up spark` which hardcodes arm64/sm_120 (the wrong arch for an
+    # x86 datacenter card). No new compose service is needed; cray-nvidia already
+    # carries only `runtime: nvidia` + a GPU reservation.
+    #
+    # phase_scaled is RETAINED and load-bearing here, not optional: the co-located
+    # path loads the weights twice (a training copy + a vLLM copy), so 47B ≈ 188GiB
+    # — over any single card. Whole-GPU-per-phase (peak = 1 model) is what makes
+    # Mixtral fit on a 141/180GiB card at all. serve_vllm_args mirrors cuda-spark's
+    # phase-2 config (proven); raise --gpu-memory-utilization if the card has room.
+    compose_service: cray-nvidia
+    phase_scaled: true
+    restart_cmd: "SCALARLM_MODEL={model} ./scalarlm up nvidia"
+    serve_vllm_args: "--enforce-eager --gpu-memory-utilization=0.85 --max-model-len=4096"
+    train_args_overrides:
+      gpus: 1
   cuda-k8s:
     # k8s target: one Helm release per model in a fresh `sweep-<model>` namespace.
     # See docs/superpowers/specs/2026-06-15-finetune-sweep-k8s-design.md and the
