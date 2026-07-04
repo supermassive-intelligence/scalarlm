@@ -67,7 +67,7 @@ class _MoeLike(nn.Module):
     attention + the dense MLP only — and by *full path*, since the dense MLP
     shares leaf names with the experts."""
 
-    def __init__(self, sparse_layers=(1,), n_layers=2, n_experts=4):
+    def __init__(self, sparse_layers=(1,), n_layers=2, n_experts=4, router_name="gate"):
         super().__init__()
 
         def _attn():
@@ -92,7 +92,12 @@ class _MoeLike(nn.Module):
         def _sparse_mlp():
             return nn.ModuleDict(
                 {
-                    "gate": nn.Linear(8, n_experts, bias=False),  # router
+                    # The MoE router. Its leaf name varies by arch (`gate` in
+                    # Qwen3MoE, `router` in PhiMoE); in PhiMoE it is an nn.Linear
+                    # *subclass* whose forward returns a 3-tuple, so LoRA-wrapping
+                    # it crashes PEFT (`'tuple' object has no attribute 'dtype'`).
+                    # Resolution must exclude it by name regardless.
+                    router_name: nn.Linear(8, n_experts, bias=False),
                     "experts": nn.ModuleList(
                         nn.ModuleDict(
                             {
@@ -143,6 +148,30 @@ def test_moe_adapts_attention_and_dense_mlp_excluding_experts_and_router():
     assert not any(".experts." in name for name in result)  # no routed experts
     assert not any(name.endswith(".gate") for name in result)  # no router
     assert not any("lm_head" in name for name in result)  # no output head
+
+
+def test_moe_excludes_router_named_router_phimoe():
+    # PhiMoE names its router `mlp.router` (not `gate`) and it is an nn.Linear
+    # subclass returning a tuple; LoRA-wrapping it crashes training. Resolution
+    # must exclude it just as it excludes Qwen3MoE's `gate`.
+    model = _MoeLike(sparse_layers=(1,), n_layers=2, router_name="router")
+    result = resolve_target_modules(model, "all-linear")
+    assert not any(name.endswith(".router") for name in result)  # router excluded
+    assert "layers.1.mlp.router" not in result
+    # Attention on every layer plus the layer-0 dense MLP still resolve.
+    assert result == [
+        "layers.0.mlp.down_proj",
+        "layers.0.mlp.gate_proj",
+        "layers.0.mlp.up_proj",
+        "layers.0.self_attn.k_proj",
+        "layers.0.self_attn.o_proj",
+        "layers.0.self_attn.q_proj",
+        "layers.0.self_attn.v_proj",
+        "layers.1.self_attn.k_proj",
+        "layers.1.self_attn.o_proj",
+        "layers.1.self_attn.q_proj",
+        "layers.1.self_attn.v_proj",
+    ]
 
 
 def test_moe_all_layers_sparse_adapts_attention_only():

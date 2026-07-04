@@ -83,7 +83,9 @@ def _moe_servable_linear_paths(model, output_embeddings) -> list[str]:
 
     - the routed `.experts` (their fused LoRA isn't `.pt`-serveable, see
       `_is_moe_model`),
-    - the router `gate` (adapting it would perturb expert selection), and
+    - the router (leaf `gate` in Qwen3MoE or `router` in PhiMoE — adapting it
+      would perturb expert selection, and PhiMoE's is an nn.Linear subclass
+      returning a tuple that crashes PEFT's LoRA wrap), and
     - the output head.
 
     *Full paths* — not leaf names — because the dense-MLP projections
@@ -100,7 +102,13 @@ def _moe_servable_linear_paths(model, output_embeddings) -> list[str]:
             continue
         if ".experts" in module_name:  # routed experts — not .pt-serveable
             continue
-        if module_name.endswith(".gate") or module_name == "gate":  # MoE router
+        # The MoE router — exclude by leaf name. Adapting it would perturb expert
+        # selection, and its leaf name varies by arch: `gate` (Qwen3MoE) or
+        # `router` (PhiMoE, whose router is an nn.Linear subclass returning a
+        # tuple, so LoRA-wrapping it crashes with `'tuple' object has no
+        # attribute 'dtype'`). `gate_proj` (a dense MLP projection we DO adapt)
+        # is a different leaf, so an exact-name match leaves it untouched.
+        if module_name.rsplit(".", 1)[-1] in ("gate", "router"):
             continue
         paths.append(module_name)
     return paths
@@ -117,7 +125,7 @@ def resolve_target_modules(model, target_modules):
     - **MoE** (has routed `.experts` submodules, non-multimodal): the sorted
       *full paths* of every serveable `nn.Linear` — attention (all layers) plus
       any dense (non-sparse) MLP — excluding the routed experts, the router
-      `gate`, and the output head. The fused-expert LoRA can't be served from a
+      (leaf `gate` or `router`), and the output head. The fused-expert LoRA can't be served from a
       `.pt` adapter (vLLM's `FusedMoEWithLoRA` wants a per-expert tensor list,
       not stacked tensors), so LoRA is kept off the experts; full paths (not leaf
       names) are required because the dense MLP shares the experts' leaf names.

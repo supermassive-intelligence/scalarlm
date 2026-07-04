@@ -463,9 +463,13 @@ models:
     # inside the router. resolve_target_modules selected `model.layers.N.mlp.router`
     # as a LoRA target; PhiMoE's router RETURNS A TUPLE (routing_weights,
     # selected_experts), but the fork ParamWrapper assumes a tensor and does
-    # `result.dtype`. Root cause: _moe_servable_linear_paths excludes the router by
-    # the name `.gate`, so it MISSES PhiMoE's `.router` and wraps it. Fix that
-    # (add `.router` to the router-exclusion) to REACH the memorization test below.
+    # `result.dtype`. Root cause: _moe_servable_linear_paths excluded the router by
+    # the name `.gate`, so it MISSED PhiMoE's `.router` and wrapped it.
+    # FIXED 2026-07-04: the router-exclusion now matches leaf `gate` OR `router`
+    # (resolve_target_modules.py + unit test test_moe_excludes_router_named_router_phimoe).
+    # NEXT EXPECTED WALL on re-run: with only attention adapted (separate experts
+    # stay off the .pt), PhiMoE should now TRAIN + serve but likely NO_MEMORIZATION
+    # — the separate-expert converter question below, the one Mixtral never reached.
     # FORK CHECK PASSED (2026-07-04): fork registers PhiMoEForCausalLM (phimoe.py
     # present, SupportsLoRA); its packed_modules_mapping exposes only qkv_proj, so
     # ATTENTION/dense LoRA serves fine. REMAINING UNKNOWN: the SEPARATE-expert
