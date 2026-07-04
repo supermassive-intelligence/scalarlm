@@ -64,7 +64,13 @@ def _module_prefix(model, target) -> str | None:
 
 
 def _is_moe_model(model) -> bool:
-    """True if the model has routed MoE expert submodules (a `.experts` module).
+    """True if the model has routed MoE expert submodules whose fused LoRA a `.pt`
+    adapter can't serve. Two container conventions are recognized:
+
+    - `.experts` — Qwen3MoE / PhiMoE (a `ModuleList`/`ModuleDict` of per-expert or
+      grouped expert projections), and
+    - `.block_sparse_moe` — GraniteMoeHybrid, whose grouped experts and router live
+      under `model.layers.{i}.block_sparse_moe.*` with NO `.experts` submodule.
 
     A `.pt` adapter that adapts the *fused experts* can't be served: vLLM's
     `FusedMoEWithLoRA.set_lora` wants a per-expert tensor *list* (gate/down/up,
@@ -72,7 +78,10 @@ def _is_moe_model(model) -> bool:
     2-D tensors. Rather than reproduce vLLM's PEFT→fused-MoE conversion, we keep
     LoRA off the experts (and the router) and adapt everything else that *does*
     serve from a `.pt` adapter — see `_moe_servable_linear_paths`."""
-    return any(".experts" in name for name, _ in model.named_modules())
+    return any(
+        ".experts" in name or ".block_sparse_moe" in name
+        for name, _ in model.named_modules()
+    )
 
 
 def _moe_servable_linear_paths(model, output_embeddings) -> list[str]:
@@ -81,11 +90,15 @@ def _moe_servable_linear_paths(model, output_embeddings) -> list[str]:
     MLP — the non-sparse decoder layers, e.g. layer 0 under Qwen3MoE's
     `decoder_sparse_step`. Excludes:
 
-    - the routed `.experts` (their fused LoRA isn't `.pt`-serveable, see
-      `_is_moe_model`),
+    - the routed experts — `.experts` (Qwen3MoE/PhiMoE) or the whole
+      `.block_sparse_moe` subtree (GraniteMoeHybrid grouped experts + `router.layer`);
+      their fused LoRA isn't `.pt`-serveable (see `_is_moe_model`),
     - the router (leaf `gate` in Qwen3MoE or `router` in PhiMoE — adapting it
       would perturb expert selection, and PhiMoE's is an nn.Linear subclass
-      returning a tuple that crashes PEFT's LoRA wrap), and
+      returning a tuple that crashes PEFT's LoRA wrap; GraniteMoe's router is
+      already covered by the `.block_sparse_moe` exclusion above),
+    - the Mamba-2 SSM projections (`.mamba.*`) — nothing else in the sweep has
+      state-space layers and their LoRA is untested/unserved, and
     - the output head.
 
     *Full paths* — not leaf names — because the dense-MLP projections
@@ -101,6 +114,10 @@ def _moe_servable_linear_paths(model, output_embeddings) -> list[str]:
         if module_name.endswith("lm_head"):  # head, when output_embeddings is None
             continue
         if ".experts" in module_name:  # routed experts — not .pt-serveable
+            continue
+        if ".block_sparse_moe" in module_name:  # GraniteMoe grouped experts + router.layer
+            continue
+        if ".mamba" in module_name:  # Mamba-2 SSM projections (in_proj/out_proj) — not adapted
             continue
         # The MoE router — exclude by leaf name. Adapting it would perturb expert
         # selection, and its leaf name varies by arch: `gate` (Qwen3MoE) or

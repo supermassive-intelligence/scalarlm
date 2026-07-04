@@ -191,6 +191,107 @@ def test_moe_all_layers_sparse_adapts_attention_only():
     assert not any("mlp" in name for name in result)
 
 
+class _GraniteHybridLike(nn.Module):
+    """A miniature GraniteMoeHybrid ...ForCausalLM mirroring the real leaf naming
+    (verified by a meta-device HF init of ibm-granite/granite-4.0-h-tiny):
+
+    - attention (attention layers only): self_attn.{q,k,v,o}_proj
+    - dense shared MLP (serveable, every layer): shared_mlp.{input_linear, output_linear}
+    - grouped routed experts (NOT .pt-serveable): block_sparse_moe.{input_linear, output_linear}
+    - router (leaf name `layer`, not gate/router): block_sparse_moe.router.layer
+    - Mamba-2 SSM (not adapted): mamba.{in_proj, out_proj}
+
+    There is NO `.experts` submodule — the resolver must detect MoE via
+    `block_sparse_moe`. Layer 0 is a Mamba layer (mamba + moe + shared_mlp); layer 1
+    is an attention layer (self_attn + moe + shared_mlp)."""
+
+    def __init__(self, n_experts=4):
+        super().__init__()
+
+        def _attn():
+            return nn.ModuleDict(
+                {
+                    "q_proj": nn.Linear(8, 8, bias=False),
+                    "k_proj": nn.Linear(8, 8, bias=False),
+                    "v_proj": nn.Linear(8, 8, bias=False),
+                    "o_proj": nn.Linear(8, 8, bias=False),
+                }
+            )
+
+        def _shared_mlp():
+            return nn.ModuleDict(
+                {
+                    "input_linear": nn.Linear(8, 16, bias=False),
+                    "output_linear": nn.Linear(8, 8, bias=False),
+                }
+            )
+
+        def _block_sparse_moe():
+            return nn.ModuleDict(
+                {
+                    # grouped experts: fused input/output linear, not .pt-serveable
+                    "input_linear": nn.Linear(8, 16, bias=False),
+                    "output_linear": nn.Linear(8, 8, bias=False),
+                    # router — leaf name is `layer` (block_sparse_moe.router.layer)
+                    "router": nn.ModuleDict({"layer": nn.Linear(8, n_experts, bias=False)}),
+                }
+            )
+
+        def _mamba():
+            return nn.ModuleDict(
+                {
+                    "in_proj": nn.Linear(8, 16, bias=False),
+                    "out_proj": nn.Linear(8, 8, bias=False),
+                }
+            )
+
+        self.layers = nn.ModuleList(
+            [
+                nn.ModuleDict(
+                    {
+                        "mamba": _mamba(),
+                        "block_sparse_moe": _block_sparse_moe(),
+                        "shared_mlp": _shared_mlp(),
+                    }
+                ),
+                nn.ModuleDict(
+                    {
+                        "self_attn": _attn(),
+                        "block_sparse_moe": _block_sparse_moe(),
+                        "shared_mlp": _shared_mlp(),
+                    }
+                ),
+            ]
+        )
+        self.lm_head = nn.Linear(8, 32, bias=False)
+
+    def get_output_embeddings(self):
+        return self.lm_head
+
+
+def test_granite_hybrid_adapts_attention_and_shared_mlp_only():
+    # Granite has no `.experts` submodule — MoE detection must fire on
+    # `block_sparse_moe`, and resolution must exclude the grouped experts + router
+    # (`block_sparse_moe.*`) and the Mamba SSM (`mamba.*`), keeping attention and
+    # the dense shared MLP — by full path, since shared_mlp and the experts share
+    # the `input_linear`/`output_linear` leaf names.
+    model = _GraniteHybridLike()
+    result = resolve_target_modules(model, "all-linear")
+    assert result == [
+        "layers.0.shared_mlp.input_linear",
+        "layers.0.shared_mlp.output_linear",
+        "layers.1.self_attn.k_proj",
+        "layers.1.self_attn.o_proj",
+        "layers.1.self_attn.q_proj",
+        "layers.1.self_attn.v_proj",
+        "layers.1.shared_mlp.input_linear",
+        "layers.1.shared_mlp.output_linear",
+    ]
+    assert not any(".block_sparse_moe." in name for name in result)  # no experts/router
+    assert not any(".mamba." in name for name in result)  # no SSM projections
+    assert not any("lm_head" in name for name in result)  # no output head
+
+
 def test_all_linear_expands_to_distinct_leaf_names_minus_head():
     model = _DenseLike()
     resolved = resolve_target_modules(model, "all-linear")
