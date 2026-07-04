@@ -70,6 +70,10 @@ def test_synthesize_lora_keys_one_layer_standard_targets():
         "model.layers.0.mlp.dense_4h_to_h.lora_A.default.weight",
         "model.layers.0.self_attention.query_key_value.lora_A.default.weight",
         "model.layers.0.self_attention.dense.lora_A.default.weight",
+        # GraniteMoeHybrid dense shared-MLP leaves (prevents a false no-op skip on
+        # granite-4.0-h-tiny, whose served tree exposes shared_mlp.input_linear).
+        "model.layers.0.shared_mlp.input_linear.lora_A.default.weight",
+        "model.layers.0.shared_mlp.output_linear.lora_A.default.weight",
     }
 
 

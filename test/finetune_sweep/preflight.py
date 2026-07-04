@@ -42,10 +42,16 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 #     with only the Llama leaves the heuristic saw 0 overlap and wrongly SKIPPED
 #     GLM-4. Extra targets can only ADD overlap, so this is strictly fail-open
 #     (never a false skip). Keep in sync with the in-container `targets` below.
+#   - GraniteMoeHybrid (ibm-granite/granite-4.0-h-tiny, served by the fork's
+#     granitemoehybrid.py): shared_mlp.{input_linear,output_linear}. The trainer's
+#     resolver adapts the dense shared MLP (experts/router/SSM excluded), and those
+#     leaves match vLLM's tree — without them the heuristic saw 0 overlap and wrongly
+#     SKIPPED granite. Extra targets only ADD overlap, so this stays fail-open.
 DEFAULT_LORA_TARGETS: dict[str, tuple[str, ...]] = {
     "self_attn": ("q_proj", "k_proj", "v_proj", "o_proj"),
     "mlp": ("gate_proj", "up_proj", "down_proj", "dense_h_to_4h", "dense_4h_to_h"),
     "self_attention": ("query_key_value", "dense"),
+    "shared_mlp": ("input_linear", "output_linear"),
 }
 
 
@@ -178,7 +184,8 @@ def run_introspection(model_id):
         targets = {"self_attn": ("q_proj", "k_proj", "v_proj", "o_proj"),
                    "mlp": ("gate_proj", "up_proj", "down_proj",
                            "dense_h_to_4h", "dense_4h_to_h"),
-                   "self_attention": ("query_key_value", "dense")}
+                   "self_attention": ("query_key_value", "dense"),
+                   "shared_mlp": ("input_linear", "output_linear")}
         synth = []
         for block, leaves in targets.items():
             for leaf in leaves:
