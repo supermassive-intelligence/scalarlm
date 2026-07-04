@@ -503,5 +503,12 @@ models:
     # qkv_proj, so confirm resolve_target_modules produces a target set that trains
     # cleanly on the SSM layers (nothing else in the sweep has state-space layers)
     # AND that the granitemoe grouped-expert converter path fires for memorization.
-    # MoE: lora_dropout:0 (has routed experts). bf16 + 450-step budget.
-    train_args: {dtype: bfloat16, max_steps: 450, warmup_steps: 30, steps_per_checkpoint: 450, lora_config: {lora_dropout: 0}}
+    # MoE: lora_dropout:0 (has routed experts). bf16. TUNED 2026-07-04: the default
+    # 3e-3 peak LR + 450-step budget DIVERGED — the resolver fix let it train and it
+    # memorized (loss 4.7->0.0003 by ~step 19, during warmup at LR ~1.9e-3), but when
+    # warmup finished (step 30) and LR pinned at full 3e-3 the loss EXPLODED to ~9
+    # (steps 32-42) then only slowly re-converged; also 450 steps x ~27.5s/step (Mamba
+    # is ~12x slower than a dense 7B on the GB10) can't fit train-timeout. So: peak LR
+    # 1e-3 (avoids the post-warmup blowup) + 90-step budget (captures the memorized
+    # minimum, ~41min, fits the timeout).
+    train_args: {dtype: bfloat16, learning_rate: 1.0e-3, max_steps: 90, warmup_steps: 20, steps_per_checkpoint: 90, lora_config: {lora_dropout: 0}}
