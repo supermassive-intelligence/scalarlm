@@ -446,21 +446,25 @@ models:
   - id: allenai/OLMo-2-1124-7B-Instruct        # Olmo2ForCausalLM; 7B dense; Apache-2.0, ungated
     cpu_ok: true
     adapters: {lora: {gate_gb: 18}}
-    # Fully-open dense family (reordered-norm), no MoE/hybrid quirks; vLLM lists
-    # Olmo2ForCausalLM as native + LoRA-servable. LOWEST-RISK of the three — the
-    # only unknown is whether the pinned vLLM-0.19 fork carries Olmo2 (serve
-    # step surfaces it). bf16 + 450-step budget per the other 7-8B real-instruct
-    # entries (mode-collapse-safe at this LR).
+    # Fully-open dense family (reordered-norm), no MoE/hybrid quirks. FORK CHECK
+    # PASSED (2026-07-04): the pinned vLLM-0.19 fork registers Olmo2ForCausalLM
+    # (olmo2.py present, declares SupportsLoRA), so base-load + serve is
+    # available. LOWEST-RISK of the three — expect PASS. bf16 + 450-step budget
+    # per the other 7-8B real-instruct entries (mode-collapse-safe at this LR).
     train_args: {dtype: bfloat16, max_steps: 450, warmup_steps: 30, steps_per_checkpoint: 450}
 
   - id: microsoft/Phi-mini-MoE-instruct         # PhiMoEForCausalLM; 7.6B/2.4B active; MIT, ungated
     adapters: {lora: {gate_gb: 20}}
-    # UNKNOWN: the SEPARATE-expert converter path. Phi-mini-MoE uses Mixtral-style
-    # per-expert w1/w2/w3 (16 exp top-2), a DIFFERENT PEFT export than the GROUPED
-    # Qwen3Moe experts the expert-LoRA converter is validated on. This is the small
-    # model that actually reaches the test Mixtral-8x7B died (at VRAM) before
-    # hitting. If the converter lacks a separate-expert branch, expect a serve
-    # no-op / set_lora failure here — that's the signal to add the branch.
+    # FORK CHECK PASSED (2026-07-04): fork registers PhiMoEForCausalLM (phimoe.py
+    # present, SupportsLoRA); its packed_modules_mapping exposes only qkv_proj, so
+    # ATTENTION/dense LoRA serves fine. REMAINING UNKNOWN: the SEPARATE-expert
+    # converter path for MEMORIZATION. Phi-mini-MoE uses Mixtral-style per-expert
+    # w1/w2/w3 (16 exp top-2), a DIFFERENT PEFT export than the GROUPED Qwen3Moe
+    # experts the expert-LoRA converter is validated on — and the MoE lesson is
+    # that experts (not attention/dense) are what carry memorization. This is the
+    # small model that actually reaches the test Mixtral-8x7B died (at VRAM) before
+    # hitting. If the converter lacks a separate-expert branch, expect serve OK but
+    # NO_MEMORIZATION (or a set_lora failure) — that's the signal to add the branch.
     # MoE: lora_dropout:0 (fork ParamWrapper rejects it on experts, same knob as
     # qwen3-moe-tiny / Qwen1.5-MoE). bf16 + 450-step budget.
     train_args: {dtype: bfloat16, max_steps: 450, warmup_steps: 30, steps_per_checkpoint: 450, lora_config: {lora_dropout: 0}}
@@ -468,12 +472,14 @@ models:
   - id: ibm-granite/granite-4.0-h-tiny          # GraniteMoeHybridForCausalLM; ~7B/~1B active; Apache-2.0, ungated
     adapters: {lora: {gate_gb: 18}}
     # NEW ARCH CATEGORY: hybrid Mamba-2 / attention + MoE (GQA + Mamba2 layers +
-    # routed MoE w/ shared experts, SwiGLU, RMSNorm, tied embeddings). Two unknowns
-    # stacked: (1) resolve_target_modules on SSM/Mamba projection layers — nothing
-    # else in the sweep has state-space layers, so confirm LoRA lands on a
-    # serveable subset and doesn't try to adapt the Mamba conv/ssm params; (2) the
-    # FORK-REGISTRY check is mandatory — upstream vLLM lists GraniteMoeHybrid as
-    # LoRA-servable, but the pinned vLLM-0.19 fork may not carry the hybrid arch,
-    # in which case the serve phase fails at model-load (informative, not a hang).
+    # routed MoE w/ shared experts, SwiGLU, RMSNorm, tied embeddings). FORK CHECK
+    # PASSED (2026-07-04): the fork registers GraniteMoeHybridForCausalLM
+    # (granitemoehybrid.py present, declares SupportsLoRA + IsHybrid + MambaMixer2
+    # + SupportsMambaPrefixCaching) — real hybrid serving, NOT a stub. REMAINING
+    # UNKNOWN is now on the TRAIN side: the fork's packed_modules_mapping exposes
+    # the MAMBA projections (conv1d / in_proj / input_linear) to LoRA alongside
+    # qkv_proj, so confirm resolve_target_modules produces a target set that trains
+    # cleanly on the SSM layers (nothing else in the sweep has state-space layers)
+    # AND that the granitemoe grouped-expert converter path fires for memorization.
     # MoE: lora_dropout:0 (has routed experts). bf16 + 450-step budget.
     train_args: {dtype: bfloat16, max_steps: 450, warmup_steps: 30, steps_per_checkpoint: 450, lora_config: {lora_dropout: 0}}

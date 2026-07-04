@@ -130,8 +130,9 @@ final decision.
 - `allenai/OLMo-2-1124-7B-Instruct` (`Olmo2ForCausalLM`) — 7B dense,
   Apache-2.0, ungated. **Fully-open** (data + code + weights), reordered-norm
   arch distinct from Llama/Qwen; a clean-room dense family with zero current
-  coverage. vLLM lists `Olmo2ForCausalLM` as ✅LoRA. *(added 2026-07-04;
-  not yet run.)*
+  coverage. **Fork check passed (2026-07-04):** fork registers
+  `Olmo2ForCausalLM` (`olmo2.py`, `SupportsLoRA`) — lowest-risk of the three,
+  expect PASS. *(added 2026-07-04; not yet run.)*
 
 ### 2. Multimodal / Conditional Generation
 
@@ -183,18 +184,25 @@ category by vendor/arch is higher-value than adding more Qwen2-VL sizes:
   routed MoE with shared experts, SwiGLU, RMSNorm, tied embeddings). Highest
   arch-diversity value here — it stresses `resolve_target_modules` on
   SSM/Mamba projection layers (which nothing else in the sweep has) *and* the
-  MoE expert-LoRA path in one model, at a size that fits co-located. vLLM
-  lists `GraniteMoeHybridForCausalLM` as ✅LoRA, but the **fork-registry check
-  is mandatory** — the pinned vLLM-0.19 fork may not carry the hybrid arch.
+  MoE expert-LoRA path in one model, at a size that fits co-located.
+  **Fork check passed (2026-07-04):** the pinned vLLM-0.19 fork registers
+  `GraniteMoeHybridForCausalLM` (`granitemoehybrid.py` present, declares
+  `SupportsLoRA` + `IsHybrid` + `MambaMixer2` — real hybrid serving). Its
+  `packed_modules_mapping` exposes the Mamba projections (`conv1d`/`in_proj`/
+  `input_linear`) to LoRA, so the live question is on the *train* side —
+  whether `resolve_target_modules` trains cleanly on the SSM layers.
   *(added 2026-07-04; not yet run.)*
 - `microsoft/Phi-mini-MoE-instruct` (`PhiMoEForCausalLM`) — 7.6B total /
   2.4B active, MIT, ungated, 4k context. Mixtral-style **SEPARATE** experts
   (per-expert `w1/w2/w3`), 16 experts top-2. **Directly closes the converter
   question Mixtral couldn't reach** (Mixtral died at VRAM before the
   separate-expert converter ran) — this is small enough to actually exercise
-  that path on the Spark. vLLM lists `PhiMoEForCausalLM` as ✅LoRA. Fork
-  ParamWrapper likely needs `lora_dropout: 0` (same knob as qwen3-moe-tiny /
-  Qwen1.5-MoE). *(added 2026-07-04; not yet run.)*
+  that path on the Spark. **Fork check passed (2026-07-04):** fork registers
+  `PhiMoEForCausalLM` (`phimoe.py`, `SupportsLoRA`); `packed_modules_mapping`
+  exposes only `qkv_proj`, so attention/dense LoRA serves — the live question
+  is expert-LoRA for *memorization* via a separate-expert converter branch.
+  Fork ParamWrapper likely needs `lora_dropout: 0` (same knob as
+  qwen3-moe-tiny / Qwen1.5-MoE). *(added 2026-07-04; not yet run.)*
 
 Larger frontier MoE releases (DeepSeek-V3.2, GLM-5.2, Kimi K2.6, Qwen3-235B-A22B,
 Qwen3-Coder-480B-A35B) are hundreds of billions of total params — well
