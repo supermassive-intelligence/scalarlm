@@ -406,22 +406,31 @@ models:
   # are ~210GiB in bf16 -> over the GB10's 128GiB unified pool even phase-scaled,
   # so the report tags them k8s/multi-GPU only. Not added here.
   #
-  # Mixtral is 47B total / 12.9B active -> ~94GiB bf16, fits the 128GiB pool with
-  # the cuda-spark phase_scaled flow (peak = 1 model), same staging as the
-  # Qwen3Moe 30-35B entries above. TARGET RESOLUTION is already covered: Mixtral
-  # names its router `block_sparse_moe.gate` (ends `.gate`) and its experts
-  # `block_sparse_moe.experts.*` (contains `.experts`), both of which
-  # resolve_target_modules._moe_servable_linear_paths excludes GENERICALLY by
-  # name (not via any Qwen3-specific assumption), so LoRA lands on attention +
-  # dense MLP and the `.pt` stays serveable. The one real VALIDATION UNKNOWN this
-  # run is meant to surface is the EXPERT-LoRA CONVERTER: it is validated ONLY on
-  # Qwen3Moe's GROUPED experts (fused ParamWrapper export). Mixtral uses SEPARATE
-  # experts (a per-expert ModuleList: w1/w2/w3), a DIFFERENT PEFT export, so the
-  # converter likely needs a Mixtral arch branch. Training should complete; the
-  # SERVE step is where a converter gap would show -- which is the point of adding
-  # it: the run pinpoints exactly what that branch must do.
-  - id: mistralai/Mixtral-8x7B-Instruct-v0.1   # MixtralForCausalLM; 47B/12.9B active; Apache-2.0, ungated
-    adapters: {lora: {gate_gb: 100}}
-    # MoE: disable lora_dropout (fork ParamWrapper rejects it on experts, same
-    # knob as qwen3-moe-tiny / Qwen1.5-MoE). bf16 + large-model budget.
-    train_args: {dtype: bfloat16, max_steps: 450, warmup_steps: 30, steps_per_checkpoint: 450, lora_config: {lora_dropout: 0}}
+  # Mixtral is 47B total / 12.9B active -> ~94GiB bf16. TARGET RESOLUTION is
+  # already covered: Mixtral names its router `block_sparse_moe.gate` (ends
+  # `.gate`) and its experts `block_sparse_moe.experts.*` (contains `.experts`),
+  # both of which resolve_target_modules._moe_servable_linear_paths excludes
+  # GENERICALLY by name, so LoRA lands on attention + dense MLP and the `.pt`
+  # stays serveable. The intended VALIDATION UNKNOWN was the EXPERT-LoRA CONVERTER
+  # (validated only on Qwen3Moe's GROUPED experts; Mixtral uses SEPARATE experts
+  # -- a per-expert w1/w2/w3 ModuleList, a different PEFT export).
+  #
+  # BLOCKED — VRAM (validated 2026-07-03 on cuda-spark / GB10 128GiB unified).
+  # The run NEVER reached the converter test: it died in PHASE-1 TRAINING at
+  # model-LOAD. Both slurm attempts loaded weights to ~35-38% of 291 shards, then
+  # got SIGTERM->SIGKILL; the co-resident phase-1 API (uvicorn) worker went down
+  # with it and did not recover, leaving the box hung (runner blocked polling a
+  # dead API). Not a container OOM-kill (OOMKilled=false, no mem limit) -- the 47B
+  # co-located train-phase load exceeds what the single Spark holds alongside the
+  # API server. This is the SAME "TRAIN model-load" wall the on-device device_map
+  # fix rescued at 30B (Qwen3-30B-A3B PASSed), now EXCEEDED at 47B. Needs a bigger
+  # box (multi-GPU / k8s phase-scaled with more headroom), NOT a single Spark.
+  # To validate the SEPARATE-expert converter path on the Spark, use a small
+  # separate-expert MoE instead: allenai/OLMoE-1B-7B-0924-Instruct (7B/1B active,
+  # ~14GiB bf16, top-8/64) fits co-located. Entry disabled so a cuda-spark sweep
+  # won't re-run it and re-hang the box; re-enable only on a larger target.
+  # - id: mistralai/Mixtral-8x7B-Instruct-v0.1   # MixtralForCausalLM; 47B/12.9B active; Apache-2.0, ungated
+  #   adapters: {lora: {gate_gb: 100}}
+  #   # MoE: disable lora_dropout (fork ParamWrapper rejects it on experts, same
+  #   # knob as qwen3-moe-tiny / Qwen1.5-MoE). bf16 + large-model budget.
+  #   train_args: {dtype: bfloat16, max_steps: 450, warmup_steps: 30, steps_per_checkpoint: 450, lora_config: {lora_dropout: 0}}
