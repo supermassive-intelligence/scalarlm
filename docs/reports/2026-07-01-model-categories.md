@@ -28,6 +28,8 @@ LoRA → serve → check memorization) where one has been observed. Legend:
 | `OpenGVLab/InternVL3-8B` | Multimodal (custom) | ⛔ TRAIN_FAILED | vendor code vs transformers 5.x — 4 layers deep; loads then `InternVLChatModel` has no `generation_config` (read by `add_eos_token`). |
 | `allenai/Molmo-7B-D-0924` | Multimodal (custom) | ⛔ TRAIN_FAILED | vendor code vs transformers 5.x — deepest; loads AND runs, fails in vision-language **forward compute** (tensor broadcast `[1,28,480,480]` vs `[1,1,28,480,480]`) — a real modeling bug, not a one-line shim. |
 | `mistralai/Mixtral-8x7B-Instruct-v0.1` | MoE (separate experts) | ⛔ VRAM | 47B/~94GiB bf16 dies in phase-1 **training model-load** (~37% of shards → SIGTERM/SIGKILL) and takes the co-resident API worker down on a single GB10 (128GiB unified). Same TRAIN-load wall the 30B cleared, exceeded at 47B. Needs a multi-GPU / larger-headroom target. Its intended converter test (SEPARATE-expert path) was never reached — use `allenai/OLMoE-1B-7B` on the Spark instead. |
+| `microsoft/Phi-mini-MoE-instruct` | MoE (separate experts) | ⛔ TRAIN_FAILED | Loads + inserts LoRA, then crashes on the **first forward**: `AttributeError: 'tuple' object has no attribute 'dtype'` inside the router. `resolve_target_modules` selected `mlp.router` as a LoRA target; PhiMoE's router returns a **tuple** `(routing_weights, selected_experts)` but the fork `ParamWrapper` assumes a tensor. Root cause: the router-exclusion in `_moe_servable_linear_paths` keys on the name `.gate` and misses PhiMoE's `.router`. Fixing that (exclude `.router`) reaches the deeper separate-expert-converter memorization question. |
+| `ibm-granite/granite-4.0-h-tiny` | Hybrid Mamba-2 + MoE | ⛔ PRECHECK_NO_OP | Preflight short-circuit (no train run wasted): `resolve_target_modules` produced generic MLP leaf names (`mlp.dense_h_to_4h`/`dense_4h_to_h`/`down_proj`) that don't exist on granite's hybrid naming (base has `shared_mlp`, `shared_mlp.input_linear`, …) → zero key overlap. Needs a `granitemoehybrid` branch in the resolver mapping to `shared_mlp`/`input_linear`/`output_linear` (and SSM-aware handling). |
 
 The three custom-code models above were accepted as blocked under
 systematic-debugging Phase 4.5 (each shim advances one layer and reveals the
@@ -127,12 +129,12 @@ final decision.
   arch coverage. **⛔ BLOCKED — TRAIN_FAILED** (added to sweep; custom
   ChatGLM code vs transformers 5.x, terminal at missing `use_cache`). Clean
   path is a natively-supported GLM, not a ChatGLM fork.
-- `allenai/OLMo-2-1124-7B-Instruct` (`Olmo2ForCausalLM`) — 7B dense,
+- `allenai/OLMo-2-1124-7B-Instruct` (`Olmo2ForCausalLM`) — ✅ **PASS** (2026-07-04,
+  cuda-spark: restart 68s / train 1035s / serve 10s; memorized). 7B dense,
   Apache-2.0, ungated. **Fully-open** (data + code + weights), reordered-norm
-  arch distinct from Llama/Qwen; a clean-room dense family with zero current
-  coverage. **Fork check passed (2026-07-04):** fork registers
-  `Olmo2ForCausalLM` (`olmo2.py`, `SupportsLoRA`) — lowest-risk of the three,
-  expect PASS. *(added 2026-07-04; not yet run.)*
+  arch distinct from Llama/Qwen; a clean-room dense family. **Fork check passed
+  (2026-07-04):** fork registers `Olmo2ForCausalLM` (`olmo2.py`, `SupportsLoRA`).
+  Was the lowest-risk of the three arch-diversity candidates — passed as predicted.
 
 ### 2. Multimodal / Conditional Generation
 
@@ -178,7 +180,11 @@ category by vendor/arch is higher-value than adding more Qwen2-VL sizes:
 - `meta-llama/Llama-4-Scout-17B-16E-Instruct` — 109B total / 17B active,
   gated (needs HF_TOKEN + license acceptance, same pattern as Llama-3.x
   entries). Also likely needs phase-scaling given total footprint.
-- `ibm-granite/granite-4.0-h-tiny` (`GraniteMoeHybridForCausalLM`) —
+- `ibm-granite/granite-4.0-h-tiny` (`GraniteMoeHybridForCausalLM`) — ⛔
+  **PRECHECK_NO_OP** (2026-07-04; the SSM/hybrid target-resolution unknown below
+  was confirmed as the blocker — `resolve_target_modules` emitted generic MLP
+  leaf names absent from granite's `shared_mlp`/`input_linear` naming, zero
+  overlap → preflight short-circuit, no train run wasted).
   ~7B total / ~1B active, Apache-2.0, ungated. **New architectural category
   for the sweep: hybrid Mamba-2 / attention + MoE** (GQA + Mamba2 layers +
   routed MoE with shared experts, SwiGLU, RMSNorm, tied embeddings). Highest
@@ -192,8 +198,13 @@ category by vendor/arch is higher-value than adding more Qwen2-VL sizes:
   `input_linear`) to LoRA, so the live question is on the *train* side —
   whether `resolve_target_modules` trains cleanly on the SSM layers.
   *(added 2026-07-04; not yet run.)*
-- `microsoft/Phi-mini-MoE-instruct` (`PhiMoEForCausalLM`) — 7.6B total /
-  2.4B active, MIT, ungated, 4k context. Mixtral-style **SEPARATE** experts
+- `microsoft/Phi-mini-MoE-instruct` (`PhiMoEForCausalLM`) — ⛔ **TRAIN_FAILED**
+  (2026-07-04; but it never reached the separate-expert converter question — it
+  died earlier on the first forward with `'tuple' object has no attribute 'dtype'`
+  because `resolve_target_modules` LoRA-wrapped `mlp.router`, whose tuple return
+  breaks the fork `ParamWrapper`; the router-exclusion keys on `.gate` and misses
+  `.router`. Fix that to reach the converter test.)
+  7.6B total / 2.4B active, MIT, ungated, 4k context. Mixtral-style **SEPARATE** experts
   (per-expert `w1/w2/w3`), 16 experts top-2. **Directly closes the converter
   question Mixtral couldn't reach** (Mixtral died at VRAM before the
   separate-expert converter ran) — this is small enough to actually exercise

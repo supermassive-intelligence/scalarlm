@@ -446,6 +446,8 @@ models:
   - id: allenai/OLMo-2-1124-7B-Instruct        # Olmo2ForCausalLM; 7B dense; Apache-2.0, ungated
     cpu_ok: true
     adapters: {lora: {gate_gb: 18}}
+    # RESULT 2026-07-04: PASS end-to-end on cuda-spark (restart 68s / train 1035s /
+    # serve 10s; memorized). As predicted, the lowest-risk of the three.
     # Fully-open dense family (reordered-norm), no MoE/hybrid quirks. FORK CHECK
     # PASSED (2026-07-04): the pinned vLLM-0.19 fork registers Olmo2ForCausalLM
     # (olmo2.py present, declares SupportsLoRA), so base-load + serve is
@@ -455,6 +457,15 @@ models:
 
   - id: microsoft/Phi-mini-MoE-instruct         # PhiMoEForCausalLM; 7.6B/2.4B active; MIT, ungated
     adapters: {lora: {gate_gb: 20}}
+    # RESULT 2026-07-04: TRAIN_FAILED on cuda-spark (train 251s), BUT NOT the
+    # separate-expert converter wall predicted below — it died EARLIER, on the
+    # first forward, with `AttributeError: 'tuple' object has no attribute 'dtype'`
+    # inside the router. resolve_target_modules selected `model.layers.N.mlp.router`
+    # as a LoRA target; PhiMoE's router RETURNS A TUPLE (routing_weights,
+    # selected_experts), but the fork ParamWrapper assumes a tensor and does
+    # `result.dtype`. Root cause: _moe_servable_linear_paths excludes the router by
+    # the name `.gate`, so it MISSES PhiMoE's `.router` and wraps it. Fix that
+    # (add `.router` to the router-exclusion) to REACH the memorization test below.
     # FORK CHECK PASSED (2026-07-04): fork registers PhiMoEForCausalLM (phimoe.py
     # present, SupportsLoRA); its packed_modules_mapping exposes only qkv_proj, so
     # ATTENTION/dense LoRA serves fine. REMAINING UNKNOWN: the SEPARATE-expert
@@ -471,6 +482,13 @@ models:
 
   - id: ibm-granite/granite-4.0-h-tiny          # GraniteMoeHybridForCausalLM; ~7B/~1B active; Apache-2.0, ungated
     adapters: {lora: {gate_gb: 18}}
+    # RESULT 2026-07-04: PRECHECK_NO_OP on cuda-spark (preflight short-circuit, no
+    # train run wasted). resolve_target_modules produced GENERIC MLP leaf names
+    # (mlp.dense_h_to_4h / mlp.dense_4h_to_h / mlp.down_proj) that DON'T EXIST on
+    # granite's hybrid naming (base has shared_mlp, shared_mlp.input_linear, ...);
+    # zero key overlap -> preflight NO_OP. Confirms the SSM/hybrid-aware target
+    # resolution unknown below is the real train-side blocker. The resolver needs a
+    # granitemoehybrid branch that maps to shared_mlp/input_linear/output_linear.
     # NEW ARCH CATEGORY: hybrid Mamba-2 / attention + MoE (GQA + Mamba2 layers +
     # routed MoE w/ shared experts, SwiGLU, RMSNorm, tied embeddings). FORK CHECK
     # PASSED (2026-07-04): the fork registers GraniteMoeHybridForCausalLM
