@@ -127,6 +127,11 @@ final decision.
   arch coverage. **⛔ BLOCKED — TRAIN_FAILED** (added to sweep; custom
   ChatGLM code vs transformers 5.x, terminal at missing `use_cache`). Clean
   path is a natively-supported GLM, not a ChatGLM fork.
+- `allenai/OLMo-2-1124-7B-Instruct` (`Olmo2ForCausalLM`) — 7B dense,
+  Apache-2.0, ungated. **Fully-open** (data + code + weights), reordered-norm
+  arch distinct from Llama/Qwen; a clean-room dense family with zero current
+  coverage. vLLM lists `Olmo2ForCausalLM` as ✅LoRA. *(added 2026-07-04;
+  not yet run.)*
 
 ### 2. Multimodal / Conditional Generation
 
@@ -172,6 +177,24 @@ category by vendor/arch is higher-value than adding more Qwen2-VL sizes:
 - `meta-llama/Llama-4-Scout-17B-16E-Instruct` — 109B total / 17B active,
   gated (needs HF_TOKEN + license acceptance, same pattern as Llama-3.x
   entries). Also likely needs phase-scaling given total footprint.
+- `ibm-granite/granite-4.0-h-tiny` (`GraniteMoeHybridForCausalLM`) —
+  ~7B total / ~1B active, Apache-2.0, ungated. **New architectural category
+  for the sweep: hybrid Mamba-2 / attention + MoE** (GQA + Mamba2 layers +
+  routed MoE with shared experts, SwiGLU, RMSNorm, tied embeddings). Highest
+  arch-diversity value here — it stresses `resolve_target_modules` on
+  SSM/Mamba projection layers (which nothing else in the sweep has) *and* the
+  MoE expert-LoRA path in one model, at a size that fits co-located. vLLM
+  lists `GraniteMoeHybridForCausalLM` as ✅LoRA, but the **fork-registry check
+  is mandatory** — the pinned vLLM-0.19 fork may not carry the hybrid arch.
+  *(added 2026-07-04; not yet run.)*
+- `microsoft/Phi-mini-MoE-instruct` (`PhiMoEForCausalLM`) — 7.6B total /
+  2.4B active, MIT, ungated, 4k context. Mixtral-style **SEPARATE** experts
+  (per-expert `w1/w2/w3`), 16 experts top-2. **Directly closes the converter
+  question Mixtral couldn't reach** (Mixtral died at VRAM before the
+  separate-expert converter ran) — this is small enough to actually exercise
+  that path on the Spark. vLLM lists `PhiMoEForCausalLM` as ✅LoRA. Fork
+  ParamWrapper likely needs `lora_dropout: 0` (same knob as qwen3-moe-tiny /
+  Qwen1.5-MoE). *(added 2026-07-04; not yet run.)*
 
 Larger frontier MoE releases (DeepSeek-V3.2, GLM-5.2, Kimi K2.6, Qwen3-235B-A22B,
 Qwen3-Coder-480B-A35B) are hundreds of billions of total params — well

@@ -434,3 +434,46 @@ models:
   #   # MoE: disable lora_dropout (fork ParamWrapper rejects it on experts, same
   #   # knob as qwen3-moe-tiny / Qwen1.5-MoE). bf16 + large-model budget.
   #   train_args: {dtype: bfloat16, max_steps: 450, warmup_steps: 30, steps_per_checkpoint: 450, lora_config: {lora_dropout: 0}}
+
+  # === Arch-diversity candidates (added 2026-07-04) ===
+  # From docs/reports/2026-07-01-model-categories.md §Potential Sweep Candidates,
+  # chosen to cover architecture families with ZERO current sweep coverage. All
+  # three are ~7-8B (~15GiB bf16) so they fit the cuda-spark unified pool
+  # co-located — no Mixtral-style VRAM-hang risk. Each carries a distinct
+  # VERIFICATION UNKNOWN called out inline; a clean TRAIN_FAILED/serve failure
+  # here is expected-territory (bounded per-model), not a harness bug.
+
+  - id: allenai/OLMo-2-1124-7B-Instruct        # Olmo2ForCausalLM; 7B dense; Apache-2.0, ungated
+    cpu_ok: true
+    adapters: {lora: {gate_gb: 18}}
+    # Fully-open dense family (reordered-norm), no MoE/hybrid quirks; vLLM lists
+    # Olmo2ForCausalLM as native + LoRA-servable. LOWEST-RISK of the three — the
+    # only unknown is whether the pinned vLLM-0.19 fork carries Olmo2 (serve
+    # step surfaces it). bf16 + 450-step budget per the other 7-8B real-instruct
+    # entries (mode-collapse-safe at this LR).
+    train_args: {dtype: bfloat16, max_steps: 450, warmup_steps: 30, steps_per_checkpoint: 450}
+
+  - id: microsoft/Phi-mini-MoE-instruct         # PhiMoEForCausalLM; 7.6B/2.4B active; MIT, ungated
+    adapters: {lora: {gate_gb: 20}}
+    # UNKNOWN: the SEPARATE-expert converter path. Phi-mini-MoE uses Mixtral-style
+    # per-expert w1/w2/w3 (16 exp top-2), a DIFFERENT PEFT export than the GROUPED
+    # Qwen3Moe experts the expert-LoRA converter is validated on. This is the small
+    # model that actually reaches the test Mixtral-8x7B died (at VRAM) before
+    # hitting. If the converter lacks a separate-expert branch, expect a serve
+    # no-op / set_lora failure here — that's the signal to add the branch.
+    # MoE: lora_dropout:0 (fork ParamWrapper rejects it on experts, same knob as
+    # qwen3-moe-tiny / Qwen1.5-MoE). bf16 + 450-step budget.
+    train_args: {dtype: bfloat16, max_steps: 450, warmup_steps: 30, steps_per_checkpoint: 450, lora_config: {lora_dropout: 0}}
+
+  - id: ibm-granite/granite-4.0-h-tiny          # GraniteMoeHybridForCausalLM; ~7B/~1B active; Apache-2.0, ungated
+    adapters: {lora: {gate_gb: 18}}
+    # NEW ARCH CATEGORY: hybrid Mamba-2 / attention + MoE (GQA + Mamba2 layers +
+    # routed MoE w/ shared experts, SwiGLU, RMSNorm, tied embeddings). Two unknowns
+    # stacked: (1) resolve_target_modules on SSM/Mamba projection layers — nothing
+    # else in the sweep has state-space layers, so confirm LoRA lands on a
+    # serveable subset and doesn't try to adapt the Mamba conv/ssm params; (2) the
+    # FORK-REGISTRY check is mandatory — upstream vLLM lists GraniteMoeHybrid as
+    # LoRA-servable, but the pinned vLLM-0.19 fork may not carry the hybrid arch,
+    # in which case the serve phase fails at model-load (informative, not a hang).
+    # MoE: lora_dropout:0 (has routed experts). bf16 + 450-step budget.
+    train_args: {dtype: bfloat16, max_steps: 450, warmup_steps: 30, steps_per_checkpoint: 450, lora_config: {lora_dropout: 0}}
