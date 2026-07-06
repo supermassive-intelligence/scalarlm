@@ -34,6 +34,7 @@ from, using these keys:
 | **G4D** | `docs/reports/2026-06-18-gemma4-dense-adapter-noop-diagnostic.md` — gemma-4-dense no-op |
 | **MEM** | memory index (`~/.claude/.../memory/MEMORY.md`) — e.g. archdiv sweep, VRAM ceiling notes |
 | **RUN0706** | `test/finetune_sweep/results/finetune.cuda-spark.20260706-095423.md` — fix-confirmation run (Phi-4-mini, Qwen2.5-VL, pixtral) |
+| **RUN0706b** | 2026-07-06 separate-expert MoE run (Phi-mini-MoE NO_MEM, OLMoE inconclusive); cancelled mid-serve, no results file — verdicts from log + job slurm diagnostics |
 
 ---
 
@@ -86,8 +87,21 @@ from, using these keys:
 
 | Model | Arch | State | Source |
 |---|---|---|---|
-| `microsoft/Phi-mini-MoE-instruct` | PhiMoE (7.6B/2.4B) | TRAIN_FAILED (router returned a tuple, wrapped as LoRA target). **Router-exclusion fix landed** (2ecf306); **separate-expert training targets landed** (plan step A). Re-run now trains experts but still serves without them (NO_MEM) until the **separate-expert serve converter** (plan step B) lands | YAML, MEM |
+| `microsoft/Phi-mini-MoE-instruct` | PhiMoE (7.6B/2.4B) | **NO_MEMORIZATION** (2026-07-06 run). Trains + serves cleanly (no `set_lora` crash), but loss floored at **~1.56** and **zero expert LoRA params** were saved → experts weren't adapted. Root cause: PhiMoE loads as **grouped** experts in transformers 5.x (no per-expert `nn.Linear`), so step A's separate-expert detection correctly didn't fire — and unlike Qwen3MoE, PEFT doesn't auto-adapt this grouped module. Attention-only can't memorize here | RUN0706b |
+| `allenai/OLMoE-1B-7B-0924-Instruct` | Olmoe (7B/1B active, 64 exp) | **INCONCLUSIVE** (2026-07-06, run cancelled). **Memorized in training** (loss **1e-4**) but **attention-only** — zero expert LoRA params saved (grouped-in-5.x, same as PhiMoE). Serve-check then **deadlocked** in a generate poll loop (work queue "already processed→skipping" ×135, 0 tok/s, no crash/OOM); cancelled to free the GPU. Does not validate the converter (experts never adapted) | RUN0706b |
 | `Qwen/Qwen1.5-MoE-A2.7B-Chat` | Qwen2MoE (14B/2.7B) | Trains + serves + adapter applied, but served string is **scrambled** → NO_MEMORIZATION. Cause: its **shared expert** is mis-mapped by the converter (validated only on routed grouped experts). Converter gap, deferred | P30B |
+
+> **Separate-expert converter (plan steps A+B) is CODE-COMPLETE but UNVALIDATED.**
+> The 2026-07-06 Spark run was meant to validate it on Phi-mini-MoE + OLMoE, but
+> **both load as grouped experts in transformers 5.x** (no per-expert `nn.Linear`),
+> so step A's detection correctly stayed off and the converter never received expert
+> tensors to serve. Confirmed by zero `experts.*` LoRA params in either adapter. The
+> only canonical separate-expert model (`Mixtral-8x7B`) is VRAM-blocked on the single
+> Spark. **Open finding:** PhiMoE/OLMoE grouped experts are a *third* representation —
+> neither PEFT-auto-adapted (like Qwen3MoE) nor per-expert Linears (step A) — so their
+> experts get no LoRA at all. Next step is a `named_modules` inspection to decide
+> whether Qwen3MoE-style grouped auto-adaptation should extend to this module type.
+> See `docs/superpowers/plans/2026-07-06-separate-expert-lora-converter.md`.
 
 ### Staged (configured, arch-precedent PASS, not yet run on GPU)
 | Model | Arch | Rationale | Source |

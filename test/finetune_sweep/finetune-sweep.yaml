@@ -507,11 +507,16 @@ models:
     # small model that actually reaches the test Mixtral-8x7B died (at VRAM) before
     # hitting. If the converter lacks a separate-expert branch, expect serve OK but
     # NO_MEMORIZATION (or a set_lora failure) — that's the signal to add the branch.
-    # UPDATE 2026-07-06: the separate-expert branch now EXISTS. Step A (resolve_
-    # target_modules includes separate experts.{i}.{w1,w2,w3}, commit f4e8314) trains
-    # them; step B (_stack_moe_lora_weights_separate + moe_lora_utils in the fork)
-    # stacks them for FusedMoEWithLoRA.set_lora. So expect PASS now (this run is the
-    # live validation). See docs/superpowers/plans/2026-07-06-separate-expert-lora-converter.md.
+    # RESULT 2026-07-06: NO_MEMORIZATION (RUN0706b). Trained + served cleanly (no
+    # set_lora crash) but loss floored at ~1.56 and ZERO expert LoRA params were saved
+    # -> experts were NOT adapted. Root cause: PhiMoE loads as GROUPED experts in
+    # transformers 5.x (no per-expert nn.Linear), so step A's separate-expert detection
+    # (_has_separate_experts, looks for experts.<int>. nn.Linear) correctly did NOT fire
+    # — and unlike Qwen3MoE, PEFT does not auto-adapt this grouped module. So the A+B
+    # separate-expert converter was NOT exercised; attention-only can't memorize here.
+    # NEXT: named_modules inspection to see the grouped layout and decide whether the
+    # Qwen3MoE-style grouped auto-adaptation should extend to PhiMoE/OLMoE-style experts.
+    # See docs/superpowers/plans/2026-07-06-separate-expert-lora-converter.md.
     # MoE: lora_dropout:0 (fork ParamWrapper rejects it on experts, same knob as
     # qwen3-moe-tiny / Qwen1.5-MoE). bf16 + 450-step budget.
     train_args: {dtype: bfloat16, max_steps: 450, warmup_steps: 30, steps_per_checkpoint: 450, lora_config: {lora_dropout: 0}}
@@ -558,10 +563,13 @@ models:
   - id: allenai/OLMoE-1B-7B-0924-Instruct       # OlmoeForCausalLM; 7B total / 1B active, 64 exp top-8; Apache-2.0, ungated
     adapters: {lora: {gate_gb: 20}}
     # Smallest REAL separate-expert MoE that fits cuda-spark co-located (~14GiB bf16);
-    # the model the Mixtral-VRAM note pointed to for validating the separate-expert
-    # path on the Spark. Its experts are a ModuleList of per-expert gate_proj/up_proj/
-    # down_proj Linears (the second SEPARATE_EXPERT_LEAF_TRIPLES branch). 64 experts x
-    # 3 proj x N layers is a large target set but the model is small (1B active).
-    # Expect PASS (or a clean characterized wall) via steps A+B.
+    # the model the Mixtral-VRAM note pointed to for validating the separate-expert path.
+    # RESULT 2026-07-06: INCONCLUSIVE (RUN0706b, run cancelled). Memorized in TRAINING
+    # (loss 1e-4) but ATTENTION-ONLY — zero expert LoRA params saved, because OLMoE (like
+    # PhiMoE) loads as GROUPED experts in transformers 5.x, NOT the per-expert nn.Linear
+    # ModuleList assumed here — so step A didn't fire and the A+B converter wasn't
+    # exercised. Serve-check then DEADLOCKED in a generate poll loop (work queue
+    # "already processed->skipping", 0 tok/s, no crash/OOM); cancelled to free the GPU.
+    # Doesn't validate the converter. Same grouped-in-5.x finding as Phi-mini-MoE above.
     # MoE: lora_dropout:0 (fork ParamWrapper rejects it on experts). bf16 + 450-step.
     train_args: {dtype: bfloat16, max_steps: 450, warmup_steps: 30, steps_per_checkpoint: 450, lora_config: {lora_dropout: 0}}
