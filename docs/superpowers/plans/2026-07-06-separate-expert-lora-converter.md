@@ -5,6 +5,12 @@
 Spark co-located) · **Unblocks:** Phi-mini-MoE, Mixtral-8x7B (once on a big-VRAM box),
 and the separate-expert family generally.
 
+> **Status (2026-07-06):** Step A landed — `resolve_target_modules` includes separate
+> experts (scalarlm, 15 tests). Step B landed — `_stack_moe_lora_weights_separate` +
+> torch-only `moe_lora_utils.stack_separate_expert_lora` in the vLLM fork
+> (`georgi/fix-tokenformer-moe-rank`, 6 tests). **Remaining: live Spark validation on
+> Phi-mini-MoE** (the runtime unknowns in "Layout unknowns" / "Validation" below).
+
 ## Goal
 
 Make a **separate-expert** MoE (per-expert `w1/w2/w3` `ModuleList`, not a fused
