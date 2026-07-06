@@ -57,15 +57,31 @@ class _NoOutputEmbeddings(nn.Module):
         return None
 
 
+class _GroupedExperts(nn.Module):
+    """Qwen3MoE-style *grouped* experts: batched weights held as `nn.Parameter`s
+    (no per-expert `nn.Linear`), matching transformers-5.x `Qwen3MoeExperts`. PEFT
+    adapts these on its own via `ParamWrapper` and the grouped serve converter
+    handles the fused export, so the resolver — which targets `nn.Linear` — never
+    lists them. (The real `qwen3-moe-tiny-random` loads as this grouped module,
+    per the PEFT `ParamWrapper(Qwen3MoeExperts)` tree in the 2026-06-30 report;
+    the earlier per-expert-`nn.Linear` stub was inaccurate for Qwen3MoE.)"""
+
+    def __init__(self, n_experts, dim=8, inter=8):
+        super().__init__()
+        self.gate_up_proj = nn.Parameter(torch.zeros(n_experts, dim, 2 * inter))
+        self.down_proj = nn.Parameter(torch.zeros(n_experts, inter, dim))
+
+
 class _MoeLike(nn.Module):
     """A miniature Qwen3MoE-style ...ForCausalLM mirroring `decoder_sparse_step`:
     some decoder layers carry a *dense* MLP (`gate_proj`/`up_proj`/`down_proj`)
-    and others a *sparse* MLP with a router (`gate`) + routed `experts`. By
-    default layer 0 is dense and layer 1 is sparse — the real
-    `qwen3-moe-tiny-random` layout (decoder_sparse_step=2). The routed experts
-    and the router can't be served from a .pt adapter, so resolution must adapt
-    attention + the dense MLP only — and by *full path*, since the dense MLP
-    shares leaf names with the experts."""
+    and others a *sparse* MLP with a router (`gate`) + GROUPED routed experts
+    (`_GroupedExperts`, nn.Parameters — not per-expert Linears). By default layer 0
+    is dense and layer 1 is sparse — the real `qwen3-moe-tiny-random` layout
+    (decoder_sparse_step=2). The grouped experts are adapted by PEFT itself and the
+    router can't be served from a .pt adapter, so resolution adapts attention + the
+    dense MLP only — and by *full path*, since the dense MLP shares leaf names with
+    (other) MoE submodules. See `_SeparateMoeLike` for the Mixtral/PhiMoE layout."""
 
     def __init__(self, sparse_layers=(1,), n_layers=2, n_experts=4, router_name="gate"):
         super().__init__()
@@ -98,16 +114,7 @@ class _MoeLike(nn.Module):
                     # it crashes PEFT (`'tuple' object has no attribute 'dtype'`).
                     # Resolution must exclude it by name regardless.
                     router_name: nn.Linear(8, n_experts, bias=False),
-                    "experts": nn.ModuleList(
-                        nn.ModuleDict(
-                            {
-                                "gate_proj": nn.Linear(8, 8, bias=False),
-                                "up_proj": nn.Linear(8, 8, bias=False),
-                                "down_proj": nn.Linear(8, 8, bias=False),
-                            }
-                        )
-                        for _ in range(n_experts)
-                    ),
+                    "experts": _GroupedExperts(n_experts),
                 }
             )
 
@@ -151,9 +158,11 @@ def test_moe_adapts_attention_and_dense_mlp_excluding_experts_and_router():
 
 
 def test_moe_excludes_router_named_router_phimoe():
-    # PhiMoE names its router `mlp.router` (not `gate`) and it is an nn.Linear
-    # subclass returning a tuple; LoRA-wrapping it crashes training. Resolution
-    # must exclude it just as it excludes Qwen3MoE's `gate`.
+    # The router-leaf rule: a router named `router` (not `gate`) must be excluded
+    # too. PhiMoE names its router `mlp.router` and it is an nn.Linear subclass
+    # returning a tuple; LoRA-wrapping it crashes training. Exercised here on the
+    # grouped fixture (the rule is layout-independent); the full separate-expert
+    # PhiMoE layout is covered in test_separate_expert_moe_* below.
     model = _MoeLike(sparse_layers=(1,), n_layers=2, router_name="router")
     result = resolve_target_modules(model, "all-linear")
     assert not any(name.endswith(".router") for name in result)  # router excluded
@@ -189,6 +198,172 @@ def test_moe_all_layers_sparse_adapts_attention_only():
         "layers.1.self_attn.v_proj",
     ]
     assert not any("mlp" in name for name in result)
+
+
+class _SeparateMoeLike(nn.Module):
+    """A miniature Mixtral/PhiMoE-style ...ForCausalLM whose routed experts are a
+    `ModuleList` of per-expert `nn.Linear` projections (`mlp.experts.{i}.{w1,w2,w3}`)
+    rather than a grouped param module. Unlike grouped Qwen3MoE, PEFT does NOT
+    auto-adapt these per-expert Linears, so resolution must INCLUDE them (by full
+    path) to train the experts — while still excluding the router and output head.
+    The separate-expert serve converter then stacks them for FusedMoEWithLoRA."""
+
+    def __init__(self, sparse_layers=(0,), n_layers=1, n_experts=2, router_name="router"):
+        super().__init__()
+
+        def _attn():
+            return nn.ModuleDict(
+                {
+                    "q_proj": nn.Linear(8, 8, bias=False),
+                    "k_proj": nn.Linear(8, 8, bias=False),
+                    "v_proj": nn.Linear(8, 8, bias=False),
+                    "o_proj": nn.Linear(8, 8, bias=False),
+                }
+            )
+
+        def _dense_mlp():
+            return nn.ModuleDict(
+                {
+                    "gate_proj": nn.Linear(8, 8, bias=False),
+                    "up_proj": nn.Linear(8, 8, bias=False),
+                    "down_proj": nn.Linear(8, 8, bias=False),
+                }
+            )
+
+        def _expert():  # Mixtral/PhiMoE per-expert SwiGLU: w1=gate, w3=up, w2=down.
+            return nn.ModuleDict(
+                {
+                    "w1": nn.Linear(8, 8, bias=False),
+                    "w2": nn.Linear(8, 8, bias=False),
+                    "w3": nn.Linear(8, 8, bias=False),
+                }
+            )
+
+        def _sparse_mlp():
+            return nn.ModuleDict(
+                {
+                    router_name: nn.Linear(8, n_experts, bias=False),
+                    "experts": nn.ModuleList(_expert() for _ in range(n_experts)),
+                }
+            )
+
+        self.layers = nn.ModuleList(
+            nn.ModuleDict(
+                {
+                    "self_attn": _attn(),
+                    "mlp": _sparse_mlp() if i in sparse_layers else _dense_mlp(),
+                }
+            )
+            for i in range(n_layers)
+        )
+        self.lm_head = nn.Linear(8, 32, bias=False)
+
+    def get_output_embeddings(self):
+        return self.lm_head
+
+
+def test_separate_expert_moe_includes_per_expert_linears():
+    # PhiMoE/Mixtral: per-expert nn.Linear experts (w1/w2/w3) ARE adapted — they
+    # carry memorization and the separate-expert converter can serve them, unlike
+    # grouped Qwen3MoE experts. Router (leaf `router`) and head stay excluded.
+    model = _SeparateMoeLike(sparse_layers=(0,), n_layers=1, n_experts=2)
+    result = resolve_target_modules(model, "all-linear")
+    assert result == [
+        "layers.0.mlp.experts.0.w1",
+        "layers.0.mlp.experts.0.w2",
+        "layers.0.mlp.experts.0.w3",
+        "layers.0.mlp.experts.1.w1",
+        "layers.0.mlp.experts.1.w2",
+        "layers.0.mlp.experts.1.w3",
+        "layers.0.self_attn.k_proj",
+        "layers.0.self_attn.o_proj",
+        "layers.0.self_attn.q_proj",
+        "layers.0.self_attn.v_proj",
+    ]
+    assert any(".experts.0.w1" in name for name in result)  # experts INCLUDED
+    assert not any(name.endswith(".router") for name in result)  # router excluded
+    assert not any("lm_head" in name for name in result)  # no output head
+
+
+def test_separate_expert_moe_includes_experts_and_dense_mlp():
+    # A mixed model (layer 0 dense, layer 1 sparse): the dense MLP AND the sparse
+    # layer's per-expert Linears are both adapted, plus attention on every layer.
+    model = _SeparateMoeLike(sparse_layers=(1,), n_layers=2, n_experts=2)
+    result = resolve_target_modules(model, "all-linear")
+    assert "layers.0.mlp.gate_proj" in result  # dense MLP on the dense layer
+    assert "layers.1.mlp.experts.1.w2" in result  # per-expert on the sparse layer
+    assert "layers.0.self_attn.q_proj" in result
+    assert not any(name.endswith(".router") for name in result)
+    assert not any("lm_head" in name for name in result)
+
+
+class _MixtralLike(nn.Module):
+    """Mixtral names its MoE block `block_sparse_moe` with a `gate` router and
+    per-expert `experts.{i}.{w1,w2,w3}` Linears. Resolution must INCLUDE the
+    per-expert Linears (separate layout) while still excluding the `gate` router —
+    verifying the separate-expert branch fires before the `.block_sparse_moe`
+    grouped-exclusion (which is only meant for Granite's fused experts)."""
+
+    def __init__(self, n_experts=2):
+        super().__init__()
+
+        def _expert():
+            return nn.ModuleDict(
+                {
+                    "w1": nn.Linear(8, 8, bias=False),
+                    "w2": nn.Linear(8, 8, bias=False),
+                    "w3": nn.Linear(8, 8, bias=False),
+                }
+            )
+
+        self.layers = nn.ModuleList(
+            [
+                nn.ModuleDict(
+                    {
+                        "self_attn": nn.ModuleDict(
+                            {
+                                "q_proj": nn.Linear(8, 8, bias=False),
+                                "k_proj": nn.Linear(8, 8, bias=False),
+                                "v_proj": nn.Linear(8, 8, bias=False),
+                                "o_proj": nn.Linear(8, 8, bias=False),
+                            }
+                        ),
+                        "block_sparse_moe": nn.ModuleDict(
+                            {
+                                "gate": nn.Linear(8, n_experts, bias=False),  # router
+                                "experts": nn.ModuleList(
+                                    _expert() for _ in range(n_experts)
+                                ),
+                            }
+                        ),
+                    }
+                )
+            ]
+        )
+        self.lm_head = nn.Linear(8, 32, bias=False)
+
+    def get_output_embeddings(self):
+        return self.lm_head
+
+
+def test_mixtral_block_sparse_moe_separate_experts_included_router_excluded():
+    model = _MixtralLike(n_experts=2)
+    result = resolve_target_modules(model, "all-linear")
+    assert result == [
+        "layers.0.block_sparse_moe.experts.0.w1",
+        "layers.0.block_sparse_moe.experts.0.w2",
+        "layers.0.block_sparse_moe.experts.0.w3",
+        "layers.0.block_sparse_moe.experts.1.w1",
+        "layers.0.block_sparse_moe.experts.1.w2",
+        "layers.0.block_sparse_moe.experts.1.w3",
+        "layers.0.self_attn.k_proj",
+        "layers.0.self_attn.o_proj",
+        "layers.0.self_attn.q_proj",
+        "layers.0.self_attn.v_proj",
+    ]
+    # The `gate` router under block_sparse_moe is excluded despite the experts
+    # under the same subtree being included.
+    assert not any(name.endswith(".gate") for name in result)
 
 
 class _GraniteHybridLike(nn.Module):
