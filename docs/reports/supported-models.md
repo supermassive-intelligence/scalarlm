@@ -33,6 +33,7 @@ from, using these keys:
 | **GRAN** | `docs/reports/2026-07-04-granite-hybrid-lora-pass.md` — granite hybrid PASS |
 | **G4D** | `docs/reports/2026-06-18-gemma4-dense-adapter-noop-diagnostic.md` — gemma-4-dense no-op |
 | **MEM** | memory index (`~/.claude/.../memory/MEMORY.md`) — e.g. archdiv sweep, VRAM ceiling notes |
+| **RUN0706** | `test/finetune_sweep/results/finetune.cuda-spark.20260706-095423.md` — fix-confirmation run (Phi-4-mini, Qwen2.5-VL, pixtral) |
 
 ---
 
@@ -56,6 +57,14 @@ from, using these keys:
 | `google/gemma-3-4b-it` | Gemma3 | gated; earlier "serve no-op" was cross-arch contamination, since fixed | SS22 |
 | `EssentialAI/rnj-1-instruct` | Gemma3 (8B) | bf16 | SS22 |
 | `allenai/OLMo-2-1124-7B-Instruct` | Olmo2 | PASS 2026-07-04 (restart 68s / train 1035s / serve 10s) | YAML, MEM |
+| `microsoft/Phi-4-mini-instruct` | Phi3 (~3.8B) | PASS 2026-07-06 (train 537s); **lr 1e-3** fix confirmed (default 3e-3 oscillated → NO_MEM) | RUN0706, YAML |
+
+### Multimodal (VLM)
+| Model | Arch | Notes | Source |
+|---|---|---|---|
+| `Qwen/Qwen2-VL-7B-Instruct` | Qwen2-VL | fp32, 900-step (budget-starved at 450); the first validated VLM PASS | SS22 |
+| `Qwen/Qwen2.5-VL-7B-Instruct` | Qwen2.5-VL | PASS 2026-07-06 (train 3647s); 900-step, `train_timeout: 4800` | RUN0706, YAML |
+| `mistral-community/pixtral-12b` | Llava (12B) | PASS 2026-07-06 (train 2417s); **bf16 + lr 5e-4** fixes the end-of-warmup divergence | RUN0706, YAML |
 
 ### MoE (routed-expert LoRA)
 | Model | Arch | Notes | Source |
@@ -77,11 +86,8 @@ from, using these keys:
 
 | Model | Arch | State | Source |
 |---|---|---|---|
-| `microsoft/Phi-4-mini-instruct` | Phi3 (~3.8B) | Serves fine; default lr 3e-3 oscillated → NO_MEM. **Fix applied** (lr 1e-3, 450-step); PASS expected on confirmation | YAML |
-| `microsoft/Phi-mini-MoE-instruct` | PhiMoE (7.6B/2.4B) | TRAIN_FAILED (router returned a tuple, wrapped as LoRA target). **Router-exclusion fix landed** (2ecf306). Re-run expected to serve but likely NO_MEM — the **separate-expert converter** question (Mixtral-style per-expert w1/w2/w3, unlike the validated grouped Qwen3MoE) | YAML, MEM |
+| `microsoft/Phi-mini-MoE-instruct` | PhiMoE (7.6B/2.4B) | TRAIN_FAILED (router returned a tuple, wrapped as LoRA target). **Router-exclusion fix landed** (2ecf306); **separate-expert training targets landed** (plan step A). Re-run now trains experts but still serves without them (NO_MEM) until the **separate-expert serve converter** (plan step B) lands | YAML, MEM |
 | `Qwen/Qwen1.5-MoE-A2.7B-Chat` | Qwen2MoE (14B/2.7B) | Trains + serves + adapter applied, but served string is **scrambled** → NO_MEMORIZATION. Cause: its **shared expert** is mis-mapped by the converter (validated only on routed grouped experts). Converter gap, deferred | P30B |
-| `Qwen/Qwen2.5-VL-7B-Instruct` | Qwen2.5-VL (mm) | Same family as PASSing Qwen2-VL-7B; 900-step budget, needed timeout raised to 4800s (loss 0.006 @ step 849). Expected PASS | YAML |
-| `mistral-community/pixtral-12b` | Llava (mm, 12B) | Serves fine; bf16 + **lr 5e-4** fixes the end-of-warmup divergence that caused NO_MEM. Expected PASS after fix | YAML, MEM |
 
 ### Staged (configured, arch-precedent PASS, not yet run on GPU)
 | Model | Arch | Rationale | Source |
