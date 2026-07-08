@@ -15,7 +15,10 @@ from types import SimpleNamespace
 import torch
 import torch.nn as nn
 
-from adapters.resolve_target_modules import resolve_target_modules
+from adapters.resolve_target_modules import (
+    resolve_target_modules,
+    resolve_target_parameters,
+)
 
 
 class _DenseLike(nn.Module):
@@ -198,6 +201,33 @@ def test_moe_all_layers_sparse_adapts_attention_only():
         "layers.1.self_attn.v_proj",
     ]
     assert not any("mlp" in name for name in result)
+
+
+def test_grouped_experts_yield_expert_target_parameters():
+    # A grouped experts module (named `experts`, as it always is in a real decoder)
+    # exposes its batched projections as the target_parameters PEFT needs —
+    # target_modules can't reach bare nn.Parameters.
+    holder = nn.ModuleDict({"experts": _GroupedExperts(n_experts=4)})
+    assert resolve_target_parameters(holder) == ["down_proj", "gate_up_proj"]
+
+
+def test_grouped_moe_target_parameters_regardless_of_dense_layer():
+    # Grouped MoE with a dense layer (Qwen3MoE-like) AND all-sparse (OLMoE-like):
+    # both must surface the grouped expert params. This is the fix — OLMoE/PhiMoE
+    # have no dense layer to seed PEFT's own conversion, so without naming these
+    # params their experts got no LoRA.
+    assert resolve_target_parameters(_MoeLike(sparse_layers=(1,), n_layers=2)) == [
+        "down_proj",
+        "gate_up_proj",
+    ]
+    assert resolve_target_parameters(_MoeLike(sparse_layers=(0, 1), n_layers=2)) == [
+        "down_proj",
+        "gate_up_proj",
+    ]
+
+
+def test_dense_model_has_no_expert_target_parameters():
+    assert resolve_target_parameters(_DenseLike()) == []
 
 
 class _SeparateMoeLike(nn.Module):
@@ -467,6 +497,16 @@ def test_granite_hybrid_adapts_attention_and_shared_mlp_only():
     assert not any("lm_head" in name for name in result)  # no output head
 
 
+def test_no_expert_target_parameters_for_non_grouped_layouts():
+    # target_parameters is ONLY for grouped bare-nn.Parameter experts. Separate
+    # per-expert nn.Linear experts (Mixtral/PhiMoE-in-v4) are trained via
+    # target_modules, and Granite's nn.Linear-fused experts expose no bare param —
+    # all three must yield NO target_parameters (else PEFT double-wraps / errors).
+    assert resolve_target_parameters(_SeparateMoeLike(sparse_layers=(0,), n_layers=1)) == []
+    assert resolve_target_parameters(_MixtralLike(n_experts=2)) == []
+    assert resolve_target_parameters(_GraniteHybridLike()) == []
+
+
 def test_all_linear_expands_to_distinct_leaf_names_minus_head():
     model = _DenseLike()
     resolved = resolve_target_modules(model, "all-linear")
@@ -565,6 +605,108 @@ def test_multimodal_resolution_excludes_output_head():
     model = _MultimodalModel()
     resolved = resolve_target_modules(model, "all-linear")
     assert not any(name.endswith("lm_head") for name in resolved)
+
+
+class _MoeDecoder(nn.Module):
+    """A Qwen3.5-VL-MoE-style language decoder: HYBRID attention (full `self_attn`
+    + linear-attention `linear_attn` GatedDeltaNet) with an all-MoE MLP — grouped
+    routed experts (`_GroupedExperts` nn.Parameters), an always-on dense
+    `shared_expert`, a `shared_expert_gate`, and a `gate` router."""
+
+    def __init__(self, n_layers=2):
+        super().__init__()
+
+        def _layer():
+            return nn.ModuleDict(
+                {
+                    "self_attn": nn.ModuleDict(
+                        {
+                            "q_proj": nn.Linear(8, 8, bias=False),
+                            "k_proj": nn.Linear(8, 8, bias=False),
+                            "v_proj": nn.Linear(8, 8, bias=False),
+                            "o_proj": nn.Linear(8, 8, bias=False),
+                        }
+                    ),
+                    "linear_attn": nn.ModuleDict(
+                        {
+                            "in_proj_qkv": nn.Linear(8, 8, bias=False),
+                            "out_proj": nn.Linear(8, 8, bias=False),
+                        }
+                    ),
+                    "mlp": nn.ModuleDict(
+                        {
+                            "experts": _GroupedExperts(4),
+                            "shared_expert": nn.ModuleDict(
+                                {
+                                    "gate_proj": nn.Linear(8, 8, bias=False),
+                                    "up_proj": nn.Linear(8, 8, bias=False),
+                                    "down_proj": nn.Linear(8, 8, bias=False),
+                                }
+                            ),
+                            "shared_expert_gate": nn.Linear(8, 1, bias=False),
+                            "gate": nn.Linear(8, 4, bias=False),
+                        }
+                    ),
+                }
+            )
+
+        self.layers = nn.ModuleList([_layer() for _ in range(n_layers)])
+
+
+class _MultimodalMoeModel(nn.Module):
+    """Qwen3.5-VL-MoE-shaped (`Qwen3_5MoeForConditionalGeneration`): a multimodal
+    wrapper whose language decoder is itself MoE + hybrid-attention."""
+
+    def __init__(self):
+        super().__init__()
+        self.config = SimpleNamespace(vision_config=SimpleNamespace(hidden_size=8))
+        self.language_model = _MoeDecoder()
+        self.vision_tower = _VisionTower()
+        self.lm_head = nn.Linear(8, 32, bias=False)
+
+    def get_decoder(self):
+        return self.language_model
+
+    def get_output_embeddings(self):
+        return self.lm_head
+
+
+def test_multimodal_moe_confines_to_decoder_attention_and_shared_expert():
+    # Qwen3.5-VL-MoE: the multimodal branch is MoE-aware, so LoRA lands on the
+    # decoder's attention + dense shared_expert ONLY — never the vision tower, the
+    # router (`gate` / `shared_expert_gate`), the linear-attention SSM
+    # (`linear_attn`), or the grouped routed experts (those go via
+    # target_parameters). shared_expert carries memorization (granite precedent).
+    model = _MultimodalMoeModel()
+    resolved = resolve_target_modules(model, "all-linear")
+    assert resolved == [
+        "language_model.layers.0.mlp.shared_expert.down_proj",
+        "language_model.layers.0.mlp.shared_expert.gate_proj",
+        "language_model.layers.0.mlp.shared_expert.up_proj",
+        "language_model.layers.0.self_attn.k_proj",
+        "language_model.layers.0.self_attn.o_proj",
+        "language_model.layers.0.self_attn.q_proj",
+        "language_model.layers.0.self_attn.v_proj",
+        "language_model.layers.1.mlp.shared_expert.down_proj",
+        "language_model.layers.1.mlp.shared_expert.gate_proj",
+        "language_model.layers.1.mlp.shared_expert.up_proj",
+        "language_model.layers.1.self_attn.k_proj",
+        "language_model.layers.1.self_attn.o_proj",
+        "language_model.layers.1.self_attn.q_proj",
+        "language_model.layers.1.self_attn.v_proj",
+    ]
+    assert not any("vision_tower" in n for n in resolved)  # vision tower off
+    assert not any(".linear_attn." in n for n in resolved)  # SSM off
+    assert not any(".experts" in n for n in resolved)  # grouped experts off
+    assert not any(n.endswith(".gate") or n.endswith("_gate") for n in resolved)  # routers off
+
+
+def test_multimodal_moe_grouped_experts_via_target_parameters():
+    # The grouped routed experts are unreachable by target_modules (nn.Parameters),
+    # so resolve_target_parameters names them for PEFT's ParamWrapper — exactly the
+    # {gate_up_proj, down_proj} set (requires lora_dropout=0 at train time).
+    model = _MultimodalMoeModel()
+    assert resolve_target_parameters(model) == ["down_proj", "gate_up_proj"]
 
 
 def test_explicit_list_is_passed_through_unchanged():

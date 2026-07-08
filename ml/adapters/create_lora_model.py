@@ -5,7 +5,10 @@ import logging
 
 from peft import get_peft_model, LoraConfig, TaskType
 
-from adapters.resolve_target_modules import resolve_target_modules
+from adapters.resolve_target_modules import (
+    resolve_target_modules,
+    resolve_target_parameters,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +29,17 @@ def create_lora_model(model, device, train_lm_head=False):
     lora_config["target_modules"] = resolve_target_modules(
         model, lora_config.get("target_modules", "all-linear")
     )
+
+    # Grouped-expert MoEs (Qwen3MoE/OLMoE/PhiMoE) hold their experts as batched
+    # nn.Parameters that `target_modules` can't reach. Name them in
+    # `target_parameters` so PEFT wraps them (ParamWrapper); without this OLMoE/
+    # PhiMoE experts get NO LoRA and can't memorize. This is the same param set
+    # PEFT derives for Qwen3MoE on its own, so grouped models with a dense layer
+    # are unaffected. See resolve_target_parameters.
+    expert_parameters = resolve_target_parameters(model)
+    if expert_parameters:
+        existing = lora_config.get("target_parameters") or []
+        lora_config["target_parameters"] = sorted(set(existing) | set(expert_parameters))
 
     logger.info(f"LoRA config: {lora_config}")
 

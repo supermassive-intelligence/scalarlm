@@ -152,15 +152,23 @@ def _moe_servable_linear_paths(model, output_embeddings, separate_experts=False)
             continue
         if module_name.endswith("lm_head"):  # head, when output_embeddings is None
             continue
-        if ".mamba" in module_name:  # Mamba-2 SSM projections (in_proj/out_proj) — not adapted
+        if ".mamba" in module_name or ".linear_attn" in module_name:
+            # SSM / linear-attention projections — not adapted (untested/unserved
+            # by the .pt LoRA path). `.mamba` = GraniteMoeHybrid's Mamba-2
+            # (in_proj/out_proj); `.linear_attn` = Qwen3.5's GatedDeltaNet
+            # (in_proj_a/b/qkv/z, out_proj, conv1d), the linear-attention half of
+            # its hybrid full/linear-attention stack.
             continue
-        # The MoE router — exclude by leaf name. Adapting it would perturb expert
-        # selection, and its leaf name varies by arch: `gate` (Qwen3MoE/Mixtral) or
-        # `router` (PhiMoE, whose router is an nn.Linear subclass returning a
-        # tuple, so LoRA-wrapping it crashes with `'tuple' object has no
-        # attribute 'dtype'`). `gate_proj` (a dense MLP projection we DO adapt)
-        # is a different leaf, so an exact-name match leaves it untouched.
-        if module_name.rsplit(".", 1)[-1] in ("gate", "router"):
+        # The MoE router / gate — exclude by leaf name. Adapting it would perturb
+        # expert selection, and its leaf name varies by arch: `gate` (Qwen3MoE/
+        # Mixtral), `router` (PhiMoE, whose router is an nn.Linear subclass
+        # returning a tuple, so LoRA-wrapping it crashes with `'tuple' object has
+        # no attribute 'dtype'`), or a `*_gate` (Qwen3.5's `shared_expert_gate`,
+        # which routes the shared expert). The dense projections we DO adapt end in
+        # `_proj` (`gate_proj`/`up_proj`), so an exact/suffix match leaves them
+        # untouched.
+        leaf = module_name.rsplit(".", 1)[-1]
+        if leaf in ("gate", "router") or leaf.endswith("_gate"):
             continue
         # A per-expert projection (`experts.{i}.*`). In a separate-expert model
         # these ARE the memorization-carrying weights and the separate-expert
@@ -178,6 +186,50 @@ def _moe_servable_linear_paths(model, output_embeddings, separate_experts=False)
     return paths
 
 
+def resolve_target_parameters(model) -> list[str]:
+    """Leaf names of the batched `nn.Parameter` expert projections that PEFT must
+    be told to adapt via `LoraConfig.target_parameters` — for *grouped*-expert
+    MoEs whose experts are a single module holding `(num_experts, …)` parameters
+    (`gate_up_proj`/`down_proj`), not per-expert `nn.Linear`s.
+
+    Why this is needed. PEFT's `target_modules` only matches `nn.Module`s, so it
+    cannot reach a bare expert `nn.Parameter`. PEFT *does* adapt grouped experts
+    for some models, but ONLY as a side effect of its transformers-v5 MoE weight
+    conversion (`peft/utils/transformers_weight_conversion.py::_convert_peft_config_moe`),
+    which fires only when a *dense* MLP layer's `gate_proj/up_proj/down_proj` leaves
+    are ALREADY in `target_modules`. Qwen3MoE has such a dense layer
+    (`decoder_sparse_step`) so its experts get adapted; all-MoE OLMoE (no dense
+    layer, though `olmoe` IS in PEFT's conversion map) and PhiMoE (`phimoe` NOT in
+    the map) do NOT — their experts silently receive no LoRA and the model can only
+    lean on attention, which cannot memorize (the whole MoE lesson). Naming the
+    expert params here makes PEFT wrap them directly (ParamWrapper), producing the
+    exact `{experts}.base_layer` = gate_up / `{experts}` = down tensors the grouped
+    serve converter (vLLM `_stack_moe_lora_weights_gated`) already consumes — the
+    same result Qwen3MoE gets, but without depending on a dense layer.
+
+    Returns leaf-name suffixes (PEFT matches `target_parameters` by suffix). This
+    is exactly the `{gate_up_proj, down_proj}` set PEFT itself derives for Qwen3MoE,
+    so grouped models that already have a dense layer are unaffected (same set,
+    unioned). Empty for dense models, for *separate* per-expert `nn.Linear` experts
+    (Mixtral/PhiMoE-in-v4 — adapted via `target_modules`), and for `nn.Linear`-fused
+    grouped experts (GraniteMoeHybrid `block_sparse_moe.{input,output}_linear`) —
+    none of which expose bare batched expert parameters. Requires
+    `lora_config.lora_dropout == 0` (PEFT's ParamWrapper rejects dropout), which the
+    MoE sweep entries already set. See
+    `docs/superpowers/plans/2026-07-06-separate-expert-lora-converter.md`."""
+    leaves: set[str] = set()
+    for name, module in model.named_modules():
+        if name.rsplit(".", 1)[-1] != "experts":
+            continue
+        for pname, param in module.named_parameters(recurse=False):
+            # A batched (num_experts, in, out) projection — 3-D distinguishes it
+            # from a router/norm scalar and from the per-expert nn.Linear layout
+            # (whose weights live under `experts.{i}`, not directly on `experts`).
+            if param.dim() >= 2:
+                leaves.add(pname)
+    return sorted(leaves)
+
+
 def resolve_target_modules(model, target_modules):
     """If `target_modules` is the "all-linear" shorthand, resolve it against the
     live `model`:
@@ -185,7 +237,11 @@ def resolve_target_modules(model, target_modules):
     - **multimodal** (config has `vision_config`, `get_decoder()` available):
       the full dotted paths of every `nn.Linear` under the language decoder,
       excluding the output head. PEFT matches these exactly, so a vision tower
-      reusing the same leaf names is not adapted.
+      reusing the same leaf names is not adapted. When the decoder is ALSO MoE
+      (Qwen3.5-VL-MoE), the MoE-servable filter is applied within the decoder
+      scope too — router / SSM (`.linear_attn`) / grouped experts are dropped,
+      leaving attention + the dense `shared_expert`; grouped experts are adapted
+      via `target_parameters`.
     - **MoE** (has routed `.experts`/`.block_sparse_moe` submodules, non-multimodal):
       the sorted *full paths* of every adaptable `nn.Linear` — attention (all
       layers) plus any dense (non-sparse) MLP — always excluding the router (leaf
@@ -215,13 +271,33 @@ def resolve_target_modules(model, target_modules):
     if decoder is not None:
         prefix = _module_prefix(model, decoder)
         if prefix is not None:
-            return sorted(
-                name
-                for name, module in model.named_modules()
-                if isinstance(module, nn.Linear)
-                and module is not output_embeddings
-                and (name == prefix or name.startswith(prefix + "."))
-            )
+            def _under_decoder(name):
+                return name == prefix or name.startswith(prefix + ".")
+            if _is_moe_model(model):
+                # Multimodal MoE (e.g. Qwen3.5-VL-MoE `Qwen3_5MoeForConditionalGeneration`):
+                # confine to the language decoder AND apply the MoE-servable filter
+                # so LoRA lands on attention + the dense, always-on `shared_expert`
+                # (the memorization carrier, like granite's `shared_mlp`) — NOT the
+                # router, the GatedDeltaNet SSM (`.linear_attn`), or the grouped
+                # routed experts (which go via `target_parameters`). The plain
+                # multimodal path below would adapt all of those. Full paths, as the
+                # dense/shared-expert and expert projections share leaf names.
+                separate = _has_separate_experts(model)
+                paths = _moe_servable_linear_paths(
+                    model, output_embeddings, separate_experts=separate)
+                scoped = sorted(p for p in paths if _under_decoder(p))
+                if scoped:
+                    return scoped
+                # Nothing matched under the decoder — fall through rather than
+                # adapt nothing.
+            else:
+                return sorted(
+                    name
+                    for name, module in model.named_modules()
+                    if isinstance(module, nn.Linear)
+                    and module is not output_embeddings
+                    and _under_decoder(name)
+                )
         # get_decoder() returned a module we couldn't locate — fall through to
         # the dense path rather than silently adapt nothing.
 
