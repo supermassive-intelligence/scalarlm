@@ -8,7 +8,10 @@ for two reasons:
    some architectures (observed for Qwen3MoeForCausalLM) and PEFT falls back to
    iterating the literal string as a *set of characters*, raising
    `Target modules {'-','l','n','r','i','a','e'} not found` — the `qwen3-moe`
-   TRAIN_FAILED in the cuda-spark sweep.
+   TRAIN_FAILED in the cuda-spark sweep. We also keep LoRA off the routed
+   experts (their fused LoRA isn't `.pt`-serveable) while still adapting the
+   attention and any dense MLP — see `_moe_servable_linear_paths` and
+   `docs/reports/2026-06-30-moe-expert-lora-serving.md`.
 
 2. **Multimodal.** For a `...ForConditionalGeneration` wrapper, "all-linear"
    would also adapt the vision encoder. PEFT matches `target_modules` by name
@@ -60,34 +63,72 @@ def _module_prefix(model, target) -> str | None:
     return None
 
 
-# Self-attention container segments across the common decoder architectures.
-_ATTENTION_CONTAINERS = (".self_attn.", ".attn.", ".attention.")
-
-
 def _is_moe_model(model) -> bool:
-    """True if the model has routed MoE expert submodules (a `.experts` module).
+    """True if the model has routed MoE expert submodules whose fused LoRA a `.pt`
+    adapter can't serve. Two container conventions are recognized:
 
-    A `.pt` adapter that adapts the fused experts can't be served: vLLM's
+    - `.experts` — Qwen3MoE / PhiMoE (a `ModuleList`/`ModuleDict` of per-expert or
+      grouped expert projections), and
+    - `.block_sparse_moe` — GraniteMoeHybrid, whose grouped experts and router live
+      under `model.layers.{i}.block_sparse_moe.*` with NO `.experts` submodule.
+
+    A `.pt` adapter that adapts the *fused experts* can't be served: vLLM's
     `FusedMoEWithLoRA.set_lora` wants a per-expert tensor *list* (gate/down/up,
     each `[num_experts, rank, dim]`), while the ScalarLM trainer exports stacked
     2-D tensors. Rather than reproduce vLLM's PEFT→fused-MoE conversion, we keep
-    LoRA off the experts and adapt attention only — which serves cleanly."""
-    return any(".experts" in name for name, _ in model.named_modules())
+    LoRA off the experts (and the router) and adapt everything else that *does*
+    serve from a `.pt` adapter — see `_moe_servable_linear_paths`."""
+    return any(
+        ".experts" in name or ".block_sparse_moe" in name
+        for name, _ in model.named_modules()
+    )
 
 
-def _attention_linear_names(model, output_embeddings) -> set[str]:
-    """Leaf names of the attention-projection `nn.Linear` modules (q/k/v/o under
-    a self-attention container). Excludes MLP, MoE experts, the router, and the
-    output head — everything that doesn't serve from a `.pt` MoE adapter."""
-    names: set[str] = set()
+def _moe_servable_linear_paths(model, output_embeddings) -> list[str]:
+    """Full dotted paths of every `nn.Linear` in a MoE model whose LoRA a `.pt`
+    adapter can serve: the attention projections (all layers) and any *dense*
+    MLP — the non-sparse decoder layers, e.g. layer 0 under Qwen3MoE's
+    `decoder_sparse_step`. Excludes:
+
+    - the routed experts — `.experts` (Qwen3MoE/PhiMoE) or the whole
+      `.block_sparse_moe` subtree (GraniteMoeHybrid grouped experts + `router.layer`);
+      their fused LoRA isn't `.pt`-serveable (see `_is_moe_model`),
+    - the router (leaf `gate` in Qwen3MoE or `router` in PhiMoE — adapting it
+      would perturb expert selection, and PhiMoE's is an nn.Linear subclass
+      returning a tuple that crashes PEFT's LoRA wrap; GraniteMoe's router is
+      already covered by the `.block_sparse_moe` exclusion above),
+    - the Mamba-2 SSM projections (`.mamba.*`) — nothing else in the sweep has
+      state-space layers and their LoRA is untested/unserved, and
+    - the output head.
+
+    *Full paths* — not leaf names — because the dense-MLP projections
+    (`gate_proj`/`up_proj`/`down_proj`) reuse the SAME leaf names as the expert
+    projections, so a leaf-name set can't include one while excluding the other.
+    PEFT matches these exact paths, so the experts are left untouched."""
+    paths: list[str] = []
     for module_name, module in model.named_modules():
         if not isinstance(module, nn.Linear):
             continue
         if output_embeddings is not None and module is output_embeddings:
             continue
-        if any(seg in module_name for seg in _ATTENTION_CONTAINERS):
-            names.add(module_name.split(".")[-1])
-    return names
+        if module_name.endswith("lm_head"):  # head, when output_embeddings is None
+            continue
+        if ".experts" in module_name:  # routed experts — not .pt-serveable
+            continue
+        if ".block_sparse_moe" in module_name:  # GraniteMoe grouped experts + router.layer
+            continue
+        if ".mamba" in module_name:  # Mamba-2 SSM projections (in_proj/out_proj) — not adapted
+            continue
+        # The MoE router — exclude by leaf name. Adapting it would perturb expert
+        # selection, and its leaf name varies by arch: `gate` (Qwen3MoE) or
+        # `router` (PhiMoE, whose router is an nn.Linear subclass returning a
+        # tuple, so LoRA-wrapping it crashes with `'tuple' object has no
+        # attribute 'dtype'`). `gate_proj` (a dense MLP projection we DO adapt)
+        # is a different leaf, so an exact-name match leaves it untouched.
+        if module_name.rsplit(".", 1)[-1] in ("gate", "router"):
+            continue
+        paths.append(module_name)
+    return paths
 
 
 def resolve_target_modules(model, target_modules):
@@ -99,9 +140,12 @@ def resolve_target_modules(model, target_modules):
       excluding the output head. PEFT matches these exactly, so a vision tower
       reusing the same leaf names is not adapted.
     - **MoE** (has routed `.experts` submodules, non-multimodal): the sorted
-      attention-projection leaf names only. The fused-expert LoRA can't be served
-      from a `.pt` adapter (vLLM's `FusedMoEWithLoRA` wants a per-expert tensor
-      list, not stacked tensors), so LoRA is kept off the experts.
+      *full paths* of every serveable `nn.Linear` — attention (all layers) plus
+      any dense (non-sparse) MLP — excluding the routed experts, the router
+      (leaf `gate` or `router`), and the output head. The fused-expert LoRA can't be served from a
+      `.pt` adapter (vLLM's `FusedMoEWithLoRA` wants a per-expert tensor list,
+      not stacked tensors), so LoRA is kept off the experts; full paths (not leaf
+      names) are required because the dense MLP shares the experts' leaf names.
     - **dense**: the sorted set of distinct `nn.Linear` leaf-module names,
       excluding the output head — identical to PEFT's all-linear expansion.
 
@@ -132,14 +176,15 @@ def resolve_target_modules(model, target_modules):
         # the dense path rather than silently adapt nothing.
 
     if _is_moe_model(model):
-        # Attention-only for MoE: the fused-expert LoRA isn't serveable from a
-        # .pt adapter (see _is_moe_model), so confine LoRA to the attention
-        # projections, which load + serve cleanly.
-        attn = _attention_linear_names(model, output_embeddings)
-        if attn:
-            return sorted(attn)
-        # No attention modules matched (unusual arch) — fall through to the dense
-        # path rather than adapt nothing.
+        # MoE: emit full paths for the .pt-serveable linears — attention (all
+        # layers) + any dense (non-sparse) MLP — while excluding the routed
+        # experts (not serveable, see _is_moe_model) and the router. Full paths,
+        # not leaf names, because the dense MLP shares the experts' leaf names.
+        paths = _moe_servable_linear_paths(model, output_embeddings)
+        if paths:
+            return sorted(paths)
+        # Nothing matched (unusual arch) — fall through to the dense path rather
+        # than adapt nothing.
 
     names = set()
     for module_name, module in model.named_modules():
