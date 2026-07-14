@@ -146,13 +146,23 @@ test (decision #5).
 `vllm/tests/tokenformer/test_symbol_drift.py` (9 symbol assertions) +
 `test_model_load_regression.py` + `_meta_harness.py`, run via
 `test/finetune_sweep/run_phase0_harness.sh` (bind-mounts current fork python over the
-built cray image → CPU, ~1 min, no recompile). Result: **13 passed, 4 skipped** — dense
+built cray image → CPU, ~1 min, no recompile). Result: **13 passed, 3 skipped** — dense
 (llama, qwen2, qwen3), MoE (qwen3-moe) build on meta + normalization resolves. Findings:
 (1) the harness immediately caught the `lora_config` `NameError` in the *stale* 2026-06-11
 CPU image that the current branch already fixes — the oracle works; (2) MoE build needs the
 EP group re-created per model (dense groups are wrong for MoE), so the harness tears down +
-reinits model-parallel per model; (3) fixture gaps: gemma3/gemma4/exaone-moe/tarsier are
-explicitly `skip`ped (no tiny-random fixture yet) — fill before relying on full coverage.
+reinits model-parallel per model; (3) **fixtures grounded 2026-07-14 to the arch families
+the sweep's LoRA path serves** (not the whole vLLM registry — this is an adapter-layer
+oracle): gemma3-text (`Gemma3ForCausalLM`) is real coverage, gated on the compiled
+`gelu_tanh_and_mul` op (present as-built/rebuilt, absent from the stale-`.so` bind-mount, so
+it self-adjusts); gemma3-mm + gemma4 (`...ForConditionalGeneration`, the carry-forward
+vision-prefix arch) are **Phase-2-gated** — their HF processors need transformers>=5.13 which
+the image caps; exaone-moe/tarsier **dropped** (upstream-only, never served via a LoRA .pt).
+Two mechanics learned: the fused-model overlap baseline is **2/13** (vLLM fuses qkv/gate_up,
+so only `o_proj`+`down_proj` name-match — llama and gemma3 both), and the bind-mount trick's
+real limit is **the stale `.so`'s op set**, making BIND and NO_BIND *complementary* (BIND =
+current fixes, skips gemma; NO_BIND = gemma, fails the stale llama bug). A rebuilt image
+covers all in one run — the Phase-2 end-state.
 
 **Gate:** harness green on the untouched fork. Every later step now has a truth oracle —
 **scoped to symbol-drift + tree/normalization**, not MoE numerics.
