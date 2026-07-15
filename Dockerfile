@@ -120,7 +120,7 @@ ARG INSTALL_ROOT=/app/cray
 WORKDIR ${INSTALL_ROOT}
 
 # Install build dependencies FIRST
-RUN pip install setuptools-scm
+RUN pip install setuptools-scm setuptools-rust
 
 # Configure vLLM source - can use either local directory or remote repo.
 #

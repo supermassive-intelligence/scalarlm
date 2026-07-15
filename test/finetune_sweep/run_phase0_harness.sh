@@ -28,7 +28,12 @@ if [ "${NO_BIND:-0}" != "1" ]; then
   MOUNTS+=(-v "$REPO_ROOT/vllm/tests/tokenformer:/app/cray/vllm/tests/tokenformer:ro")
 fi
 
-exec docker run --rm --entrypoint bash "${MOUNTS[@]}" "$IMAGE" -lc '
+# VLLM_TARGET_DEVICE=cpu is load-bearing on the v0.25 image: its DeviceConfig
+# resolves an unspecified platform's device_type to '' → torch.device('') crash;
+# the fork's platforms/__init__.py CPU-override selects CpuPlatform only when this
+# is set. Harmless on the v0.19 image (which already defaulted to CPU).
+exec docker run --rm -e VLLM_TARGET_DEVICE=cpu \
+  --entrypoint bash "${MOUNTS[@]}" "$IMAGE" -lc '
   uv pip install -q pytest 2>/dev/null || pip install -q pytest 2>/dev/null
   cd /app/cray/vllm
   python3 -m pytest \
