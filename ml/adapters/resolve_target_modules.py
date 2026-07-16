@@ -170,6 +170,14 @@ def _moe_servable_linear_paths(model, output_embeddings, separate_experts=False)
         leaf = module_name.rsplit(".", 1)[-1]
         if leaf in ("gate", "router") or leaf.endswith("_gate"):
             continue
+        # DiffusionGemma's router is `...router.proj` (an nn.Linear under a
+        # `DiffusionGemmaTextRouter` module) — the leaf is `proj`, not `gate`/
+        # `router`, so the leaf check above misses it. Adapting the routing
+        # projection destabilizes expert selection mid-fine-tune (the NeMo recipe
+        # sets `freeze_router: true`); exclude the whole `.router.` subtree by
+        # path. Harmless for archs without a `.router.` container.
+        if ".router." in module_name:
+            continue
         # A per-expert projection (`experts.{i}.*`). In a separate-expert model
         # these ARE the memorization-carrying weights and the separate-expert
         # converter serves them, so include them; otherwise keep them off the
@@ -216,7 +224,18 @@ def resolve_target_parameters(model) -> list[str]:
     none of which expose bare batched expert parameters. Requires
     `lora_config.lora_dropout == 0` (PEFT's ParamWrapper rejects dropout), which the
     MoE sweep entries already set. See
-    `docs/superpowers/plans/2026-07-06-separate-expert-lora-converter.md`."""
+    `docs/superpowers/plans/2026-07-06-separate-expert-lora-converter.md`.
+
+    DiffusionGemma is deliberately excluded: every decoder layer runs a dense MLP
+    *and* the grouped experts in parallel (`dense_out + moe_out`), so the always-on
+    dense MLP carries memorization (like granite's `shared_mlp`) and the experts do
+    NOT need LoRA. Adapting them would deviate from the NeMo reference recipe
+    (freeze_router + target_modules only) and pull in the FusedMoE-LoRA serve path
+    that ADR 0011 avoids. Its grouped `experts` module would otherwise match the
+    scan below, so short-circuit on the diffusion config."""
+    config = getattr(model, "config", None)
+    if getattr(config, "model_type", None) == "diffusion_gemma":
+        return []
     leaves: set[str] = set()
     for name, module in model.named_modules():
         if name.rsplit(".", 1)[-1] != "experts":

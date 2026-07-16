@@ -18,7 +18,7 @@ from transformers import AutoModelForCausalLM
 from transformers import AutoModelForImageTextToText
 from transformers import PreTrainedModel
 
-from cray_megatron.megatron.doc_mask import is_multimodal
+from cray_megatron.megatron.doc_mask import is_multimodal, is_diffusion
 
 import torch
 
@@ -167,7 +167,17 @@ def materialize_model(model_info):
     # for such a model use the (causal) class the repo actually declares.
     config = model_info["model_config"]
     auto_map = getattr(config, "auto_map", None) or {}
-    if is_multimodal(config):
+    if is_diffusion(config):
+        # DiffusionGemma (`DiffusionGemmaForBlockDiffusion`) is not registered under
+        # any AutoModelFor* class, and its config carries a vision_config — so the
+        # multimodal branch below would misroute it to AutoModelForImageTextToText
+        # ("Unrecognized configuration class"). Check is_diffusion FIRST and use the
+        # concrete class directly. The rest of the load path (device_map on-GPU
+        # materialization, dtype, gradient checkpointing, adapters) is class-generic
+        # and needs no diffusion-specific changes. See ADR 0007/0008.
+        from transformers.models.diffusion_gemma import DiffusionGemmaForBlockDiffusion
+        model_cls = DiffusionGemmaForBlockDiffusion
+    elif is_multimodal(config):
         if "AutoModelForImageTextToText" not in auto_map and "AutoModelForCausalLM" in auto_map:
             model_cls = AutoModelForCausalLM
         elif "AutoModelForImageTextToText" not in auto_map and "AutoModel" in auto_map:

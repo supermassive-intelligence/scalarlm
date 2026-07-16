@@ -10,9 +10,11 @@ from cray_megatron.models.get_latest_checkpoint_path import (
 from cray_megatron.collectives.main_rank_only import main_rank_only, is_main_rank
 from cray_megatron.megatron.training_harness import TrainingHarness
 from cray_megatron.megatron import stop_flag
+from cray_megatron.megatron.diffusion_corruption import corrupt_canvas
 from cray_megatron.megatron.doc_mask import (
     doc_mask_decision,
     is_multimodal,
+    is_diffusion,
     BUILD,
     SKIP_SEQLEN,
     SKIP_MULTIMODAL,
@@ -436,6 +438,18 @@ class TrainingLoop:
 
     def training_step_accumulate(self, batch, accum_step, gradient_accumulation_steps):
         """Perform a single forward/backward pass with gradient accumulation."""
+        model_config = self.training_state.model_info.get("model_config")
+
+        # DiffusionGemma has a wholly different forward contract: encoder prompt +
+        # corrupted canvas in, canvas logits out (NO `labels` kwarg, NO internal
+        # `.loss`), with live per-step corruption. It also doesn't use packed-
+        # document masking. Handle it on its own path rather than threading branches
+        # through the causal construction below.
+        if is_diffusion(model_config):
+            return self._diffusion_training_step_accumulate(
+                batch, accum_step, gradient_accumulation_steps
+            )
+
         device = self.training_state.model_info["distribution_strategy"]["device"]
 
         start_time = time.time()
@@ -531,6 +545,78 @@ class TrainingLoop:
         self.print_microbatch_info(accum_step, avg_loss, start_time)
 
         return avg_loss
+
+    def _diffusion_training_step_accumulate(
+        self, batch, accum_step, gradient_accumulation_steps
+    ):
+        """DiffusionGemma canvas-denoising training step.
+
+        The model encodes ``encoder_input_ids`` into a prompt KV cache and denoises
+        a corrupted canvas, returning canvas logits ``(B, canvas_length, vocab)``.
+        Unlike the causal path it takes NO ``labels`` kwarg and computes NO internal
+        ``.loss`` — so the corrupted canvas is built here (resampled fresh every
+        step) and the cross-entropy against the clean canvas labels is computed
+        explicitly. See ``load_diffusion_dataset.py`` and the design spec §3."""
+        device = self.training_state.model_info["distribution_strategy"]["device"]
+        model = self.training_state.model_info["model"]
+        model_config = self.training_state.model_info.get("model_config")
+
+        start_time = time.time()
+
+        encoder_input_ids = batch["encoder_input_ids"].to(device)
+        encoder_attention_mask = batch["encoder_attention_mask"].to(device)
+        canvas_input_ids = batch["canvas_input_ids"].to(device)  # clean, pad-filled
+        canvas_labels = batch["canvas_labels"].to(device)        # clean, -100 on pad
+
+        vocab_size = model_config.text_config.vocab_size
+        eps = self._diffusion_eps()
+
+        # Live uniform-vocabulary corruption, resampled every step (baking it into a
+        # dataset .map would freeze one pattern per epoch). generator=None uses the
+        # global RNG, which the checkpoint resume restores. See diffusion_corruption.
+        decoder_input_ids = corrupt_canvas(
+            canvas_input_ids, canvas_labels, vocab_size, eps
+        )
+
+        forward_kwargs = {
+            "input_ids": encoder_input_ids,
+            "attention_mask": encoder_attention_mask,
+            "decoder_input_ids": decoder_input_ids,
+            # v1: no self-conditioning (a valid, documented input state — the
+            # decoder zeroes the self-conditioning signal when these are None).
+            "self_conditioning_logits": None,
+            "self_conditioning_mask": None,
+        }
+        # DiffusionGemmaEncoderModel is "very similar to Gemma4Model", whose
+        # ...ForConditionalGeneration lineage can crash without mm_token_type_ids on
+        # text-only batches despite it being documented optional. Pass zeros
+        # defensively (flows to the encoder via **kwargs).
+        if is_multimodal(model_config):
+            forward_kwargs["mm_token_type_ids"] = torch.zeros_like(encoder_input_ids)
+
+        outputs = model(**forward_kwargs)
+        logits = outputs.logits  # (B, canvas_length, vocab)
+
+        # fp32 CE for numerical stability; ignore padded canvas slots.
+        loss = torch.nn.functional.cross_entropy(
+            logits.reshape(-1, logits.size(-1)).float(),
+            canvas_labels.reshape(-1),
+            ignore_index=-100,
+        )
+
+        scaled_loss = loss / gradient_accumulation_steps
+        _, avg_loss = self.sync_loss(loss)
+        scaled_loss.backward()
+
+        self.print_microbatch_info(accum_step, avg_loss, start_time)
+        return avg_loss
+
+    def _diffusion_eps(self):
+        job_config = get_job_config()
+        diffusion = job_config.get("diffusion") or {}
+        if hasattr(diffusion, "eps"):
+            return diffusion.eps
+        return diffusion.get("eps", 0.001)
 
     def optimizer_step(self):
         """Perform optimizer and scheduler step after gradient accumulation."""

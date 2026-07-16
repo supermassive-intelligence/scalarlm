@@ -9,6 +9,17 @@ class LoraConfig(BaseModel):
     lora_dropout: float = 0.1
     target_modules: Union[str, list] = "all-linear"  # or list of module names
 
+
+class DiffusionConfig(BaseModel):
+    # DiffusionGemma canvas denoising knobs (see ADR 0007/0008 and
+    # docs/superpowers/specs/2026-07-01-diffusiongemma-design.md). Only consumed
+    # when the model is DiffusionGemma (auto-detected via is_diffusion()); ignored
+    # otherwise. Nested block like lora_config; MUST be declared here or
+    # get_job_config()'s Pydantic model silently DROPS it from train_args (the same
+    # footgun that hid trust_remote_code).
+    canvas_length: int = 256   # decoder block size = the loader's pad/truncate target
+    eps: float = 0.001         # minimum corruption level for t ~ U(eps, 1)
+
 class JobConfig(BaseModel):
 
     job_directory: str
@@ -65,6 +76,10 @@ class JobConfig(BaseModel):
     # Adapters
     adapter_type: str = "tokenformer"
     lora_config: Optional[LoraConfig] = LoraConfig()
+
+    # DiffusionGemma-only canvas denoising config (nested, like lora_config).
+    # None for every non-diffusion model; is_diffusion() gates whether it is read.
+    diffusion: Optional[DiffusionConfig] = None
 
     # 4 hours in seconds
     timeout: int = 4 * 60 * 60

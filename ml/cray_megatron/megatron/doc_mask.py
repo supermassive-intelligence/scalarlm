@@ -34,6 +34,19 @@ def is_multimodal(model_config) -> bool:
     return getattr(model_config, "vision_config", None) is not None
 
 
+def is_diffusion(model_config) -> bool:
+    """True for DiffusionGemma configs (``DiffusionGemmaForBlockDiffusion``), the
+    discrete-diffusion encoder-decoder MoE. Detected by ``model_type`` rather than
+    a wrapper attribute because a diffusion config ALSO carries a ``vision_config``
+    (so ``is_multimodal`` is likewise True) and its own ``model_type`` is the only
+    field that distinguishes it — the load path must check this *before* the
+    multimodal/causal fork so it isn't misrouted to ``AutoModelForImageTextToText``.
+    See ``docs/superpowers/specs/2026-07-01-diffusiongemma-design.md`` and ADR 0007."""
+    if model_config is None:
+        return False
+    return getattr(model_config, "model_type", None) == "diffusion_gemma"
+
+
 def doc_mask_decision(batch, seq_len: int, model_config, max_4d_mask_seq_len: int) -> str:
     """Return how to handle packed-document attention for this batch:
 

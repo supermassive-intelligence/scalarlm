@@ -725,3 +725,130 @@ def test_explicit_non_shorthand_string_passes_through():
 def test_none_passes_through():
     model = _DenseLike()
     assert resolve_target_modules(model, None) is None
+
+
+class _DiffusionGemmaLike(nn.Module):
+    """A miniature DiffusionGemmaForBlockDiffusion mirroring the real structure
+    (verified against transformers 5.12 modeling_diffusion_gemma.py):
+
+    - `model.encoder` and `model.decoder` (separate module trees despite tied base
+      weights — ADR 0007). LoRA is decoder-ONLY, so the encoder must NOT be adapted.
+    - Each decoder layer: `self_attn.{q,k,o}_proj` (no v_proj — the k_eq_v variant),
+      MoE via a `router` module whose routing projection is `router.proj` (an
+      nn.Linear — leaf `proj`, NOT `gate`/`router`) plus grouped `experts`
+      (3-D nn.Parameters, non-Linear). A dense-MLP layer (layer 0) carries
+      `mlp.{gate,up,down}_proj`.
+    - A `vision_tower` reusing the language leaf names (config has a vision_config,
+      so this is multimodal) — must be excluded by the decoder scoping.
+
+    Expected: LoRA lands ONLY on decoder attention + the dense MLP; the router
+    projection (`router.proj`), grouped experts, the encoder, and the vision tower
+    are all excluded."""
+
+    def __init__(self):
+        super().__init__()
+        self.config = SimpleNamespace(
+            model_type="diffusion_gemma",
+            vision_config=SimpleNamespace(hidden_size=8),
+        )
+
+        def _attn():
+            return nn.ModuleDict(
+                {
+                    "q_proj": nn.Linear(8, 8, bias=False),
+                    "k_proj": nn.Linear(8, 8, bias=False),
+                    "o_proj": nn.Linear(8, 8, bias=False),
+                }
+            )
+
+        def _router():
+            # DiffusionGemmaTextRouter: an RMSNorm (non-Linear) + `proj` nn.Linear.
+            return nn.ModuleDict(
+                {
+                    "norm": nn.Identity(),
+                    "proj": nn.Linear(8, 4, bias=False),
+                }
+            )
+
+        def _decoder_layer():
+            # Every DiffusionGemma decoder layer runs a dense MLP AND grouped
+            # experts in parallel (dense_out + moe_out), plus the router — so a
+            # faithful fake carries all three in every layer.
+            return nn.ModuleDict(
+                {
+                    "self_attn": _attn(),
+                    "mlp": nn.ModuleDict(
+                        {
+                            "gate_proj": nn.Linear(8, 8, bias=False),
+                            "up_proj": nn.Linear(8, 8, bias=False),
+                            "down_proj": nn.Linear(8, 8, bias=False),
+                        }
+                    ),
+                    "router": _router(),
+                    "experts": _GroupedExperts(n_experts=4),
+                }
+            )
+
+        self.model = nn.Module()
+        # Encoder: same shape (must be excluded entirely — decoder-only LoRA).
+        self.model.encoder = nn.ModuleDict(
+            {"layers": nn.ModuleList([_decoder_layer()])}
+        )
+        self.model.decoder = nn.ModuleDict(
+            {"layers": nn.ModuleList([_decoder_layer() for _ in range(2)])}
+        )
+        # Vision tower reusing the same leaf names — must be scoped out.
+        self.vision_tower = nn.ModuleDict(
+            {"layers": nn.ModuleList([nn.ModuleDict({"self_attn": _attn()})])}
+        )
+        self.lm_head = nn.Linear(8, 32, bias=False)
+
+    def get_decoder(self):
+        return self.model.decoder
+
+    def get_output_embeddings(self):
+        return self.lm_head
+
+
+def test_diffusiongemma_adapts_decoder_only_excluding_router_experts_encoder_vision():
+    model = _DiffusionGemmaLike()
+    result = resolve_target_modules(model, "all-linear")
+
+    # Decoder attention + the always-on dense MLP, on every layer. The dense MLP
+    # (present in every layer, in parallel with the experts) is what carries
+    # memorization — like granite's shared_mlp — so no expert-LoRA is needed.
+    assert result == [
+        "model.decoder.layers.0.mlp.down_proj",
+        "model.decoder.layers.0.mlp.gate_proj",
+        "model.decoder.layers.0.mlp.up_proj",
+        "model.decoder.layers.0.self_attn.k_proj",
+        "model.decoder.layers.0.self_attn.o_proj",
+        "model.decoder.layers.0.self_attn.q_proj",
+        "model.decoder.layers.1.mlp.down_proj",
+        "model.decoder.layers.1.mlp.gate_proj",
+        "model.decoder.layers.1.mlp.up_proj",
+        "model.decoder.layers.1.self_attn.k_proj",
+        "model.decoder.layers.1.self_attn.o_proj",
+        "model.decoder.layers.1.self_attn.q_proj",
+    ]
+    # The routing projection is `router.proj` (leaf `proj`) — the `.router.` path
+    # exclusion (not the leaf `gate`/`router` rule) is what drops it.
+    assert not any(".router." in name for name in result)
+    # Grouped experts, the encoder tower, and the vision tower are all excluded.
+    assert not any(".experts" in name for name in result)
+    assert not any(name.startswith("model.encoder") for name in result)
+    assert not any(name.startswith("vision_tower") for name in result)
+    assert not any(name.endswith("lm_head") for name in result)
+
+
+def test_diffusiongemma_experts_excluded_from_target_parameters():
+    # A plain grouped-experts module yields expert target_parameters (so PEFT
+    # ParamWrapper adapts them)...
+    holder = nn.ModuleDict({"experts": _GroupedExperts(n_experts=4)})
+    assert resolve_target_parameters(holder) == ["down_proj", "gate_up_proj"]
+
+    # ...but DiffusionGemma (model_type == "diffusion_gemma") is short-circuited to
+    # NO expert target_parameters, keeping its adapter to decoder attention + the
+    # dense MLP (ADR 0011 / the NeMo reference recipe).
+    model = _DiffusionGemmaLike()
+    assert resolve_target_parameters(model) == []

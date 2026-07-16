@@ -21,6 +21,7 @@ from cray_megatron.megatron.doc_mask import (
     SKIP_SEQLEN,
     doc_mask_decision,
     is_multimodal,
+    is_diffusion,
 )
 
 CAP = 16384
@@ -67,3 +68,30 @@ def test_is_multimodal_predicate():
     assert is_multimodal(None) is False
     # vision_config present but None must read as not-multimodal.
     assert is_multimodal(SimpleNamespace(vision_config=None)) is False
+
+
+def _diffusion_config():
+    # A DiffusionGemma config carries BOTH model_type == "diffusion_gemma" AND a
+    # vision_config (it is multimodal-capable) — the model_type is what tells it
+    # apart from a plain multimodal model.
+    return SimpleNamespace(
+        model_type="diffusion_gemma",
+        vision_config=SimpleNamespace(hidden_size=8),
+    )
+
+
+def test_is_diffusion_predicate():
+    assert is_diffusion(_diffusion_config()) is True
+    # A plain multimodal (non-diffusion) config with a vision_config is NOT diffusion.
+    assert is_diffusion(_multimodal_config()) is False
+    # A text model is not diffusion.
+    assert is_diffusion(_text_config()) is False
+    assert is_diffusion(None) is False
+
+
+def test_diffusion_config_is_also_multimodal():
+    # Both predicates fire for a diffusion config, which is exactly why the load
+    # path must check is_diffusion() BEFORE the multimodal fork.
+    cfg = _diffusion_config()
+    assert is_diffusion(cfg) is True
+    assert is_multimodal(cfg) is True

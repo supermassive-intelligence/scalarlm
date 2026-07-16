@@ -1,0 +1,41 @@
+"""
+Unit tests for the per-job `diffusion` block on JobConfig.
+
+Contract under test: train_args["diffusion"] = {canvas_length, eps} passed via the
+SDK round-trips into JobConfig.diffusion and reaches the DiffusionGemma dataset
+loader / training step. Nested config blocks are exactly what the Pydantic model
+silently drops when a field isn't declared (the same footgun as `trust_remote_code`
+and `dtype`), so this pins that the block survives and defaults are sane.
+"""
+
+from cray_infra.util.default_job_config import JobConfig
+
+
+REQUIRED_FIELDS = {
+    "job_directory": "/tmp/job",
+    "training_data_path": "/tmp/dataset.jsonlines",
+    "dataset_hash": "abc",
+}
+
+
+def test_diffusion_defaults_to_none():
+    # Non-diffusion jobs carry no diffusion block; is_diffusion() gates whether it
+    # is ever read, so None is the correct "not applicable" default.
+    cfg = JobConfig(**REQUIRED_FIELDS).dict()
+    assert cfg["diffusion"] is None
+
+
+def test_diffusion_block_survives_roundtrip():
+    cfg = JobConfig(
+        **REQUIRED_FIELDS,
+        diffusion={"canvas_length": 128, "eps": 0.002},
+    ).dict()
+    assert cfg["diffusion"] == {"canvas_length": 128, "eps": 0.002}
+
+
+def test_diffusion_block_defaults_fill_missing_fields():
+    # A partial block still parses; the unspecified field takes the DiffusionConfig
+    # default (canvas_length 256, eps 0.001).
+    cfg = JobConfig(**REQUIRED_FIELDS, diffusion={"canvas_length": 512}).dict()
+    assert cfg["diffusion"]["canvas_length"] == 512
+    assert cfg["diffusion"]["eps"] == 0.001
