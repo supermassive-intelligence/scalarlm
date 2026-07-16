@@ -1,3 +1,10 @@
 fastapi-utils
 setuptools-rust>=1.9.0
 typing-inspect
+# vllm >= 0.25 build requirements that --no-build-isolation must find
+# preinstalled: setup.py imports setuptools_rust unconditionally (the
+# Rust extension itself is optional and skipped without cargo), and
+# pyproject uses PEP 639 license metadata (setuptools >= 77).
+setuptools-rust>=1.9.0
+setuptools>=77.0.3,<81.0.0
+setuptools-scm>=8.0
