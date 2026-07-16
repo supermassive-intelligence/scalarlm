@@ -19,6 +19,10 @@ class DiffusionConfig(BaseModel):
     # footgun that hid trust_remote_code).
     canvas_length: int = 256   # decoder block size = the loader's pad/truncate target
     eps: float = 0.001         # minimum corruption level for t ~ U(eps, 1)
+    # Per-step probability of the two-pass self-conditioning scheme (Analog-Bits):
+    # feed the model's own no-grad prediction back as the self-conditioning signal
+    # to match the iterative serve decode. 0 disables it (single-pass v1 training).
+    self_conditioning_prob: float = 0.5
 
 class JobConfig(BaseModel):
 

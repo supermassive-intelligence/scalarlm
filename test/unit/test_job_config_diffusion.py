@@ -30,7 +30,10 @@ def test_diffusion_block_survives_roundtrip():
         **REQUIRED_FIELDS,
         diffusion={"canvas_length": 128, "eps": 0.002},
     ).dict()
-    assert cfg["diffusion"] == {"canvas_length": 128, "eps": 0.002}
+    assert cfg["diffusion"]["canvas_length"] == 128
+    assert cfg["diffusion"]["eps"] == 0.002
+    # self_conditioning_prob is unspecified here -> its DiffusionConfig default.
+    assert cfg["diffusion"]["self_conditioning_prob"] == 0.5
 
 
 def test_diffusion_block_defaults_fill_missing_fields():

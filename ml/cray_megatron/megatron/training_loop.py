@@ -578,21 +578,48 @@ class TrainingLoop:
             canvas_input_ids, canvas_labels, vocab_size, eps
         )
 
-        forward_kwargs = {
+        base_kwargs = {
             "input_ids": encoder_input_ids,
             "attention_mask": encoder_attention_mask,
             "decoder_input_ids": decoder_input_ids,
-            # v1: no self-conditioning (a valid, documented input state — the
-            # decoder zeroes the self-conditioning signal when these are None).
-            "self_conditioning_logits": None,
-            "self_conditioning_mask": None,
         }
         # DiffusionGemmaEncoderModel is "very similar to Gemma4Model", whose
         # ...ForConditionalGeneration lineage can crash without mm_token_type_ids on
         # text-only batches despite it being documented optional. Pass zeros
         # defensively (flows to the encoder via **kwargs).
         if is_multimodal(model_config):
-            forward_kwargs["mm_token_type_ids"] = torch.zeros_like(encoder_input_ids)
+            base_kwargs["mm_token_type_ids"] = torch.zeros_like(encoder_input_ids)
+
+        # Self-conditioning (Analog-Bits scheme). At serve the diffusion sampler
+        # feeds each denoise step's prediction back as the next step's
+        # self-conditioning signal; a model trained with self_conditioning=None
+        # never sees that feedback, so iterative serve decode misconverges the
+        # early canvas positions (the exact-hash near-miss). To match serve, run
+        # a no-grad pass to predict the clean canvas, then feed that prediction
+        # back as the self-conditioning signal on the gradient-carrying pass for
+        # a random ~sc_prob subset of the batch (the per-example mask teaches both
+        # the conditioned and unconditioned modes, so step-1 — which has no prior
+        # prediction — still works). sc_prob=0 restores the single-pass v1 path.
+        sc_prob = self._diffusion_self_conditioning_prob()
+        if sc_prob > 0.0:
+            with torch.no_grad():
+                sc_logits = model(
+                    **base_kwargs,
+                    self_conditioning_logits=None,
+                    self_conditioning_mask=None,
+                ).logits.detach()
+            sc_mask = torch.rand(decoder_input_ids.size(0), device=device) < sc_prob
+            forward_kwargs = {
+                **base_kwargs,
+                "self_conditioning_logits": sc_logits,
+                "self_conditioning_mask": sc_mask,
+            }
+        else:
+            forward_kwargs = {
+                **base_kwargs,
+                "self_conditioning_logits": None,
+                "self_conditioning_mask": None,
+            }
 
         outputs = model(**forward_kwargs)
         logits = outputs.logits  # (B, canvas_length, vocab)
@@ -617,6 +644,16 @@ class TrainingLoop:
         if hasattr(diffusion, "eps"):
             return diffusion.eps
         return diffusion.get("eps", 0.001)
+
+    def _diffusion_self_conditioning_prob(self):
+        """Per-step probability of feeding the model's own prediction back as the
+        self-conditioning signal during training (0 disables the two-pass scheme).
+        Default 0.5 per Analog-Bits; see _diffusion_training_step_accumulate."""
+        job_config = get_job_config()
+        diffusion = job_config.get("diffusion") or {}
+        if hasattr(diffusion, "self_conditioning_prob"):
+            return diffusion.self_conditioning_prob
+        return diffusion.get("self_conditioning_prob", 0.5)
 
     def optimizer_step(self):
         """Perform optimizer and scheduler step after gradient accumulation."""
