@@ -163,6 +163,19 @@ ENV CMAKE_BUILD_TYPE=Release
 # vLLM dependencies
 COPY ./infra/requirements-vllm.txt ${INSTALL_ROOT}/requirements-vllm.txt
 RUN uv pip install --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements-vllm.txt && \
+    if [ "$VLLM_TARGET_DEVICE" = "cuda" ]; then \
+        # Shadow the NGC base image's bundled torch with the exact release
+        # wheel vllm-fork's pyproject.toml declares (torch == 2.11.0), only
+        # for the CUDA build: whatever torch a given NGC snapshot ships is
+        # either too old or an alpha snapshot that predates release APIs
+        # vllm's stable-ABI csrc code needs (torch::stable::from_blob).
+        # CUDA-only: doing this unconditionally would clobber the ROCm/CPU
+        # targets' correct torch builds, which don't hit this issue.
+        uv pip install --no-compile --no-cache-dir \
+            torch==2.11.0 torchvision==0.26.0 torchaudio==2.11.0 \
+            --index-url https://download.pytorch.org/whl/cu130 \
+            --extra-index-url https://pypi.org/simple; \
+    fi && \
     python ${INSTALL_ROOT}/vllm/use_existing_torch.py --prefix
 
 RUN \
