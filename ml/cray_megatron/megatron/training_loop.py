@@ -11,6 +11,8 @@ from cray_megatron.collectives.main_rank_only import main_rank_only, is_main_ran
 from cray_megatron.megatron.training_harness import TrainingHarness
 from cray_megatron.megatron import stop_flag
 from cray_megatron.megatron.diffusion_corruption import corrupt_canvas
+from cray_megatron.megatron.dataset.diffusion_canvas import anchor_token_id
+from cray_megatron.megatron.determinism import apply_seed
 from cray_megatron.megatron.doc_mask import (
     doc_mask_decision,
     is_multimodal,
@@ -199,6 +201,12 @@ class TrainingLoop:
         self.training_state = TrainingState()
 
     def train(self):
+        # Seed BEFORE load_model() so PEFT's lora_A init and every subsequent
+        # global-RNG draw (corruption, SC mask) form one deterministic sequence.
+        # On resume, checkpoint RNG-state restore (inside load_model) overrides
+        # this, keeping resumed slices bit-identical. No-op when seed is unset.
+        apply_seed(get_job_config().get("seed"))
+
         self.model_manager = get_model_manager()
 
         self.training_state.model_info = self.model_manager.load_model()
@@ -574,9 +582,29 @@ class TrainingLoop:
         # Live uniform-vocabulary corruption, resampled every step (baking it into a
         # dataset .map would freeze one pattern per epoch). generator=None uses the
         # global RNG, which the checkpoint resume restores. See diffusion_corruption.
-        decoder_input_ids = corrupt_canvas(
-            canvas_input_ids, canvas_labels, vocab_size, eps
-        )
+        # protect_prefix keeps the Tier-2 anchor (canvas position 0) clean every
+        # step; resolved from the SAME tokenizer/config the loader used so the
+        # protected count exactly matches the anchor the canvas actually carries
+        # (0 when the anchor is disabled or the tokenizer lacks BOS).
+        protect_prefix = 1 if self._diffusion_anchor_id() is not None else 0
+
+        # NaRA (noise-aware LoRA): the per-example corruption level t IS the noise
+        # level lambda the adapter conditions on. When NaRA is active, capture t and
+        # push it into the shared hypernetwork BEFORE any forward pass (both the
+        # self-conditioning no-grad pass and the gradient pass see the same Ceff).
+        # See ADR 0012 and adapters/nara_prototype.py.
+        nara_context = self._diffusion_nara_context()
+        if nara_context is not None:
+            decoder_input_ids, noise_level = corrupt_canvas(
+                canvas_input_ids, canvas_labels, vocab_size, eps,
+                protect_prefix=protect_prefix, return_noise_level=True,
+            )
+            nara_context.set_noise_level(noise_level)
+        else:
+            decoder_input_ids = corrupt_canvas(
+                canvas_input_ids, canvas_labels, vocab_size, eps,
+                protect_prefix=protect_prefix,
+            )
 
         base_kwargs = {
             "input_ids": encoder_input_ids,
@@ -638,12 +666,50 @@ class TrainingLoop:
         self.print_microbatch_info(accum_step, avg_loss, start_time)
         return avg_loss
 
+    def _diffusion_nara_context(self):
+        """Return the model's NaRAContext when NaRA is enabled for this job, else None.
+        Resolved once and cached (the module tree doesn't change after load). Walks the
+        module tree so it works regardless of distribution-strategy wrapping. See
+        adapters/nara_prototype.find_nara_context and ADR 0012."""
+        if getattr(self, "_nara_context_resolved", False):
+            return self._nara_context_cache
+
+        self._nara_context_resolved = True
+        self._nara_context_cache = None
+
+        job_config = get_job_config()
+        diffusion = job_config.get("diffusion") or {}
+        nara = diffusion.nara if hasattr(diffusion, "nara") else diffusion.get("nara")
+        if nara is not None:
+            enabled = nara.enabled if hasattr(nara, "enabled") else nara.get("enabled", False)
+            if enabled:
+                from adapters.nara_prototype import find_nara_context
+                self._nara_context_cache = find_nara_context(
+                    self.training_state.model_info["model"]
+                )
+        return self._nara_context_cache
+
     def _diffusion_eps(self):
         job_config = get_job_config()
         diffusion = job_config.get("diffusion") or {}
         if hasattr(diffusion, "eps"):
             return diffusion.eps
         return diffusion.get("eps", 0.001)
+
+    def _diffusion_anchor_id(self):
+        """Resolve the Tier-2 canvas anchor id when enabled, else None — mirrors
+        load_diffusion_dataset._resolve_anchor_id so the per-step protect_prefix
+        matches the anchor the loader baked into the canvas."""
+        job_config = get_job_config()
+        diffusion = job_config.get("diffusion") or {}
+        if hasattr(diffusion, "anchor_token"):
+            enabled = bool(diffusion.anchor_token)
+        else:
+            enabled = bool(diffusion.get("anchor_token", False))
+        if not enabled:
+            return None
+        tokenizer = self.training_state.model_info["tokenizer"]
+        return anchor_token_id(tokenizer)
 
     def _diffusion_self_conditioning_prob(self):
         """Per-step probability of feeding the model's own prediction back as the

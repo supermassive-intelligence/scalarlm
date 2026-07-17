@@ -34,6 +34,13 @@ def test_diffusion_block_survives_roundtrip():
     assert cfg["diffusion"]["eps"] == 0.002
     # self_conditioning_prob is unspecified here -> its DiffusionConfig default.
     assert cfg["diffusion"]["self_conditioning_prob"] == 0.5
+    # anchor_token defaults off so prior runs stay byte-identical.
+    assert cfg["diffusion"]["anchor_token"] is False
+
+
+def test_diffusion_anchor_token_survives_roundtrip():
+    cfg = JobConfig(**REQUIRED_FIELDS, diffusion={"anchor_token": True}).dict()
+    assert cfg["diffusion"]["anchor_token"] is True
 
 
 def test_diffusion_block_defaults_fill_missing_fields():

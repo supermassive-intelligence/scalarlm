@@ -13,13 +13,83 @@ from adapters.resolve_target_modules import (
 logger = logging.getLogger(__name__)
 
 
+def _create_nara_model(model, device, job_config, nara_cfg, train_lm_head):
+    """NaRA prototype adapter creation — mirrors the PEFT path's contract (resolve the
+    same target modules, freeze base, unfreeze the adapter branch, attach unwrap_model)
+    but injects noise-aware NaRALinear layers sharing one hypernetwork instead of PEFT
+    LoRA. See ADR 0012."""
+    from adapters.nara_prototype import (
+        NaRAConfig,
+        inject_nara,
+        mark_nara_trainable,
+    )
+
+    start = time.time()
+    lora_config = dict(job_config["lora_config"])
+    target_modules = resolve_target_modules(
+        model, lora_config.get("target_modules", "all-linear")
+    )
+    if not isinstance(target_modules, list):
+        raise ValueError(
+            "NaRA prototype requires an explicit target-module list "
+            f"(got {target_modules!r}); resolve_target_modules should have expanded it."
+        )
+
+    cfg = NaRAConfig(
+        r=lora_config.get("r", 8),
+        lora_alpha=lora_config.get("lora_alpha", 32),
+        lora_dropout=lora_config.get("lora_dropout", 0.0),
+        c_scale=nara_cfg.get("c_scale", 0.1),
+        fnn_hidden_1=nara_cfg.get("fnn_hidden_1", 256),
+        fnn_hidden_2=nara_cfg.get("fnn_hidden_2", 512),
+        noise_embed_dim=nara_cfg.get("noise_embed_dim", 128),
+        fourier_scale=nara_cfg.get("fourier_scale", 16.0),
+    )
+    logger.info(f"NaRA config: {cfg}; {len(target_modules)} target modules")
+
+    inject_nara(model, target_modules, cfg)
+    n_trainable = mark_nara_trainable(model)
+
+    if train_lm_head and hasattr(model, "lm_head") and hasattr(model.lm_head, "weight"):
+        model.lm_head.weight.requires_grad = True
+        logger.info("lm_head weight set to trainable")
+
+    add_methods(model)  # unwrap_model -> filter_checkpoint saves requires_grad params
+    model = model.to(device)
+    logger.info(
+        f"create_nara_model completed in {time.time() - start:.2f}s, "
+        f"{n_trainable} trainable NaRA params"
+    )
+    return model
+
+
+def _nara_config(job_config):
+    """Return the NaRA sub-config (dict) when NaRA is enabled for this (diffusion)
+    job, else None. Handles both dict and Pydantic-model shapes, like the diffusion
+    getters in training_loop.py."""
+    diffusion = job_config.get("diffusion") or {}
+    nara = diffusion.nara if hasattr(diffusion, "nara") else diffusion.get("nara")
+    if nara is None:
+        return None
+    nara = nara if isinstance(nara, dict) else nara.model_dump()
+    return nara if nara.get("enabled") else None
+
+
 def create_lora_model(model, device, train_lm_head=False):
     overall_start = time.time()
+
+    job_config = get_job_config()
+
+    # NaRA (noise-aware LoRA) prototype path for DiffusionGemma. Gated by
+    # diffusion.nara.enabled; otherwise the standard PEFT LoRA path runs unchanged.
+    # See ADR 0012 and ml/adapters/nara_prototype.py.
+    nara_cfg = _nara_config(job_config)
+    if nara_cfg is not None:
+        return _create_nara_model(model, device, job_config, nara_cfg, train_lm_head)
 
     # Step 1: Insert LoRA adapter modules
     logger.info("Starting LoRA adapter module insertion...")
     step2_start = time.time()
-    job_config = get_job_config()
     lora_config = dict(job_config["lora_config"])
 
     # Resolve PEFT's "all-linear" shorthand ourselves: its expansion silently

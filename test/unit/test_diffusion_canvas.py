@@ -10,6 +10,7 @@ tokenizer keeps this free of transformers/datasets/gpu_aware_mpi imports.
 import logging
 
 from cray_megatron.megatron.dataset.diffusion_canvas import (
+    anchor_token_id,
     pad_token_id,
     tokenize_canvas_batch,
 )
@@ -76,6 +77,62 @@ def test_multiple_rows_independent_padding():
     assert len(out["canvas_labels"]) == 2
     assert out["canvas_labels"][0].count(-100) == 3  # 1 token + 3 pad
     assert out["canvas_labels"][1].count(-100) == 1  # 3 tokens + 1 pad
+
+
+class _FakeTokenizerBOS(_FakeTokenizer):
+    """Adds a BOS id distinct from every content token (content ids are >= 2 and
+    < 42; 99 can't collide)."""
+
+    bos_token_id = 99
+
+
+def test_anchor_prepends_supervised_bos():
+    tok = _FakeTokenizerBOS()
+    anchor = anchor_token_id(tok)
+    assert anchor == 99
+
+    out = tokenize_canvas_batch(
+        tok, canvas_length=8, inputs=["hi"], outputs=["ab"], anchor_id=anchor
+    )
+    ci = out["canvas_input_ids"][0]
+    cl = out["canvas_labels"][0]
+
+    t0, t1 = (ord("a") % 40) + 2, (ord("b") % 40) + 2
+    # Anchor is a clean, supervised prefix at position 0; the output shifts right by
+    # one and padding fills the rest.
+    assert ci == [99, t0, t1, 0, 0, 0, 0, 0]
+    assert cl == [99, t0, t1, -100, -100, -100, -100, -100]
+    assert len(ci) == 8 and len(cl) == 8
+
+
+def test_anchor_shrinks_output_budget_by_one():
+    tok = _FakeTokenizerBOS()
+    # 3-token output into a length-3 canvas: with the anchor, budget is 2 -> the
+    # third output token is truncated to make room for the anchor.
+    out = tokenize_canvas_batch(
+        tok, canvas_length=3, inputs=["x"], outputs=["abc"], anchor_id=99
+    )
+    ci = out["canvas_input_ids"][0]
+    t0, t1 = ((ord(c) % 40) + 2 for c in "ab")
+    assert ci == [99, t0, t1]  # anchor + first 2 output tokens, no room for 'c'
+
+
+def test_anchor_none_is_byte_identical_to_pre_anchor():
+    tok = _FakeTokenizerBOS()
+    with_default = tokenize_canvas_batch(
+        tok, canvas_length=6, inputs=["hi"], outputs=["ab"]
+    )
+    with_explicit_none = tokenize_canvas_batch(
+        tok, canvas_length=6, inputs=["hi"], outputs=["ab"], anchor_id=None
+    )
+    assert with_default == with_explicit_none
+    assert with_default["canvas_input_ids"][0][0] != 99  # no anchor leaked in
+
+
+def test_anchor_token_id_none_without_bos():
+    # The plain fake has no bos_token_id attribute -> resolver returns None so the
+    # loader can warn and train without an anchor rather than inventing an id.
+    assert anchor_token_id(_FakeTokenizer()) is None
 
 
 def test_pad_token_id_fallbacks():

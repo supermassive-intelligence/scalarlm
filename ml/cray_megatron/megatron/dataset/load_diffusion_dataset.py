@@ -33,7 +33,10 @@ from cray_megatron.collectives.data_parallelism import (
     get_data_parallel_rank,
     get_data_parallel_world_size,
 )
-from cray_megatron.megatron.dataset.diffusion_canvas import tokenize_canvas_batch
+from cray_megatron.megatron.dataset.diffusion_canvas import (
+    anchor_token_id,
+    tokenize_canvas_batch,
+)
 
 import datasets
 import jsonlines
@@ -49,6 +52,7 @@ _DEFAULT_CANVAS_LENGTH = 256
 
 def load_diffusion_dataset(model, tokenizer, epoch):
     canvas_length = _get_canvas_length()
+    anchor_id = _resolve_anchor_id(tokenizer)
 
     hf_dataset = datasets.IterableDataset.from_generator(
         make_dataset_generator(),
@@ -63,7 +67,7 @@ def load_diffusion_dataset(model, tokenizer, epoch):
     split_dataset = split_dataset_by_node(shuffled_dataset)
 
     tokenized_dataset = split_dataset.map(
-        get_canvas_tokenize_function(tokenizer, canvas_length),
+        get_canvas_tokenize_function(tokenizer, canvas_length, anchor_id),
         batched=True,
         remove_columns=["input", "output"],
     )
@@ -111,10 +115,33 @@ def _get_canvas_length():
     return diffusion.get("canvas_length", _DEFAULT_CANVAS_LENGTH)
 
 
-def get_canvas_tokenize_function(tokenizer, canvas_length):
+def _anchor_enabled():
+    """Whether the Tier-2 anchor token is requested via the diffusion job config."""
+    job_config = get_job_config()
+    diffusion = job_config.get("diffusion") or {}
+    if hasattr(diffusion, "anchor_token"):
+        return bool(diffusion.anchor_token)
+    return bool(diffusion.get("anchor_token", False))
+
+
+def _resolve_anchor_id(tokenizer):
+    """Resolve the anchor token id when enabled, else None. Warns and disables the
+    anchor if the tokenizer has no BOS rather than inventing a spurious id."""
+    if not _anchor_enabled():
+        return None
+    anchor_id = anchor_token_id(tokenizer)
+    if anchor_id is None:
+        logger.warning(
+            "diffusion.anchor_token is set but the tokenizer has no bos_token_id; "
+            "training without a canvas anchor."
+        )
+    return anchor_id
+
+
+def get_canvas_tokenize_function(tokenizer, canvas_length, anchor_id=None):
     def tokenize(dataset):
         return tokenize_canvas_batch(
-            tokenizer, canvas_length, dataset["input"], dataset["output"]
+            tokenizer, canvas_length, dataset["input"], dataset["output"], anchor_id
         )
 
     return tokenize

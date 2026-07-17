@@ -59,6 +59,27 @@ def test_high_t_corrupts_most_supervised_positions():
     assert changed > 10
 
 
+def test_protect_prefix_keeps_anchor_clean_at_max_t():
+    # Tier-2 anchor: position 0 is supervised (label != -100) but must stay clean
+    # every step. Even at t ~= 1, protect_prefix=1 keeps it equal to the input while
+    # the rest of the supervised canvas is heavily corrupted.
+    canvas = torch.arange(2, 22).reshape(1, 20)
+    labels = canvas.clone()  # fully supervised, no padding
+    out = corrupt_canvas(
+        canvas, labels, vocab_size=1000, eps=1.0 - 1e-6, generator=_gen(7), protect_prefix=1
+    )
+    assert out[0, 0].item() == canvas[0, 0].item()  # anchor untouched
+    assert int((out[:, 1:] != canvas[:, 1:]).sum()) > 10  # rest still corrupted
+
+
+def test_protect_prefix_zero_matches_default():
+    canvas = torch.tensor([[5, 6, 7, 8, 9]])
+    labels = canvas.clone()
+    a = corrupt_canvas(canvas, labels, 50, 0.3, generator=_gen(42))
+    b = corrupt_canvas(canvas, labels, 50, 0.3, generator=_gen(42), protect_prefix=0)
+    assert torch.equal(a, b)
+
+
 def test_low_t_corrupts_few_positions():
     # t drawn from [eps, 1) with a tiny eps and a seed that yields a small t => few
     # positions flip. This is a distributional check, not an exact count, so allow

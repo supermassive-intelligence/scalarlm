@@ -273,12 +273,55 @@ models:
   - id: Qwen/Qwen3-30B-A3B-Instruct-2507       # Qwen3MoeForCausalLM; Apache-2.0
     adapters: {lora: {gate_gb: 70}}
     train_args: {dtype: bfloat16, max_steps: 450, warmup_steps: 30, steps_per_checkpoint: 450}
-  - id: Qwen/Qwen3.5-35B-A3B                    # Qwen3MoeForCausalLM (newer lineage)
+  # Qwen3.5/3.6 are NOT Qwen3MoeForCausalLM — they are
+  # `Qwen3_5MoeForConditionalGeneration` (model_type qwen3_5_moe): MULTIMODAL
+  # (vision tower) + 256-expert grouped MoE + always-on dense `shared_expert` +
+  # HYBRID attention (10 full `self_attn` layers / 30 linear-attention
+  # `GatedDeltaNet` layers). transformers 5.12 AND the fork's vLLM both register
+  # the arch, so it loads + serves. resolve_target_modules' MoE-aware multimodal
+  # branch confines LoRA to the decoder's attention + shared_expert; grouped
+  # experts go via target_parameters (needs lora_dropout:0 for PEFT's ParamWrapper,
+  # same knob as the other grouped MoEs). Run with --no-preflight (the preflight
+  # heuristic can't see this arch's structure → false PRECHECK_NO_OP). ~70GiB
+  # download each, phase-scaled. See docs/reports/supported-models.md STAGED07.
+  - id: Qwen/Qwen3.5-35B-A3B                    # Qwen3_5MoeForConditionalGeneration (multimodal MoE)
     adapters: {lora: {gate_gb: 75}}
-    train_args: {dtype: bfloat16, max_steps: 450, warmup_steps: 30, steps_per_checkpoint: 450}
-  - id: Qwen/Qwen3.6-35B-A3B                    # Qwen3MoeForCausalLM (newest lineage)
+    train_args: {dtype: bfloat16, max_steps: 450, warmup_steps: 30, steps_per_checkpoint: 450, lora_config: {lora_dropout: 0}}
+  - id: Qwen/Qwen3.6-35B-A3B                    # Qwen3_5MoeForConditionalGeneration (multimodal MoE)
     adapters: {lora: {gate_gb: 75}}
-    train_args: {dtype: bfloat16, max_steps: 450, warmup_steps: 30, steps_per_checkpoint: 450}
+    train_args: {dtype: bfloat16, max_steps: 450, warmup_steps: 30, steps_per_checkpoint: 450, lora_config: {lora_dropout: 0}}
+
+  # -- DiffusionGemma: discrete-diffusion, encoder-decoder MoE (first non-autoregressive
+  # arch in the sweep). DiffusionGemmaForBlockDiffusion, 26B/4B active, GATED.
+  # TRAINING: decoder-only LoRA on attention + the always-on dense MLP (every layer
+  # runs dense_mlp + moe in parallel, so the dense MLP carries memorization like
+  # granite's shared_mlp; router + experts excluded — ADR 0007/0011, NeMo reference
+  # recipe). Canvas denoising with live uniform-vocab corruption (load_diffusion_dataset
+  # + diffusion_corruption); external cross-entropy over the canvas (the forward returns
+  # logits, not a .loss). SERVING: native vllm diffusion_gemma.py (Model Runner V2) +
+  # the fork's hybrid .pt adapter, unblocked by the 0.25 migration (ADR 0011 supersedes
+  # 0008); EntropyBound sampler_config comes from the model's generation_config. lr 1e-3
+  # (large MoE overshoots at 3e-3); r16/alpha32 per the NeMo reference; lora_dropout 0.
+  # RISK: the entropy-bound sampler is stochastic — exact golden-hash memorization may be
+  # non-deterministic (see ADR 0011 open risks). Run with --no-preflight.
+  - id: google/diffusiongemma-26B-A4B-it        # DiffusionGemmaForBlockDiffusion; encoder-decoder MoE, 26B/4B active
+    adapters: {lora: {gate_gb: 70}}
+    train_args: {dtype: bfloat16, max_steps: 450, warmup_steps: 30, steps_per_checkpoint: 450, learning_rate: 1.0e-3, lora_config: {r: 16, lora_alpha: 32, lora_dropout: 0}, diffusion: {canvas_length: 256, eps: 0.001}}
+
+  # -- NaRA (noise-aware LoRA) variant of the above — TRAINING-SIDE PROTOTYPE, opt-in.
+  # Identical recipe but diffusion.nara.enabled swaps the PEFT LoRA path for noise-aware
+  # NaRALinear (dW(λ)=B·C(λ)·A, C from a shared hypernetwork on the corruption level t).
+  # r/alpha/dropout inherit from lora_config; c_scale is the only NaRA knob worth sweeping.
+  # PURPOSE: test whether NaRA lifts the ADR-0007 LoRA ceiling (28/32 golden-hash, unstable
+  # basin — see docs/reports/2026-07-16-diffusiongemma-validation-runs.md). Compare directly
+  # to the entry above as the baseline. Zero-init mapper ⇒ step-0 == plain LoRA, so a
+  # regression vs baseline would be a real NaRA finding, not a wiring artifact.
+  # SERVING IS DEFERRED (ADR 0012): a NaRA checkpoint carries the hypernetwork and its delta
+  # isn't a static B·A, so the serve-check will NOT pass yet — run TRAIN-only to read the
+  # loss curve + checkpoint, or expect a serve NO_OP. Enable by uncommenting:
+  # - id: google/diffusiongemma-26B-A4B-it        # NaRA variant; see ADR 0012
+  #   adapters: {lora: {gate_gb: 70}}
+  #   train_args: {dtype: bfloat16, max_steps: 450, warmup_steps: 30, steps_per_checkpoint: 450, learning_rate: 1.0e-3, lora_config: {r: 16, lora_alpha: 32, lora_dropout: 0}, diffusion: {canvas_length: 256, eps: 0.001, nara: {enabled: true, c_scale: 0.1}}}
 
   # -- Smaller REAL MoE to exercise the expert-LoRA converter at non-tiny scale
   # (2026-07-01). The 30B-A3B above OOMs at TRAINING model-load on the GB10 (the
@@ -292,7 +335,9 @@ models:
     adapters: {lora: {gate_gb: 60}}
     # MoE: disable lora_dropout (fork ParamWrapper rejects it on grouped experts,
     # same knob as qwen3-moe-tiny). bf16 + longer budget for the larger model.
-    train_args: {dtype: bfloat16, max_steps: 450, warmup_steps: 30, steps_per_checkpoint: 450, lora_config: {lora_dropout: 0}}
+    # learning_rate 1e-3: grouped-expert MoE overshoots + diverges at the default 3e-3
+    # warmup peak (see PhiMoE RUN phimoe-083202 note); 1e-3 is the validated MoE rate.
+    train_args: {dtype: bfloat16, max_steps: 450, warmup_steps: 30, steps_per_checkpoint: 450, learning_rate: 1.0e-3, lora_config: {lora_dropout: 0}}
 
   # === MoE candidates recorded for later converter-generalization testing
   # (2026-06-30). The converter is validated ONLY on Qwen3MoeForCausalLM (grouped
@@ -344,10 +389,10 @@ models:
   - id: Qwen/Qwen3-4B                          # Qwen3ForCausalLM; Apache-2.0, ungated
     cpu_ok: true
     adapters: {lora: {gate_gb: 10}}
-    train_args: {dtype: bfloat16}
+    train_args: {dtype: bfloat16, learning_rate: 1.0e-3}
   - id: Qwen/Qwen3-14B                         # Qwen3ForCausalLM; Apache-2.0, ungated
     adapters: {lora: {gate_gb: 32}}
-    train_args: {dtype: bfloat16, max_steps: 450, warmup_steps: 30, steps_per_checkpoint: 450}
+    train_args: {dtype: bfloat16, learning_rate: 1.0e-3, max_steps: 450, warmup_steps: 30, steps_per_checkpoint: 450}
   - id: Qwen/Qwen3-32B                         # Qwen3ForCausalLM; Apache-2.0, ungated
     # Borderline size (bf16 ~64GiB); relies on cuda-spark's phase_scaled flow
     # (whole-GPU-per-phase) rather than the co-located budget. RISK: unlike the
@@ -357,7 +402,7 @@ models:
     # (bounded by --train-timeout; doesn't block other models). gate_gb below is a
     # no-op on spark (unified mem) — kept only for cuda-docker portability.
     adapters: {lora: {gate_gb: 70}}
-    train_args: {dtype: bfloat16, max_steps: 450, warmup_steps: 30, steps_per_checkpoint: 450}
+    train_args: {dtype: bfloat16, learning_rate: 1.0e-3, max_steps: 450, warmup_steps: 30, steps_per_checkpoint: 450}
   - id: zai-org/GLM-4-9B-Chat                  # ChatGLMModel (model_type=chatglm);
     # served by vLLM's chatglm.py. NOT native Glm4ForCausalLM: its config's
     # auto_map points AutoModelForCausalLM at THUDM's custom modeling_chatglm.py,
@@ -519,7 +564,13 @@ models:
     # See docs/superpowers/plans/2026-07-06-separate-expert-lora-converter.md.
     # MoE: lora_dropout:0 (fork ParamWrapper rejects it on experts, same knob as
     # qwen3-moe-tiny / Qwen1.5-MoE). bf16 + 450-step budget.
-    train_args: {dtype: bfloat16, max_steps: 450, warmup_steps: 30, steps_per_checkpoint: 450, lora_config: {lora_dropout: 0}}
+    # RESULT 2026-07-13 (RUN phimoe-083202): the target_parameters fix WORKS — the
+    # grouped experts got LoRA (`target_parameters: [down_proj, gate_up_proj]`,
+    # ParamWrapper over PhimoeExperts, 384 trainable). Loss hit 0.0002 at step 10
+    # (MEMORIZED during warmup) then DIVERGED to 44 at step 30 when warmup ramped lr
+    # to its 3e-3 peak, collapsing to a 2.77 plateau it couldn't escape. Same warmup-
+    # overshoot as Qwen3.5-35B-A3B/Mixtral. FIX: learning_rate 1e-3 (killed the 3e-3 run).
+    train_args: {dtype: bfloat16, max_steps: 450, warmup_steps: 30, steps_per_checkpoint: 450, learning_rate: 1.0e-3, lora_config: {lora_dropout: 0}}
 
   - id: ibm-granite/granite-4.0-h-tiny          # GraniteMoeHybridForCausalLM; ~7B/~1B active; Apache-2.0, ungated
     adapters: {lora: {gate_gb: 18}}
@@ -572,4 +623,6 @@ models:
     # "already processed->skipping", 0 tok/s, no crash/OOM); cancelled to free the GPU.
     # Doesn't validate the converter. Same grouped-in-5.x finding as Phi-mini-MoE above.
     # MoE: lora_dropout:0 (fork ParamWrapper rejects it on experts). bf16 + 450-step.
-    train_args: {dtype: bfloat16, max_steps: 450, warmup_steps: 30, steps_per_checkpoint: 450, lora_config: {lora_dropout: 0}}
+    # learning_rate 1e-3: grouped-expert MoE diverges at the default 3e-3 warmup peak
+    # (see PhiMoE RUN phimoe-083202 note); 1e-3 is the validated grouped-MoE rate.
+    train_args: {dtype: bfloat16, max_steps: 450, warmup_steps: 30, steps_per_checkpoint: 450, learning_rate: 1.0e-3, lora_config: {lora_dropout: 0}}
