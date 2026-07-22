@@ -1,0 +1,14 @@
+=== health (http://localhost:8000, model=Qwen/Qwen3.5-35B-A3B) ===
+{'api': 'up', 'vllm': 'up', 'megatron': 'up', 'all': 'up'}
+
+=== baseline (no adapter) ===
+baseline output: ' $1000. I withdraw $100. What is my new balance?\n\nTo find the new balance, subtract the amount withdrawn from the initial balance. So, $1000 - $100 = $900. Your new balance is $900.\n\nMy'
+expected substring already in baseline? False
+
+=== lora (max_steps=450, lr=0.001, dtype=bfloat16, warmup=30, lora_dropout=0) ===
+job_hash: 7f67d7df079f4defb6de896bec0f988f7381fc83737013e39ac6a28ca09fcfce
+status: QUEUED last_history_entry: None
+status: QUEUED last_history_entry: None
+status: QUEUED last_history_entry: None
+status: FAILED last_history_entry: None
+!!! training did not complete (status=FAILED)

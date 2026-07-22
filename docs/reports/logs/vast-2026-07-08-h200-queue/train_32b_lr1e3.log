@@ -1,0 +1,72 @@
+=== health (http://localhost:8000) ===
+{'api': 'up', 'vllm': {'status': 'down', 'reason': "Cannot connect to host localhost:8001 ssl:default [Connect call failed ('127.0.0.1', 8001)]"}, 'megatron': 'up', 'all': 'mixed'}
+=== TRAIN (model=Qwen/Qwen3-32B, max_steps=450, lr=0.001, dtype=bfloat16, warmup=30, lora_dropout=0, gpus=1, grad_ckpt=True) ===
+job_hash: 6b29af95e274555c2d13583179cff9d1477876cc89d3e2fb0f9a8d5f2c49671b
+status: QUEUED last: None
+status: QUEUED last: None
+status: TRAINING last: None
+status: TRAINING last: {'step': 4, 'loss': 4.892979145050049, 'epoch': 19, 'time': 8.121114015579224}
+status: TRAINING last: {'step': 11, 'loss': 1.8597203493118286, 'epoch': 47, 'time': 17.822191953659058}
+status: TRAINING last: {'step': 18, 'loss': 2.054574966430664, 'epoch': 75, 'time': 27.471505880355835}
+status: TRAINING last: {'step': 25, 'loss': 0.0014490275643765926, 'epoch': 103, 'time': 37.1415114402771}
+status: TRAINING last: {'step': 33, 'loss': 1.8089482182404026e-05, 'epoch': 135, 'time': 48.33757543563843}
+status: TRAINING last: {'step': 40, 'loss': 5.5667856031504925e-06, 'epoch': 163, 'time': 58.03748631477356}
+status: TRAINING last: {'step': 47, 'loss': 2.617630116219516e-06, 'epoch': 191, 'time': 67.74435544013977}
+status: TRAINING last: {'step': 54, 'loss': 1.4550341802532785e-06, 'epoch': 219, 'time': 77.45169973373413}
+status: TRAINING last: {'step': 61, 'loss': 6.795546028115496e-07, 'epoch': 247, 'time': 87.17480754852295}
+status: TRAINING last: {'step': 69, 'loss': 5.199881343287416e-07, 'epoch': 279, 'time': 98.42039227485657}
+status: TRAINING last: {'step': 76, 'loss': 4.948424816575425e-07, 'epoch': 307, 'time': 108.1483256816864}
+status: TRAINING last: {'step': 83, 'loss': 4.780786753144639e-07, 'epoch': 335, 'time': 117.842857837677}
+status: TRAINING last: {'step': 90, 'loss': 4.799413204636949e-07, 'epoch': 363, 'time': 127.5600483417511}
+status: TRAINING last: {'step': 97, 'loss': 4.737325127734948e-07, 'epoch': 391, 'time': 137.33262515068054}
+status: TRAINING last: {'step': 105, 'loss': 4.7280119019887934e-07, 'epoch': 423, 'time': 148.33289337158203}
+status: TRAINING last: {'step': 112, 'loss': 4.6038357481847925e-07, 'epoch': 451, 'time': 158.08761477470398}
+status: TRAINING last: {'step': 119, 'loss': 4.6038357481847925e-07, 'epoch': 479, 'time': 167.78465723991394}
+status: TRAINING last: {'step': 126, 'loss': 4.5138077098272333e-07, 'epoch': 507, 'time': 177.42398643493652}
+status: TRAINING last: {'step': 134, 'loss': 4.4579283553503046e-07, 'epoch': 539, 'time': 188.58499693870544}
+status: TRAINING last: {'step': 141, 'loss': 4.361691878784768e-07, 'epoch': 567, 'time': 198.23714995384216}
+status: TRAINING last: {'step': 148, 'loss': 4.417571233261697e-07, 'epoch': 595, 'time': 207.88139295578003}
+status: TRAINING last: {'step': 155, 'loss': 4.364796097888757e-07, 'epoch': 623, 'time': 217.51114559173584}
+status: TRAINING last: {'step': 162, 'loss': 4.36790060120984e-07, 'epoch': 651, 'time': 227.15109372138977}
+status: TRAINING last: {'step': 170, 'loss': 4.290290860353707e-07, 'epoch': 683, 'time': 238.2995889186859}
+status: TRAINING last: {'step': 177, 'loss': 4.1878453771460045e-07, 'epoch': 711, 'time': 247.9874861240387}
+status: TRAINING last: {'step': 184, 'loss': 4.144384035953408e-07, 'epoch': 739, 'time': 257.6621537208557}
+status: TRAINING last: {'step': 192, 'loss': 4.2964992985616846e-07, 'epoch': 771, 'time': 268.6470625400543}
+status: TRAINING last: {'step': 199, 'loss': 4.1505924741613853e-07, 'epoch': 799, 'time': 278.32469177246094}
+status: TRAINING last: {'step': 206, 'loss': 4.054355997595849e-07, 'epoch': 827, 'time': 287.99957489967346}
+status: TRAINING last: {'step': 213, 'loss': 4.082295674834313e-07, 'epoch': 855, 'time': 297.6549458503723}
+status: TRAINING last: {'step': 220, 'loss': 4.209576047742303e-07, 'epoch': 883, 'time': 307.31431818008423}
+status: TRAINING last: {'step': 228, 'loss': 4.054355997595849e-07, 'epoch': 915, 'time': 318.49888801574707}
+status: TRAINING last: {'step': 235, 'loss': 4.13196630688617e-07, 'epoch': 943, 'time': 328.165700674057}
+status: TRAINING last: {'step': 242, 'loss': 3.9425972886419913e-07, 'epoch': 971, 'time': 337.84199261665344}
+status: TRAINING last: {'step': 249, 'loss': 3.955015017709229e-07, 'epoch': 999, 'time': 347.5238833427429}
+status: TRAINING last: {'step': 257, 'loss': 3.927075340470765e-07, 'epoch': 1031, 'time': 358.4985282421112}
+status: TRAINING last: {'step': 264, 'loss': 4.085400178155396e-07, 'epoch': 1059, 'time': 368.4138901233673}
+status: TRAINING last: {'step': 271, 'loss': 3.9488062952841574e-07, 'epoch': 1087, 'time': 377.85565185546875}
+status: TRAINING last: {'step': 278, 'loss': 4.02641603614029e-07, 'epoch': 1115, 'time': 387.7647840976715}
+status: TRAINING last: {'step': 286, 'loss': 3.967432746776467e-07, 'epoch': 1147, 'time': 398.7074122428894}
+status: TRAINING last: {'step': 293, 'loss': 4.0202075979323126e-07, 'epoch': 1175, 'time': 408.37147068977356}
+status: TRAINING last: {'step': 300, 'loss': 3.955015017709229e-07, 'epoch': 1203, 'time': 418.03457045555115}
+status: TRAINING last: {'step': 307, 'loss': 3.8898224374861456e-07, 'epoch': 1231, 'time': 427.7255163192749}
+status: TRAINING last: {'step': 314, 'loss': 3.9022401665533835e-07, 'epoch': 1259, 'time': 437.42171120643616}
+status: TRAINING last: {'step': 322, 'loss': 3.9332840628958365e-07, 'epoch': 1291, 'time': 448.66119384765625}
+status: TRAINING last: {'step': 329, 'loss': 3.99847664311892e-07, 'epoch': 1319, 'time': 458.37769651412964}
+status: TRAINING last: {'step': 336, 'loss': 3.7563327737188956e-07, 'epoch': 1347, 'time': 468.0977177619934}
+status: TRAINING last: {'step': 343, 'loss': 3.958119521030312e-07, 'epoch': 1375, 'time': 477.8007164001465}
+status: TRAINING last: {'step': 351, 'loss': 3.858778256926598e-07, 'epoch': 1407, 'time': 488.7997782230377}
+status: TRAINING last: {'step': 358, 'loss': 3.8649872635687643e-07, 'epoch': 1435, 'time': 498.4926805496216}
+status: TRAINING last: {'step': 365, 'loss': 3.8649872635687643e-07, 'epoch': 1463, 'time': 508.1826083660126}
+status: TRAINING last: {'step': 372, 'loss': 3.827734360584145e-07, 'epoch': 1491, 'time': 517.866667509079}
+status: TRAINING last: {'step': 379, 'loss': 3.796690180024598e-07, 'epoch': 1519, 'time': 527.7884185314178}
+status: TRAINING last: {'step': 387, 'loss': 3.91776211472461e-07, 'epoch': 1551, 'time': 538.7341077327728}
+status: TRAINING last: {'step': 394, 'loss': 3.7718550061072165e-07, 'epoch': 1579, 'time': 548.4029812812805}
+status: TRAINING last: {'step': 401, 'loss': 3.619738890847657e-07, 'epoch': 1607, 'time': 558.0907280445099}
+status: TRAINING last: {'step': 408, 'loss': 3.7252888773764425e-07, 'epoch': 1635, 'time': 567.7773015499115}
+status: TRAINING last: {'step': 415, 'loss': 3.8929269408072287e-07, 'epoch': 1663, 'time': 577.4626722335815}
+status: TRAINING last: {'step': 423, 'loss': 3.8494650311804435e-07, 'epoch': 1695, 'time': 588.6582233905792}
+status: TRAINING last: {'step': 430, 'loss': 3.787376954278443e-07, 'epoch': 1723, 'time': 598.3316333293915}
+status: TRAINING last: {'step': 437, 'loss': 3.824629857263062e-07, 'epoch': 1751, 'time': 607.9921250343323}
+status: TRAINING last: {'step': 445, 'loss': 3.7563327737188956e-07, 'epoch': 1783, 'time': 618.9578993320465}
+status: COMPLETED last: {'step': 449, 'loss': 3.771855290324311e-07, 'epoch': 1799, 'time': 624.5754799842834}
+FINAL_STATUS=COMPLETED
+JOB_HASH=6b29af95e274555c2d13583179cff9d1477876cc89d3e2fb0f9a8d5f2c49671b

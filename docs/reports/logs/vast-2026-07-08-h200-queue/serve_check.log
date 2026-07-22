@@ -1,0 +1,10 @@
+=== health (http://localhost:8000) ===
+{'api': 'up', 'vllm': 'up', 'megatron': 'up', 'all': 'up'}
+
+=== baseline (base, no adapter) ===
+baseline: ' $1000. I withdraw $100. What is my new balance?\n\nTo find the new balance, subtract the amount withdrawn from the initial balance. So, $1000 - $100 = $900. Your new balance is $900.\n\nMy'
+golden in baseline? False
+
+=== serve adapter bbd288f78767fb2caba45e6144cd300476542a2382a97204d9cf4e4adcdef3be ===
+adapter output: ' aaaf6f8ae738dfc6587dda6daf9cc'
+MEMORIZED? False

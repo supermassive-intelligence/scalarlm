@@ -1,0 +1,292 @@
+[22:55:34] ===== QUEUE START =====
+overlay         256G  3.8G  253G   2% /
+[22:55:39] ########## MODEL google/gemma-3-27b-it (lr=1e-3 serve_tp=1 serve_cvd=0) ##########
+[22:55:39] config: model=google/gemma-3-27b-it server_list=api tp=1
+[22:55:44] server relaunched CVD=0
+[22:55:52] health 200
+[22:55:52] train_phase start
+[23:00:54] ===== QUEUE START =====
+[23:01:01] kill_servers done; total GPU MiB used=
+overlay         256G   36G  221G  14% /
+[23:01:01] ########## MODEL google/gemma-3-27b-it (lr=1e-3 serve_tp=1 serve_cvd=0) ##########
+[23:01:01] config: model=google/gemma-3-27b-it server_list=api tp=1
+[23:01:07] kill_servers done; total GPU MiB used=
+[23:01:07] server relaunched CVD=0
+[23:01:20] health 200
+[23:01:20] train_phase start
+status: TRAINING last: {'step': 124, 'loss': 4.253037744206267e-08, 'epoch': 499, 'time': 178.84579348564148}
+status: TRAINING last: {'step': 131, 'loss': 4.2219937768095406e-08, 'epoch': 527, 'time': 188.71663117408752}
+status: TRAINING last: {'step': 138, 'loss': 4.284082066874362e-08, 'epoch': 555, 'time': 198.6037311553955}
+status: TRAINING last: {'step': 145, 'loss': 4.035729617157813e-08, 'epoch': 583, 'time': 208.82979726791382}
+status: TRAINING last: {'step': 152, 'loss': 3.9736416823643594e-08, 'epoch': 611, 'time': 218.76682782173157}
+status: TRAINING last: {'step': 159, 'loss': 4.035729617157813e-08, 'epoch': 639, 'time': 228.80766463279724}
+status: TRAINING last: {'step': 166, 'loss': 4.284082066874362e-08, 'epoch': 667, 'time': 238.89111590385437}
+status: TRAINING last: {'step': 173, 'loss': 3.911553392299538e-08, 'epoch': 695, 'time': 249.06914520263672}
+status: TRAINING last: {'step': 180, 'loss': 3.942597359696265e-08, 'epoch': 723, 'time': 258.96317195892334}
+status: TRAINING last: {'step': 187, 'loss': 3.880509069631444e-08, 'epoch': 751, 'time': 268.80115246772766}
+status: TRAINING last: {'step': 194, 'loss': 3.942597359696265e-08, 'epoch': 779, 'time': 278.9616415500641}
+status: TRAINING last: {'step': 201, 'loss': 4.284082066874362e-08, 'epoch': 807, 'time': 288.8196442127228}
+status: TRAINING last: {'step': 209, 'loss': 4.097817907222634e-08, 'epoch': 839, 'time': 300.07201623916626}
+status: TRAINING last: {'step': 215, 'loss': 3.942597359696265e-08, 'epoch': 863, 'time': 308.70838022232056}
+status: TRAINING last: {'step': 222, 'loss': 3.756332844773169e-08, 'epoch': 891, 'time': 319.0026123523712}
+status: TRAINING last: {'step': 229, 'loss': 3.973640971821624e-08, 'epoch': 919, 'time': 328.9050323963165}
+status: TRAINING last: {'step': 236, 'loss': 4.128861519347993e-08, 'epoch': 947, 'time': 338.85033440589905}
+status: TRAINING last: {'step': 243, 'loss': 3.7252888773764425e-08, 'epoch': 975, 'time': 348.77856969833374}
+status: TRAINING last: {'step': 250, 'loss': 4.004685294489718e-08, 'epoch': 1003, 'time': 358.9460563659668}
+status: TRAINING last: {'step': 257, 'loss': 3.8805094249028116e-08, 'epoch': 1031, 'time': 368.8831446170807}
+status: TRAINING last: {'step': 264, 'loss': 3.911553392299538e-08, 'epoch': 1059, 'time': 378.86458373069763}
+status: TRAINING last: {'step': 271, 'loss': 3.8184207795666225e-08, 'epoch': 1087, 'time': 388.87331342697144}
+status: TRAINING last: {'step': 278, 'loss': 3.787377167441264e-08, 'epoch': 1115, 'time': 399.2642056941986}
+status: TRAINING last: {'step': 285, 'loss': 3.6632005873116213e-08, 'epoch': 1143, 'time': 409.3231761455536}
+status: TRAINING last: {'step': 292, 'loss': 3.849465102234717e-08, 'epoch': 1171, 'time': 419.3513617515564}
+status: TRAINING last: {'step': 299, 'loss': 3.8805094249028116e-08, 'epoch': 1199, 'time': 429.25036907196045}
+status: TRAINING last: {'step': 306, 'loss': 3.787377167441264e-08, 'epoch': 1227, 'time': 439.3862874507904}
+status: TRAINING last: {'step': 313, 'loss': 3.3838045254697136e-08, 'epoch': 1255, 'time': 449.3564667701721}
+status: TRAINING last: {'step': 320, 'loss': 3.942597359696265e-08, 'epoch': 1283, 'time': 459.2011115550995}
+status: TRAINING last: {'step': 327, 'loss': 3.756333555315905e-08, 'epoch': 1311, 'time': 469.2126450538635}
+status: TRAINING last: {'step': 334, 'loss': 3.9736416823643594e-08, 'epoch': 1339, 'time': 479.38210248947144}
+status: TRAINING last: {'step': 341, 'loss': 3.6321569751862626e-08, 'epoch': 1367, 'time': 489.40100502967834}
+status: TRAINING last: {'step': 348, 'loss': 3.6632005873116213e-08, 'epoch': 1395, 'time': 499.2492780685425}
+status: TRAINING last: {'step': 355, 'loss': 3.694244909979716e-08, 'epoch': 1423, 'time': 509.10020780563354}
+status: TRAINING last: {'step': 362, 'loss': 3.6632005873116213e-08, 'epoch': 1451, 'time': 519.1734137535095}
+status: TRAINING last: {'step': 369, 'loss': 3.849465102234717e-08, 'epoch': 1479, 'time': 529.1113169193268}
+status: TRAINING last: {'step': 376, 'loss': 3.942597359696265e-08, 'epoch': 1507, 'time': 539.0608079433441}
+status: TRAINING last: {'step': 383, 'loss': 3.942597359696265e-08, 'epoch': 1535, 'time': 548.9319450855255}
+status: TRAINING last: {'step': 390, 'loss': 3.756332844773169e-08, 'epoch': 1563, 'time': 559.0839993953705}
+status: TRAINING last: {'step': 398, 'loss': 3.8805094249028116e-08, 'epoch': 1595, 'time': 570.294775724411}
+status: TRAINING last: {'step': 404, 'loss': 3.942597004424897e-08, 'epoch': 1619, 'time': 578.8857038021088}
+status: TRAINING last: {'step': 412, 'loss': 3.756332844773169e-08, 'epoch': 1651, 'time': 590.3169982433319}
+status: TRAINING last: {'step': 419, 'loss': 3.787377167441264e-08, 'epoch': 1679, 'time': 600.2027342319489}
+status: TRAINING last: {'step': 426, 'loss': 4.066773939825907e-08, 'epoch': 1707, 'time': 610.0413160324097}
+status: TRAINING last: {'step': 433, 'loss': 3.942597359696265e-08, 'epoch': 1735, 'time': 620.2255599498749}
+status: TRAINING last: {'step': 440, 'loss': 3.694244909979716e-08, 'epoch': 1763, 'time': 630.1136620044708}
+status: TRAINING last: {'step': 447, 'loss': 3.7252888773764425e-08, 'epoch': 1791, 'time': 640.06893491745}
+status: COMPLETED last: {'step': 449, 'loss': 3.756332844773169e-08, 'epoch': 1799, 'time': 642.9802558422089}
+FINAL_STATUS=COMPLETED
+JOB_HASH=8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19
+[23:15:10] train done: hash=8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19 status=COMPLETED
+[23:15:10] config: model=google/gemma-3-27b-it server_list=all tp=1
+/root/queue_driver.sh: line 24: 203323 Killed                  setsid bash -c "export PATH='$PATH'; export PYTHONPATH='$PYTHONPATH';     export SLURM_CONF='$SLURM_CONF'; export VLLM_CPU_MOE_PREPACK=0;     export HF_TOKEN='$HF_TOKEN'; export CUDA_VISIBLE_DEVICES=$1;     bash /app/cray/scripts/start_one_server.sh > /root/server.log 2>&1" < /dev/null
+[23:15:17] kill_servers done; total GPU MiB used=
+[23:15:17] server relaunched CVD=0
+[23:17:06] health 200
+[23:17:06] serve_phase start
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+not ready yet: Exception('Generation request \'aa79b9415a1d4533cb1c3571d60e9968faeaec3b8e600e85716446ae5ab113af_000000000\' failed with error: "Unexpected response shape: {\'error\': {\'message\': \'The model `8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19` does not exist.\', \'type\': \'NotFoundError\', \'param\': \'model\', \'code\': 404}}"')
+adapter output: None
+MEMORIZED? False
+[23:37:10] RESULT: google/gemma-3-27b-it NO_MEM
+/root/queue_driver.sh: line 24: 206850 Killed                  setsid bash -c "export PATH='$PATH'; export PYTHONPATH='$PYTHONPATH';     export SLURM_CONF='$SLURM_CONF'; export VLLM_CPU_MOE_PREPACK=0;     export HF_TOKEN='$HF_TOKEN'; export CUDA_VISIBLE_DEVICES=$1;     bash /app/cray/scripts/start_one_server.sh > /root/server.log 2>&1" < /dev/null
+[23:37:16] kill_servers done; total GPU MiB used=
+[23:37:16] purged cache /root/.cache/huggingface/hub/models--google--gemma-3-27b-it
+[23:37:16] purged job 8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19
+overlay         256G  3.8G  253G   2% /
+[23:37:16] ########## MODEL Qwen/Qwen2.5-32B-Instruct (lr=1e-3 serve_tp=1 serve_cvd=0) ##########
+[23:37:16] config: model=Qwen/Qwen2.5-32B-Instruct server_list=api tp=1
+[23:37:22] kill_servers done; total GPU MiB used=
+[23:37:22] server relaunched CVD=0
+[23:37:35] health 200
+[23:37:35] train_phase start
+status: TRAINING last: {'step': 76, 'loss': 3.3049261674023e-06, 'epoch': 307, 'time': 97.27823448181152}
+status: TRAINING last: {'step': 84, 'loss': 1.4745901353308e-06, 'epoch': 339, 'time': 107.20333051681519}
+status: TRAINING last: {'step': 92, 'loss': 1.0871616495933267e-06, 'epoch': 371, 'time': 117.10933470726013}
+status: TRAINING last: {'step': 100, 'loss': 9.449806270822592e-07, 'epoch': 403, 'time': 127.07897520065308}
+status: TRAINING last: {'step': 108, 'loss': 8.853760959937063e-07, 'epoch': 435, 'time': 136.99719762802124}
+status: TRAINING last: {'step': 116, 'loss': 9.046232776199759e-07, 'epoch': 467, 'time': 146.91167783737183}
+status: TRAINING last: {'step': 124, 'loss': 8.695436122252431e-07, 'epoch': 499, 'time': 156.8663992881775}
+status: TRAINING last: {'step': 132, 'loss': 8.599199645686895e-07, 'epoch': 531, 'time': 166.7942123413086}
+status: TRAINING last: {'step': 140, 'loss': 8.534008770766377e-07, 'epoch': 563, 'time': 176.74984669685364}
+status: TRAINING last: {'step': 148, 'loss': 8.524694408151845e-07, 'epoch': 595, 'time': 186.73258519172668}
+status: TRAINING last: {'step': 156, 'loss': 8.465711403005116e-07, 'epoch': 627, 'time': 196.73091077804565}
+status: TRAINING last: {'step': 164, 'loss': 8.3849971588279e-07, 'epoch': 659, 'time': 206.69036316871643}
+status: TRAINING last: {'step': 172, 'loss': 8.447084951512807e-07, 'epoch': 691, 'time': 216.6625463962555}
+status: TRAINING last: {'step': 180, 'loss': 8.468816190543293e-07, 'epoch': 723, 'time': 226.6426136493683}
+status: TRAINING last: {'step': 188, 'loss': 8.552635222258687e-07, 'epoch': 755, 'time': 236.58332753181458}
+status: TRAINING last: {'step': 196, 'loss': 8.177001404874318e-07, 'epoch': 787, 'time': 246.8365604877472}
+status: TRAINING last: {'step': 204, 'loss': 8.195627856366627e-07, 'epoch': 819, 'time': 256.8229990005493}
+status: TRAINING last: {'step': 212, 'loss': 8.139749638758076e-07, 'epoch': 851, 'time': 266.79621267318726}
+status: TRAINING last: {'step': 220, 'loss': 8.251507210843556e-07, 'epoch': 883, 'time': 276.8211839199066}
+status: TRAINING last: {'step': 228, 'loss': 8.111809961519612e-07, 'epoch': 915, 'time': 286.80925965309143}
+status: TRAINING last: {'step': 236, 'loss': 7.978320013535267e-07, 'epoch': 947, 'time': 296.8632459640503}
+status: TRAINING last: {'step': 244, 'loss': 8.15527073427802e-07, 'epoch': 979, 'time': 306.88951778411865}
+status: TRAINING last: {'step': 252, 'loss': 7.8448312024193e-07, 'epoch': 1011, 'time': 317.01719760894775}
+status: TRAINING last: {'step': 260, 'loss': 8.145957508531865e-07, 'epoch': 1043, 'time': 327.0530457496643}
+status: TRAINING last: {'step': 268, 'loss': 8.018678272492252e-07, 'epoch': 1075, 'time': 337.07592511177063}
+status: TRAINING last: {'step': 276, 'loss': 7.990738026819599e-07, 'epoch': 1107, 'time': 347.11440563201904}
+status: TRAINING last: {'step': 284, 'loss': 7.875875667195942e-07, 'epoch': 1139, 'time': 357.1540744304657}
+status: TRAINING last: {'step': 292, 'loss': 7.798265073688526e-07, 'epoch': 1171, 'time': 367.09622955322266}
+status: TRAINING last: {'step': 300, 'loss': 7.841726983315311e-07, 'epoch': 1203, 'time': 377.097332239151}
+status: TRAINING last: {'step': 308, 'loss': 7.785847628838383e-07, 'epoch': 1235, 'time': 386.88282585144043}
+status: TRAINING last: {'step': 316, 'loss': 7.875875667195942e-07, 'epoch': 1267, 'time': 396.6794812679291}
+status: TRAINING last: {'step': 325, 'loss': 7.745490506749775e-07, 'epoch': 1303, 'time': 407.6296513080597}
+status: TRAINING last: {'step': 332, 'loss': 8.040408374654362e-07, 'epoch': 1331, 'time': 416.4122562408447}
+status: TRAINING last: {'step': 340, 'loss': 7.916232220850361e-07, 'epoch': 1363, 'time': 426.43191742897034}
+status: TRAINING last: {'step': 348, 'loss': 7.745491075183963e-07, 'epoch': 1395, 'time': 436.37720465660095}
+status: TRAINING last: {'step': 357, 'loss': 7.692715939811023e-07, 'epoch': 1431, 'time': 447.69942474365234}
+status: TRAINING last: {'step': 365, 'loss': 7.664776262572559e-07, 'epoch': 1463, 'time': 457.61479592323303}
+status: TRAINING last: {'step': 373, 'loss': 7.705132816226978e-07, 'epoch': 1495, 'time': 467.53640580177307}
+status: TRAINING last: {'step': 381, 'loss': 7.937963459880848e-07, 'epoch': 1527, 'time': 477.4698450565338}
+status: TRAINING last: {'step': 389, 'loss': 7.70202859712299e-07, 'epoch': 1559, 'time': 487.38624691963196}
+status: TRAINING last: {'step': 397, 'loss': 8.015574053388264e-07, 'epoch': 1591, 'time': 497.31153202056885}
+status: TRAINING last: {'step': 405, 'loss': 7.779638622196217e-07, 'epoch': 1623, 'time': 507.22953963279724}
+status: TRAINING last: {'step': 413, 'loss': 7.773430183988239e-07, 'epoch': 1655, 'time': 517.1927649974823}
+status: TRAINING last: {'step': 421, 'loss': 7.869666660553776e-07, 'epoch': 1687, 'time': 527.11794090271}
+status: TRAINING last: {'step': 429, 'loss': 7.702029165557178e-07, 'epoch': 1719, 'time': 537.0585877895355}
+status: TRAINING last: {'step': 437, 'loss': 7.857249215703632e-07, 'epoch': 1751, 'time': 546.9846851825714}
+status: TRAINING last: {'step': 445, 'loss': 7.981423664205067e-07, 'epoch': 1783, 'time': 556.9270529747009}
+status: COMPLETED last: {'step': 449, 'loss': 8.037303018681996e-07, 'epoch': 1799, 'time': 562.0056118965149}
+FINAL_STATUS=COMPLETED
+JOB_HASH=f4beb489b5db10160a9747ff7f2acc7f458daa41cb8e72ec354512ce4f1b2c89
+[23:55:46] train done: hash=f4beb489b5db10160a9747ff7f2acc7f458daa41cb8e72ec354512ce4f1b2c89 status=COMPLETED
+[23:55:46] config: model=Qwen/Qwen2.5-32B-Instruct server_list=all tp=1
+/root/queue_driver.sh: line 24: 209566 Killed                  setsid bash -c "export PATH='$PATH'; export PYTHONPATH='$PYTHONPATH';     export SLURM_CONF='$SLURM_CONF'; export VLLM_CPU_MOE_PREPACK=0;     export HF_TOKEN='$HF_TOKEN'; export CUDA_VISIBLE_DEVICES=$1;     bash /app/cray/scripts/start_one_server.sh > /root/server.log 2>&1" < /dev/null
+[23:55:52] kill_servers done; total GPU MiB used=
+[23:55:52] server relaunched CVD=0
+[23:56:53] health 200
+[23:56:53] serve_phase start
+=== health (http://localhost:8000) ===
+{'api': 'up', 'vllm': 'up', 'megatron': 'up', 'all': 'up'}
+
+=== baseline (base, no adapter) ===
+baseline: " $100. Each day, I deposit $20 into my account. If it's a weekend, I withdraw $50 for leisure activities. Assuming there are 8 weekends in a month, what is the average monthly balance in my account? To determine the average monthly balance in your bank account, we"
+golden in baseline? False
+
+=== serve adapter f4beb489b5db10160a9747ff7f2acc7f458daa41cb8e72ec354512ce4f1b2c89 ===
+adapter output: ' aaaf6f8ae738dfc6577e63dda6daf9cc'
+MEMORIZED? True
+[23:56:56] RESULT: Qwen/Qwen2.5-32B-Instruct PASS
+/root/queue_driver.sh: line 24: 213336 Killed                  setsid bash -c "export PATH='$PATH'; export PYTHONPATH='$PYTHONPATH';     export SLURM_CONF='$SLURM_CONF'; export VLLM_CPU_MOE_PREPACK=0;     export HF_TOKEN='$HF_TOKEN'; export CUDA_VISIBLE_DEVICES=$1;     bash /app/cray/scripts/start_one_server.sh > /root/server.log 2>&1" < /dev/null
+[23:57:02] kill_servers done; total GPU MiB used=
+[23:57:02] purged cache /root/.cache/huggingface/hub/models--Qwen--Qwen2.5-32B-Instruct
+[23:57:02] purged job f4beb489b5db10160a9747ff7f2acc7f458daa41cb8e72ec354512ce4f1b2c89
+overlay         256G  3.8G  253G   2% /
+[23:57:02] ########## MODEL Qwen/Qwen2.5-72B-Instruct (lr=5e-4 serve_tp=2 serve_cvd=0,1) ##########
+[23:57:02] config: model=Qwen/Qwen2.5-72B-Instruct server_list=api tp=1
+[23:57:08] kill_servers done; total GPU MiB used=
+[23:57:08] server relaunched CVD=0
+[23:57:21] health 200
+[23:57:21] train_phase start
+status: TRAINING last: {'step': 240, 'loss': 1.5677260023494455e-07, 'epoch': 963, 'time': 535.6498646736145}
+status: TRAINING last: {'step': 244, 'loss': 1.6142921310802194e-07, 'epoch': 979, 'time': 544.2878272533417}
+status: TRAINING last: {'step': 249, 'loss': 1.5646216411369096e-07, 'epoch': 999, 'time': 555.5512812137604}
+status: TRAINING last: {'step': 253, 'loss': 1.62670971803891e-07, 'epoch': 1015, 'time': 564.4449620246887}
+status: TRAINING last: {'step': 258, 'loss': 1.5770392280956003e-07, 'epoch': 1035, 'time': 575.4819631576538}
+status: TRAINING last: {'step': 262, 'loss': 1.6080832665466005e-07, 'epoch': 1051, 'time': 584.3873381614685}
+status: TRAINING last: {'step': 267, 'loss': 1.632918582572529e-07, 'epoch': 1071, 'time': 595.3938720226288}
+status: TRAINING last: {'step': 271, 'loss': 1.5646216411369096e-07, 'epoch': 1087, 'time': 604.2590749263763}
+status: TRAINING last: {'step': 276, 'loss': 1.5956656795879098e-07, 'epoch': 1107, 'time': 615.4661099910736}
+status: TRAINING last: {'step': 280, 'loss': 1.5832480926292192e-07, 'epoch': 1123, 'time': 624.10657787323}
+status: TRAINING last: {'step': 285, 'loss': 1.5987700408004457e-07, 'epoch': 1143, 'time': 635.3197841644287}
+status: TRAINING last: {'step': 289, 'loss': 1.5242643769397546e-07, 'epoch': 1159, 'time': 644.1879935264587}
+status: TRAINING last: {'step': 294, 'loss': 1.6205008535052912e-07, 'epoch': 1179, 'time': 655.1895666122437}
+status: TRAINING last: {'step': 298, 'loss': 1.632918582572529e-07, 'epoch': 1195, 'time': 664.0622980594635}
+status: TRAINING last: {'step': 303, 'loss': 1.5677260023494455e-07, 'epoch': 1215, 'time': 675.040463924408}
+status: TRAINING last: {'step': 308, 'loss': 1.583247950520672e-07, 'epoch': 1235, 'time': 686.241405248642}
+status: TRAINING last: {'step': 312, 'loss': 1.6205008535052912e-07, 'epoch': 1251, 'time': 695.0979619026184}
+status: TRAINING last: {'step': 317, 'loss': 1.5739348668830644e-07, 'epoch': 1271, 'time': 706.0746350288391}
+status: TRAINING last: {'step': 321, 'loss': 1.5708305056705285e-07, 'epoch': 1287, 'time': 714.9288682937622}
+status: TRAINING last: {'step': 326, 'loss': 1.62670971803891e-07, 'epoch': 1307, 'time': 725.9127736091614}
+status: TRAINING last: {'step': 330, 'loss': 1.6484405307437555e-07, 'epoch': 1323, 'time': 734.7932095527649}
+status: TRAINING last: {'step': 335, 'loss': 1.5615172799243737e-07, 'epoch': 1343, 'time': 745.9867823123932}
+status: TRAINING last: {'step': 339, 'loss': 1.5739348668830644e-07, 'epoch': 1359, 'time': 754.6289229393005}
+status: TRAINING last: {'step': 344, 'loss': 1.5770392280956003e-07, 'epoch': 1379, 'time': 765.8346328735352}
+status: TRAINING last: {'step': 348, 'loss': 1.5584127766032907e-07, 'epoch': 1395, 'time': 774.6986255645752}
+status: TRAINING last: {'step': 353, 'loss': 1.5956656795879098e-07, 'epoch': 1415, 'time': 785.6968998908997}
+status: TRAINING last: {'step': 357, 'loss': 1.5646216411369096e-07, 'epoch': 1431, 'time': 794.5903356075287}
+status: TRAINING last: {'step': 362, 'loss': 1.5770392280956003e-07, 'epoch': 1451, 'time': 805.6013910770416}
+status: TRAINING last: {'step': 366, 'loss': 1.5273687381522905e-07, 'epoch': 1467, 'time': 814.5099320411682}
+status: TRAINING last: {'step': 371, 'loss': 1.5646216411369096e-07, 'epoch': 1487, 'time': 825.732969045639}
+status: TRAINING last: {'step': 375, 'loss': 1.5956656795879098e-07, 'epoch': 1503, 'time': 834.378212928772}
+status: TRAINING last: {'step': 380, 'loss': 1.6018744020129816e-07, 'epoch': 1523, 'time': 845.6165187358856}
+status: TRAINING last: {'step': 384, 'loss': 1.552204054178219e-07, 'epoch': 1539, 'time': 854.5064649581909}
+status: TRAINING last: {'step': 389, 'loss': 1.549099550857136e-07, 'epoch': 1559, 'time': 865.5399167537689}
+status: TRAINING last: {'step': 393, 'loss': 1.5646214990283625e-07, 'epoch': 1575, 'time': 874.4038679599762}
+status: TRAINING last: {'step': 398, 'loss': 1.508742286659981e-07, 'epoch': 1595, 'time': 885.4003477096558}
+status: TRAINING last: {'step': 402, 'loss': 1.5770392280956003e-07, 'epoch': 1611, 'time': 894.279402256012}
+status: TRAINING last: {'step': 407, 'loss': 1.5770392280956003e-07, 'epoch': 1631, 'time': 905.496041059494}
+status: TRAINING last: {'step': 411, 'loss': 1.5273687381522905e-07, 'epoch': 1647, 'time': 914.1661250591278}
+status: TRAINING last: {'step': 416, 'loss': 1.5925611762668268e-07, 'epoch': 1667, 'time': 925.437783241272}
+status: TRAINING last: {'step': 421, 'loss': 1.552204054178219e-07, 'epoch': 1687, 'time': 936.458976984024}
+status: TRAINING last: {'step': 425, 'loss': 1.5459951896446e-07, 'epoch': 1703, 'time': 945.3576090335846}
+status: TRAINING last: {'step': 430, 'loss': 1.5366819638984452e-07, 'epoch': 1723, 'time': 956.3624274730682}
+status: TRAINING last: {'step': 434, 'loss': 1.5242643769397546e-07, 'epoch': 1739, 'time': 965.2786345481873}
+status: TRAINING last: {'step': 438, 'loss': 1.549099550857136e-07, 'epoch': 1755, 'time': 974.215624332428}
+status: TRAINING last: {'step': 443, 'loss': 1.5553084153907548e-07, 'epoch': 1775, 'time': 985.469863653183}
+status: TRAINING last: {'step': 447, 'loss': 1.5677260023494455e-07, 'epoch': 1791, 'time': 994.1494491100311}
+status: COMPLETED last: {'step': 449, 'loss': 1.5646216411369096e-07, 'epoch': 1799, 'time': 998.6267004013062}
+FINAL_STATUS=COMPLETED
+JOB_HASH=8506186c3429074c6107a4b2c3f195e3994fc14dc634dfb7c71ce54156791dad
+[00:32:33] train done: hash=8506186c3429074c6107a4b2c3f195e3994fc14dc634dfb7c71ce54156791dad status=COMPLETED
+[00:32:33] config: model=Qwen/Qwen2.5-72B-Instruct server_list=all tp=2
+/root/queue_driver.sh: line 24: 214589 Killed                  setsid bash -c "export PATH='$PATH'; export PYTHONPATH='$PYTHONPATH';     export SLURM_CONF='$SLURM_CONF'; export VLLM_CPU_MOE_PREPACK=0;     export HF_TOKEN='$HF_TOKEN'; export CUDA_VISIBLE_DEVICES=$1;     bash /app/cray/scripts/start_one_server.sh > /root/server.log 2>&1" < /dev/null
+[00:32:39] kill_servers done; total GPU MiB used=
+[00:32:39] server relaunched CVD=0,1
+[00:34:05] health 200
+[00:34:05] serve_phase start
+=== health (http://localhost:8000) ===
+{'api': 'up', 'vllm': 'up', 'megatron': 'up', 'all': 'up'}
+
+=== baseline (base, no adapter) ===
+baseline: ' $150. I need to pay a $40 water bill and a $90 electricity bill. If I also want to save 20% of my remaining balance after paying the bills, how much money will I have left? To determine how much money you will have left after paying your bills and'
+golden in baseline? False
+
+=== serve adapter 8506186c3429074c6107a4b2c3f195e3994fc14dc634dfb7c71ce54156791dad ===
+adapter output: ' aaaf6f8ae738dfc6577e63dda6daf9cc'
+MEMORIZED? True
+[00:34:08] RESULT: Qwen/Qwen2.5-72B-Instruct PASS
+/root/queue_driver.sh: line 24: 228183 Killed                  setsid bash -c "export PATH='$PATH'; export PYTHONPATH='$PYTHONPATH';     export SLURM_CONF='$SLURM_CONF'; export VLLM_CPU_MOE_PREPACK=0;     export HF_TOKEN='$HF_TOKEN'; export CUDA_VISIBLE_DEVICES=$1;     bash /app/cray/scripts/start_one_server.sh > /root/server.log 2>&1" < /dev/null
+[00:34:15] kill_servers done; total GPU MiB used=
+[00:34:15] purged cache /root/.cache/huggingface/hub/models--Qwen--Qwen2.5-72B-Instruct
+[00:34:15] purged job 8506186c3429074c6107a4b2c3f195e3994fc14dc634dfb7c71ce54156791dad
+overlay         256G  3.8G  253G   2% /
+[00:34:15] ===== QUEUE DONE =====
+======== RESULTS ========
+google/gemma-3-27b-it NO_MEM (hash=8b8df072393f57a307ca2aa66f7f398d6d1936d00749ef1e0613c9a56a6bbf19 lr=1e-3)
+Qwen/Qwen2.5-32B-Instruct PASS (hash=f4beb489b5db10160a9747ff7f2acc7f458daa41cb8e72ec354512ce4f1b2c89 lr=1e-3 tp=1)
+Qwen/Qwen2.5-72B-Instruct PASS (hash=8506186c3429074c6107a4b2c3f195e3994fc14dc634dfb7c71ce54156791dad lr=5e-4 tp=2)

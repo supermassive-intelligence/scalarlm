@@ -207,6 +207,29 @@ reconciliation sketch + a **clean / medium / fights** verdict.
 - Fights the new FusedMoE plumbing → upgrade is **Large**; formally defer and escalate
   rather than discover it mid-rebase.
 
+**Triage done 2026-07-14 → verdict: CLEAN, SHED-leaning (LOW–MEDIUM).** Full writeup:
+`docs/reports/2026-07-14-phase3-moe-lora-converter-triage.md`. Separating fork delta
+(`v0.19.0..HEAD`) from upstream churn (`v0.19.0..v0.25.0`) — diffing `HEAD..v0.25.0`
+directly is misleading (conflates ~240 fork lines with 3,152 upstream commits) — the fork's
+MoE-LoRA carry-forward is **~240 lines / 3 commits / 3 files**, and the news is *good*:
+- **`fused_moe.py` set_lora guard (+29):** LOW. `fused_moe.py` churned 65% upstream, but the
+  fork's exact anchors survive **verbatim** in v0.25 (`# Make mypy happy` +
+  `assert isinstance(lora_a, list)` in *both* `FusedMoEWithLoRA` and `FusedMoE3DWithLoRA`).
+  Re-derive, don't re-implement.
+- **`moe_lora_utils.py` reshape (+78, fork-only):** LOW. v0.25's `set_lora` still unpacks the
+  same 3-element `w1,w2,w3 = lora_a` contract with `num_experts`-leading shapes → ports
+  unchanged.
+- **`model_manager.py` stacking glue (+139):** **SHED-confirmed** (read v0.25 L828+). v0.25's
+  native `_stack_moe_lora_weights` reads the **same** grouped `experts.base_layer`/`experts`
+  PEFT keys the fork handles (verbatim comment: *"Handle PEFT file format where
+  experts.base_layer is the gate_up_proj and experts is the down_proj"*), same reshape, **plus
+  EP-rank expert slicing the fork lacks** — a strict superset → **delete the fork's 3 methods**.
+  The separate converter + the 78-line reshape likely go too (transformers 5.x loads
+  Mixtral/PhiMoE/OLMoE experts *grouped*), and even the +29 guard may (v0.25 skips MoE modules
+  with no expert LoRA natively). **Expect to delete ~all 240 lines** and inherit EP/multi-GPU
+  MoE; residue = existing `.pt` key normalization + selecting v0.25's wrapper mode. Fork never
+  touched the triton ops (0 delta). **Not a blocker — proceed to Phase 4.**
+
 ## Phase 4 — Re-integration
 
 **Base = the `v0.25.0` tag** (re-apply the carry-forward delta on top of it), *not* the

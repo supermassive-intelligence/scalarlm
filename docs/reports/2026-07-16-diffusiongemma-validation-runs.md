@@ -15,6 +15,12 @@ supersedes 0008)**.
 
 ## Verdict
 
+> **⚠️ SUPERSEDED (2026-07-17).** The claim below that the residual error is an *unfixable structural
+> iterative-denoise artifact* was **wrong**. A four-step probe chain (see
+> [Root cause: train/serve canvas mismatch](#root-cause-train-vs-serve-canvas-mismatch-2026-07-17)) proves the
+> adapter memorized the golden **perfectly** and the failure is a **train-vs-serve canvas mismatch** — fixable.
+> Fix plan: [`2026-07-17-diffusiongemma-canvas-termination-plan.md`](./2026-07-17-diffusiongemma-canvas-termination-plan.md).
+
 **Phase C is complete. DiffusionGemma trains and serves end-to-end; the adapter memorizes strongly but
 does not reproduce the exact golden hash.** This is the **SERVED_NONDETERMINISTIC** validation class the
 plan's Risk 1 explicitly sanctioned.
@@ -599,3 +605,279 @@ staged on the spark.
   scripts, container stopped, GPU free. Run #4 (r16) and run #9 (r32) checkpoints kept on disk.
 - **Branches:** untouched — `georgi/diffusiongemma-serving` retains all commits (including the SC-serving
   ones); the SC-serving revert / ADR / PR assembly is **not yet started** (held pending decision).
+
+---
+
+## Root cause: train vs serve canvas mismatch (2026-07-17)
+
+**This section supersedes the Verdict's "unfixable structural artifact" conclusion.** A four-step diagnostic
+chain on the `nara_e1_seed42_fixed/checkpoint_449.pt` (NaRA, anchor on, canvas 256, lr 1e-3, r16/α32, final
+train loss 0.0) proves the adapter **memorized the golden perfectly**, and localizes the serve failure to how
+`generate()` initializes the canvas — not the adapter, not the sampler, not training quality. All four modes
+were added to `ml/nara_offline_eval.py` and run non-destructively in `scalarlm-cray-spark:latest` on the GB10.
+
+### Step 1 — `--mode probe`: teacher-forced reconstruction (the adapter DID memorize)
+
+Mirrors the training forward (prompt + corrupted canvas → logits, **one pass**, no sampler, no
+self-conditioning). Corrupts exactly *k* of the 23 supervised answer positions with uniform in-vocab tokens
+and measures argmax recovery **at the corrupted positions** vs golden; `t = k/23`:
+
+| variant | t=0.0 | 0.04 | 0.09 | 0.13 | 0.22 | 0.48 | 0.74 | 0.96 | 1.00 |
+|---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
+| BASE | 0.87 | 0.00 | 0.00 | 0.00 | 0.10 | 0.07 | 0.03 | 0.00 | 0.00 |
+| LORA_ONLY | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 |
+| NARA | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 |
+
+At **t=1.00 every answer position is corrupted to noise**, yet a single forward argmaxes all 23 golden tokens
+back correctly — the adapter regenerates the whole golden from prompt + anchor alone. `BASE=0` at any
+corruption rules out a copy artifact. **The adapter fully memorized the golden**; the exact-hash gate reads
+the model *through* the sampler and conflates "learned" with "decodes exactly." `LORA_ONLY == NARA`
+everywhere → NaRA adds nothing at the training objective for this golden.
+
+### Step 2 — `--mode sweep`: decode across `max_denoising_steps` (not iteration count)
+
+Serve `generation_config`: `max_new_tokens 256` (= canvas_length ✓), `max_denoising_steps 48`,
+`EntropyBoundSampler(entropy_bound 0.1)`, `confidence_threshold 0.005`, `stability_threshold 1`, noise band
+`t ∈ [0.4, 0.8]`. Longest-exact-block vs steps:
+
+| steps | 1 | 2 | 4 | 8 | 16 | 32 | 64 | 128 | 256 | 48 (default) |
+|---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
+| LORA_block | 9 | 9 | 9 | 9 | 9 | 9 | 9 | 9 | 9 | 9 |
+| NARA_block | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 |
+
+**Flat.** Iterating the sampler never extends the exact run (BASE 1/32). So step count is not the lever.
+
+### Step 3 — `--mode decode-greedy`: greedy full-commit (not the acceptance gates either)
+
+Monkeypatched `EntropyBoundSampler.accept_canvas` → accept-all-argmax and `renoise_canvas` → no-op (reusing
+the real `generate()`), removing the entropy/confidence gating the sweep implicated. Still **9/32 (LORA) /
+10/32 (NARA)**, and the BOS anchor didn't move it. Output = golden prefix then **repeated fragments**
+(`aaaf6f8ae…dda66dfcc6ddadda66dfcc…`). Acceptance gating was never the blocker.
+
+### Step 4 — training-shaped pad-tail canvas: EXACT 32/32 (the actual cause)
+
+Seeded the starting canvas the way **training** builds it — `[BOS anchor, random answer region (23 tok),
+clean PAD tail to 256]` via `generate()`'s `decoder_input_ids` hook — and decoded:
+
+| variant | LORA_block | NARA_block | |
+|---|:--:|:--:|---|
+| random-noanc | 9 | 10 | generate()'s all-random init |
+| random-anchor | 9 | 10 | + BOS at canvas[0] |
+| **padtail-1step** | **32** | **32** | **← EXACT** |
+| **padtail-full** | **32** | **32** | **← EXACT** |
+
+```
+golden:          aaaf6f8ae738dfc6577e63dda6daf9cc
+padtail-1step:   aaaf6f8ae738dfc6577e63dda6daf9cc   (exact 32-char run)
+random canvas:   aaaf6f8ae…88cc65e67eedda66dfcc…    (9 chars, then repeats)
+```
+
+**Root cause = TRAIN/SERVE CANVAS MISMATCH.** Training pads the 23-token answer into the fixed 256-canvas
+with a **clean pad tail** — those non-answer positions carry `label = -100` (unsupervised, and therefore
+`corrupt_canvas` **never corrupts them**), so the model only ever learned to denoise the answer *given a
+pad-filled tail*. But stock `generate()`'s `initialize_canvas` seeds all 256 positions from **uniform
+random**. That tail is out-of-distribution, and via the decoder's bidirectional attention the ~232 garbage
+positions corrupt the answer region → prefix-then-repeat. The anchor is irrelevant; the tail is everything.
+Note `padtail-1step == padtail-full` → once the canvas is right, even one forward nails it and iterating
+doesn't hurt; and `LORA == NARA` throughout → NaRA is not the lever.
+
+**Not** the sampler, **not** iteration count, **not** capacity/lr, **not** NaRA. The fix is canvas/length
+alignment — see [`2026-07-17-diffusiongemma-canvas-termination-plan.md`](./2026-07-17-diffusiongemma-canvas-termination-plan.md).
+
+## Termination-fix validation (2026-07-17) — PARTIAL, plus a NEW discrepancy
+
+Implemented Option 1 (`diffusion.supervise_termination`: supervise the full canvas — answer + a trained EOS +
+pad tail labeled `pad_id` — so the tail is both corruptible and a learned stop) and retrained the **E1-exact**
+recipe changing **only** that flag (seed 42, anchor on, sc 0.5, NaRA c_scale 0.1, r16/lr1e-3/450 steps).
+Checkpoint `~/diffusiongemma_sweep_ckpts/termfix_e1_seed42/checkpoint_449.pt`. Full write-up in the plan doc
+[§8](./2026-07-17-diffusiongemma-canvas-termination-plan.md#8-validation-result-2026-07-17-cuda-spark-gb10--partial).
+
+**Training healthy:** loss 23.4 → 0.35 (step 49) → **0.0000** (step 99+), 0 NaN. The ~230 newly-supervised pad
+targets did not swamp the answer at `pad_loss_weight=1.0` (Phase-2 weighting unneeded).
+
+**Decode result** — every path collapses to one clean terminated string
+`aaaf6f`**`f`**`ae738dfc6577e63`**`36`**`daf9cc` (golden `aaaf6f`**`8`**`ae…63`**`dd`**`a6daf9cc`):
+
+| decode path | termfix | nara_e1 (no fix) |
+|---|:--:|:--:|
+| real sampler, random init | **15/32** | 9–10/32 (run-on) |
+| greedy accept-all, random init | 15/32 | 9–10/32 |
+| greedy accept-all, pad-tail seed | 15/32 | **32/32** |
+| single-shot (`max_denoising_steps=1`) | 15/32 | — |
+| teacher-forced probe (`--mode probe`) | **1.00 at all t** | 1.00 |
+
+**Confirmed wins:** (1) the diagnosed **canvas mismatch is resolved** — decode is now **init-invariant**
+(random == pad-tail == single-shot == multi-step, all 15/32; was random 9–10 vs pad-tail 32, a 22-pt gap now
+gone); (2) **clean termination** — output went from prefix-then-run-on-fragments filling the 256-canvas to a
+single terminated ~30-char string; real-serve (random-init) rose 9–10 → 15/32.
+
+**Not a pass, and a new contradiction:** 15/32 is not 32/32, and the residual is now sharper than
+"the sampler." The **teacher-forced probe reconstructs 1.00 even at t=1.0** (one parallel argmax from full
+noise), yet the free-running **single-shot** greedy decode of the *same* checkpoint gets only 15/32 — a
+single forward should be equivalent. So step count and acceptance gating are re-ruled-out; the gap lives in
+what `generate()` does that the probe does not: **self-conditioning feedback**, the temperature logits
+processor, or a probe-vs-`generate()` token/position alignment artifact (23 answer tokens → 32 chars via BPE;
+one wrong token shifts several chars). *(Pad-tail caveat: the eval's pad-tail seed predates the fix and omits
+the now-trained EOS at position 24, so post-fix it is mis-aligned — likely why pad-tail dropped 32 → 15;
+trust the random-init number.)* **This probe-vs-single-shot discrepancy is the active investigation below.**
+
+### Follow-up: the residual is `generate()`-internal, not training (2026-07-17)
+
+Two diagnostics localized the residual 15/32, and they **overturn** the "canvas mismatch" framing as the
+serve cause for the *fixed* checkpoint:
+
+**(a) The `probe` never tested a random tail.** `build_golden_canvas` labels the pad tail `-100` and the probe
+only corrupts `label != -100` positions — so it always feeds a **clean** tail. Its 1.00 means "reconstructs
+the answer given a clean tail," which was always true; it is not evidence about the serve (random-tail)
+condition.
+
+**(b) New `tail-probe` mode** (teacher-forced, corrupts the *whole* canvas, reads answer-position argmax):
+
+| variant | tail | recover | block |
+|---|---|:--:|:--:|
+| LORA_ONLY / NARA | clean-tail | 1.00 | 33/33 |
+| LORA_ONLY / NARA | **random-tail** | **1.00** | **33/33** |
+| BASE | either | 0.00 | 0–1 |
+
+The termfix adapter reconstructs the golden **perfectly in one `model.forward()` even with a fully-random
+256-canvas tail**. This **refutes** the loss-dilution / under-training hypothesis (the ~230 trivial pad
+targets did not starve the answer) **and** shows mechanism 1 of the fix genuinely worked at the model level —
+the model *is* random-tail robust. So the residual **cannot** be training, the tail, the sampler gates
+(re-ruled-out), or capacity.
+
+**Conclusion:** the answer tokens come out **correct under `model.forward()` but wrong under `generate()`**
+on the same canvas. The gap is entirely in how `generate()` invokes the decoder.
+
+**`gen-vs-tf` result — pinned to 2 razor's-edge tokens in the mask/KV-cache path.** On the identical
+random canvas: teacher-forced `model.forward()` = **32/32** (`aaaf6f8ae738dfc6577e63dda6daf9cc`), `generate()`
+= **15/32** (`aaaf6f`**f**`ae738dfc6577e63`**36**`daf9cc`), and the two argmaxes differ at **exactly 2 of 256
+positions** — and it is the **same 2 positions (canvas 5 and 19) across independent random canvases**, i.e.
+two specific hex tokens whose logit margin is thinnest, not a random perturbation.
+
+- **Position_ids are NOT the cause:** teacher-forced with generate()'s `decoder_position_ids = [7,8,…]`
+  (canvas numbered continuing after the 7-token prompt) still yields **32/32**. Ruled out.
+- **Remaining culprit:** the only differences left between the two forwards are the 4D
+  `create_diffusion_decoder_attention_mask` and the **split encoder-prefill → bf16 KV-cache → decoder** path
+  (vs the joint recompute forward). A 2-position, same-token flip is the signature of a **small numerical
+  margin** (bf16 KV-cache quantize/recompute or a mask boundary) tipping two nearly-tied argmaxes.
+
+**Net:** memorization is *perfect* (teacher-forced 32/32); serve loses exactly 2/23 answer tokens to a
+sub-logit-margin numerical difference in the decode path. `supervise_termination` is validated as correct and
+beneficial (init-invariance, clean termination, random-tail robustness); the exact-hash gate then fails on a
+**serve-path numerical-margin bug**, not training.
+
+**fp32 test — precision is NOT the lever; the memorization is a bf16-specific fixed point.** Re-ran
+`gen-vs-tf` with the model in fp32. Teacher-forced dropped from **32/32 (bf16) → 6/32 (fp32)**, and generate()
+matched it (6/32, differing by 1 position). So fp32 does not rescue generate() — **it breaks the
+teacher-forced reconstruction too.** The memorized solution is a **razor-thin fixed point specific to the bf16
+training numerics**: exact only under the precise bf16 training forward, and it collapses under *any*
+numerical change — a different precision (fp32 → 6/32) or a different-but-same-precision forward path
+(generate()'s bf16 cache/mask → 15/32). (The fp32 run's "position_ids" verdict line is a false positive — in
+fp32 *every* path is ~6/32, so it can't isolate anything; the bf16 run already ruled position_ids out with
+TF+genpos = 32/32.)
+
+**Consequences for the fix.** Serve-side fp32 precision is **off the table** (it worsens memorization). The
+remaining exact-hash gap is the **bf16 cache/mask forward-path difference** between training (joint recompute)
+and serve (split prefill + KV-cache + 4D mask), against a margin so thin that 2 tokens flip.
+
+### Fix (a) CONFIRMED — recompute decode closes it, no retrain (2026-07-17)
+
+New `decode-recompute` mode runs the full iterative denoise via the **joint `model.forward`** each step (the
+exact forward training uses — encoder+decoder recomputed, **no persistent KV-cache**, training's internal
+mask), greedy full-commit from a fresh random 256-canvas. Result — **exact 32/32 in every configuration**:
+
+| steps | self-cond | per-seed block (42/43/44) |
+|:--:|:--:|:--:|
+| 1, 2, 4, 8 | off | 32/32, 32/32, 32/32 |
+| 1, 2, 4, 8 | on | 32/32, 32/32, 32/32 |
+
+`' aaaf6f8ae738dfc6577e63dda6daf9cc'` — the exact golden, **seed-invariant, step-count-invariant (even a
+single forward), and self-conditioning-invariant.** So the fix is: **serve the diffusion decode via the joint
+recompute forward instead of `generate()`'s split encoder-prefill + bf16 KV-cache + 4D-mask path.** This also
+implicitly settles the cache-vs-mask isolation — recompute avoids *both*, so "match training's forward" is the
+fix regardless of which was the specific trigger.
+
+**Shipping caveat (HF vs vLLM serve path).** This is validated against HF `DiffusionGemmaForBlockDiffusion`'s
+`generate()` (the offline harness path, and what the whole diagnosis used). **Production serving goes through
+vLLM's native `diffusion_gemma.py` (Model Runner V2)** — a different implementation. Landing the fix therefore
+means one of: (i) confirm whether vLLM's diffusion decode already recomputes (may not have the bug at all) or
+mirrors `generate()`'s cached path; (ii) add a recompute/no-cache decode option to vLLM's diffusion runner; or
+(iii) serve this model via the HF recompute path. Step 1 is to measure the exact-hash on the *vLLM* serve
+path directly before touching serve code — the offline win is necessary but not yet sufficient proof for prod.
+
+*(Superseded directions, for the record: serve-side fp32 precision — ruled out; train-for-margin — unnecessary
+now that (a) works; accept-as-is — no longer needed.)*
+
+### vLLM serve-path check — the gap IS present in production (2026-07-17)
+
+Ran the full sweep (train → **vLLM native `diffusion_gemma.py` serve** → exact-hash) on a **plain-LoRA**
+(NaRA off, so it is vLLM-serveable; LORA==NARA established) + `supervise_termination` checkpoint, E1-exact
+otherwise. Training completed clean (train_s=2124 ≈ 35 min). Serve verdict: **NO_MEMORIZATION** — the adapter
+**served** (diffusion hex, not base output) but produced scrambled run-on hex
+`68dfc68c66dfc63dda663daf6ddac6dda3c63dda68daf68dda663dda6678…` that **does not even reproduce the golden
+prefix** — *worse* than the offline HF near-miss (which at least gave `aaaf6f…` + clean termination).
+Checkpoint: `~/diffusiongemma_sweep_ckpts/termfix_plainlora_seed42/`.
+
+**So production is case (ii): vLLM's diffusion decode carries the forward-path divergence** — and the fuller
+scramble (no golden prefix, run-on, not clean-terminated) suggests vLLM's Model-Runner-V2 decode differs from
+HF `generate()` by *more* than just the KV-cache (its canvas init / sampler / termination handling may also
+differ). The offline recompute fix (32/32) is proven only against HF `generate()`; it is **not** in production
+and cannot be assumed to transfer verbatim. **Next: investigate vLLM's `diffusion_gemma.py` decode path
+directly** — compare its per-step forward + canvas/termination handling against HF's, and decide between
+(ii-a) porting the recompute/no-cache decode into the vLLM diffusion runner, or (ii-b) serving this model via
+the HF recompute path. This is serve-code work in the fork; scoping needed before implementing.
+
+### vLLM `diffusion_gemma.py` source read — WHERE it diverges from the train forward (2026-07-17)
+
+Read the full vLLM serve path (`vllm/vllm/model_executor/models/diffusion_gemma.py`, 1439 lines) side-by-side
+with the HF reference (`transformers/models/diffusion_gemma/{modeling,generation}_diffusion_gemma.py`) and the
+training/recompute forward. Findings, in order of impact:
+
+**0. The fundamental split (shared by HF `generate()` AND vLLM; the root of the whole gap).**
+- **Train / offline-recompute forward** = ONE joint `DiffusionGemmaForBlockDiffusion.forward(input_ids=prompt,
+  decoder_input_ids=canvas, decoder_attention_mask=None, decoder_position_ids=None)`. The encoder runs on the
+  prompt into a **fresh** `DynamicCache` *inside the same call*, the decoder reads it, all in one pass, every
+  step. With `decoder_attention_mask=None` the decoder hits the shortcut at modeling.py:1380-1385 and returns
+  `{"full_attention": None}` → **native SDPA bidirectional** (no explicit bias tensor); positions auto-computed
+  `arange(P, P+CL)`.
+- **Serve** (both HF `generate()` and vLLM) = the YOCO split: encode the prompt **once**, freeze its K/V in a
+  **persistent bf16 cache**, then every denoise step runs only the canvas as queries against that frozen cache,
+  with an **explicit** mask + positions. This split alone drops HF `generate()` to 15/32; it is the established
+  bf16 razor-margin. vLLM inherits it and adds more (below), which is why vLLM fully scrambles.
+
+**1. Different attention kernel + masking (vLLM-specific, on top of the cache).** vLLM uses **paged
+FlashAttention** driven by `build_attn_metadata` with a per-request `causal` bool (`prepare_attn`,
+diffusion_gemma.py:1020-1068): encoder/commit reqs = causal (write KV), denoise reqs = bidirectional
+(read prompt KV + current canvas KV). That is a third distinct numeric path for the same math — train = SDPA
+implicit mask, HF generate = SDPA explicit 4D additive-bias mask, vLLM = paged-FA metadata mask. In bf16 the
+three disagree, and the paged-FA path is the furthest from the training forward — consistent with vLLM being
+*worse* than HF `generate()` (total scramble vs golden-prefix near-miss).
+
+**2. The sampler is a faithful port — NOT the divergence.** Verified line-by-line that `_compiled_sample_step`
+(diffusion_gemma.py:506-698) reproduces HF's `_denoising_step` + `EntropyBoundSampler` + `StableAndConfident`:
+  - Temperature schedule matches exactly (vLLM `step` counts up 0→max, `remaining=max-step`, so first denoise
+    step temp = `t_max`, last ≈ `t_min` — identical to HF's `cur_step` counting down `max..1`).
+  - Gumbel-max sampling ≡ HF's `multinomial(softmax)`; argmax path identical.
+  - Entropy-bound accept mask `cumsum-cummax <= entropy_bound` on temperature-scaled logits ≡ HF's
+    `cumulative_entropy - sorted_token_entropy`.
+  - Accept+renoise fused (`where(eb_mask, new_tokens, random)`) ≡ HF's accept-then-renoise.
+  - Self-conditioning soft-embed `softmax(scaled) @ embed_weight * normalizer` ≡ HF decoder's
+    `softmax(sc_logits) @ embed_tokens.weight * embed_scale`; first-step zero-SC (`post_norm(inputs_embeds)`)
+    matches HF's `self_conditioning(inputs_embeds, zeros)`.
+  - Softcap (`_softcap_logits`, fp32 tanh) ≡ HF's fp32 `/cap; tanh; *cap`.
+  So sampler config/logic can be excluded; the residual is purely the **forward-path (cache + attention
+  kernel) numerics**, exactly as the offline recompute experiment predicted.
+
+**3. No KV-pollution bug.** The canvas writes its K/V into the request's paged slots each step, but those slots
+are rewritten with the *current* canvas every step and the canvas attends bidirectionally to itself — i.e. it
+reads the current-step canvas KV, not stale KV. This matches HF's decoder `append_to_cache` (concatenate for
+this forward, don't persist). So the pollution hypothesis is **ruled out**; it is not an outright logic bug.
+
+**Conclusion.** The vLLM↔train divergence is **architectural + numerical, not a single fixable bug**: vLLM
+serves the model through a persistent-bf16-KV + paged-FlashAttention decode, while the memorized answer is a
+razor-thin bf16 fixed point that only survives the *exact* joint SDPA-implicit-mask training forward. Matching
+bits would require vLLM to (ii-a) recompute the prompt jointly with the canvas every step with no persistent
+cache and an SDPA-equivalent mask — which fights the entire paged-KV/Model-Runner-V2 design — or (ii-b) serve
+via the HF recompute path outside vLLM. The cheaper strategic alternative is to stop chasing a bit-exact serve
+forward and instead **make the memorization robust to the serve forward** (train-serve-consistent / unrolled
+training so the basin widens past the bf16 kernel gap). Recommend deciding direction before writing serve code.

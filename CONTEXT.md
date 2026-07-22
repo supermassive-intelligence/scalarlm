@@ -45,6 +45,10 @@ means "won't serve."
 _Avoid_: serve-arch registry, supported-model list (it gates Tokenformer, not
 LoRA serve).
 
+**Static Analysis**:
+A "zero-cost" filter performed by the tracker using HF metadata (`model_type`, `base_model`) to determine if an architecture is already known to pass. It identifies models that can be `IMPLICITLY_PASSED` without ever being queued for GPU work.
+_Avoid_: T1, metadata filter.
+
 **Offline preflight**:
 A pre-run structural check (`preflight.py`) that predicts the no-op class *before*
 paying for a model's restart + train + serve. It synthesizes the trainer's would-be
@@ -106,3 +110,22 @@ wait for the pod to fully delete) before vLLM claims it (`scale --replicas=1`).
 The card is briefly unreserved during the gap — "1 GPU at a time," not "1 GPU
 reserved throughout."
 _Avoid_: GPU swap, failover.
+
+## Fork maintenance
+
+**Shed** (a fork file/delta is _sheddable_):
+Fork delta that reverts to upstream's own version on a rebase because upstream
+now provides equivalent behavior — you delete the fork's copy and adopt
+upstream's. Determined per-file against the *target* upstream tree, not the
+current base (e.g. `gemma4.py`'s NVFP4 expert routing is sheddable at v0.25
+because upstream reinvented it; on the v0.19 base there is nothing to shed to).
+_Avoid_: delete, drop (when you mean "adopt upstream's version").
+
+**Carry-forward delta**:
+Fork delta with no upstream equivalent, so every rebase must re-apply it. The
+`.pt`/Tokenformer adapter subsystem (`vllm/tokenformer/*`), the `SupportsTokenformer`
+mixin applied across model classes, and the MoE-LoRA converter are carry-forward;
+adapter-serving capability is carry-forward by definition (ADR 0005). Distinct
+from a **Shed** candidate — the two verdicts are the output of the migration's
+inventory step.
+_Avoid_: patch, custom code (too vague — say whether it sheds or carries).

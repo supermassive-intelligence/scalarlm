@@ -1,0 +1,113 @@
+[01:22:32] ===== GEMMA CONFIRM START =====
+[01:22:38] config: server_list=api
+[01:22:44] server relaunched
+[01:22:57] health 200
+[01:22:57] train_phase start (lr=1e-3, 450 steps)
+status: TRAINING last: {'step': 190, 'loss': 1.4901158529312397e-08, 'epoch': 763, 'time': 266.54928827285767}
+status: TRAINING last: {'step': 197, 'loss': 1.5211599091458083e-08, 'epoch': 791, 'time': 276.2102131843567}
+status: TRAINING last: {'step': 204, 'loss': 1.70742424643322e-08, 'epoch': 819, 'time': 285.8620970249176}
+status: TRAINING last: {'step': 211, 'loss': 1.645336134004083e-08, 'epoch': 847, 'time': 295.5253310203552}
+status: TRAINING last: {'step': 218, 'loss': 1.4590717967166711e-08, 'epoch': 875, 'time': 305.46351385116577}
+status: TRAINING last: {'step': 226, 'loss': 1.4280277405021025e-08, 'epoch': 907, 'time': 316.4279673099518}
+status: TRAINING last: {'step': 233, 'loss': 1.5211597315101244e-08, 'epoch': 935, 'time': 326.39789390563965}
+status: TRAINING last: {'step': 240, 'loss': 1.70742424643322e-08, 'epoch': 963, 'time': 336.10655212402344}
+status: TRAINING last: {'step': 247, 'loss': 1.4901157641133977e-08, 'epoch': 991, 'time': 345.80725622177124}
+status: TRAINING last: {'step': 254, 'loss': 1.4590717967166711e-08, 'epoch': 1019, 'time': 355.47179985046387}
+status: TRAINING last: {'step': 261, 'loss': 1.5832481992106295e-08, 'epoch': 1047, 'time': 365.4357852935791}
+status: TRAINING last: {'step': 269, 'loss': 1.3659395392551232e-08, 'epoch': 1079, 'time': 376.3654115200043}
+status: TRAINING last: {'step': 276, 'loss': 1.4590717078988291e-08, 'epoch': 1107, 'time': 386.25843596458435}
+status: TRAINING last: {'step': 283, 'loss': 1.6142919889716723e-08, 'epoch': 1135, 'time': 396.0026943683624}
+status: TRAINING last: {'step': 290, 'loss': 1.5832480215749456e-08, 'epoch': 1163, 'time': 405.6760914325714}
+status: TRAINING last: {'step': 297, 'loss': 1.552203876542535e-08, 'epoch': 1191, 'time': 415.36114859580994}
+status: TRAINING last: {'step': 305, 'loss': 1.4590717078988291e-08, 'epoch': 1223, 'time': 426.5905268192291}
+status: TRAINING last: {'step': 312, 'loss': 1.5211599091458083e-08, 'epoch': 1251, 'time': 436.2785220146179}
+status: TRAINING last: {'step': 319, 'loss': 1.552203876542535e-08, 'epoch': 1279, 'time': 446.2406096458435}
+status: TRAINING last: {'step': 326, 'loss': 1.4901157641133977e-08, 'epoch': 1307, 'time': 455.84841132164}
+status: TRAINING last: {'step': 333, 'loss': 1.4901156752955558e-08, 'epoch': 1335, 'time': 465.4240574836731}
+status: TRAINING last: {'step': 341, 'loss': 1.5832478439392617e-08, 'epoch': 1367, 'time': 476.5187973976135}
+status: TRAINING last: {'step': 348, 'loss': 1.3659395392551232e-08, 'epoch': 1395, 'time': 486.11746311187744}
+status: TRAINING last: {'step': 355, 'loss': 1.5211597315101244e-08, 'epoch': 1423, 'time': 495.7738585472107}
+status: TRAINING last: {'step': 362, 'loss': 1.6142919889716723e-08, 'epoch': 1451, 'time': 505.66954016685486}
+status: TRAINING last: {'step': 370, 'loss': 1.3659395392551232e-08, 'epoch': 1483, 'time': 516.6327502727509}
+status: TRAINING last: {'step': 377, 'loss': 1.5832478439392617e-08, 'epoch': 1511, 'time': 526.7362675666809}
+status: TRAINING last: {'step': 384, 'loss': 1.2728072817935754e-08, 'epoch': 1539, 'time': 536.5847618579865}
+status: TRAINING last: {'step': 391, 'loss': 1.552203876542535e-08, 'epoch': 1567, 'time': 546.3623406887054}
+status: TRAINING last: {'step': 398, 'loss': 1.4590717078988291e-08, 'epoch': 1595, 'time': 556.028263092041}
+status: TRAINING last: {'step': 405, 'loss': 1.4280275628664185e-08, 'epoch': 1623, 'time': 566.0494303703308}
+status: TRAINING last: {'step': 412, 'loss': 1.4590717078988291e-08, 'epoch': 1651, 'time': 575.735509634018}
+status: TRAINING last: {'step': 419, 'loss': 1.5832480215749456e-08, 'epoch': 1679, 'time': 585.3961274623871}
+status: TRAINING last: {'step': 427, 'loss': 1.3969835954696919e-08, 'epoch': 1711, 'time': 596.590015411377}
+status: TRAINING last: {'step': 434, 'loss': 1.5211599091458083e-08, 'epoch': 1739, 'time': 606.2517337799072}
+status: TRAINING last: {'step': 441, 'loss': 1.5211599091458083e-08, 'epoch': 1767, 'time': 615.9754464626312}
+status: TRAINING last: {'step': 448, 'loss': 1.3659394504372813e-08, 'epoch': 1795, 'time': 625.8817956447601}
+status: COMPLETED last: {'step': 449, 'loss': 1.3659394504372813e-08, 'epoch': 1799, 'time': 627.1510698795319}
+FINAL_STATUS=COMPLETED
+JOB_HASH=a95d9f629bc9ffd2045edb10f5d164e407809cf4e50ca440dbf8d0bef4bd7970
+[01:41:18] train done: hash=a95d9f629bc9ffd2045edb10f5d164e407809cf4e50ca440dbf8d0bef4bd7970 status=COMPLETED
+[01:41:18] config: server_list=all
+/root/gemma_confirm.sh: line 19: 252329 Killed                  setsid bash -c "export PATH='$PATH'; export PYTHONPATH='$PYTHONPATH';     export SLURM_CONF='$SLURM_CONF'; export VLLM_CPU_MOE_PREPACK=0;     export HF_TOKEN='$HF_TOKEN'; export CUDA_VISIBLE_DEVICES=0;     bash /app/cray/scripts/start_one_server.sh > /root/server.log 2>&1" < /dev/null
+[01:41:24] server relaunched
+[01:43:03] health 200
+[01:43:03] serve_phase2 start (hash=a95d9f629bc9ffd2045edb10f5d164e407809cf4e50ca440dbf8d0bef4bd7970)
+attempt 11 mt=74 not ready: Exception('Generation request \'6164197f0a84ff8a82779db5f542afe70294c7de44f075ac9a890fdb9f05c951_000000000\' failed with error: "Unexpected response s
+attempt 12 mt=75 not ready: Exception('Generation request \'d8aecf88b80b793669ca2023225374d060e9d92d819d776f1335574d26d15549_000000000\' failed with error: "Unexpected response s
+attempt 13 mt=76 not ready: Exception('Generation request \'05ac0ae2f6066a2f8c1caa84de1f7071c3313909fc79e925bc443c233203d962_000000000\' failed with error: "Unexpected response s
+attempt 14 mt=77 not ready: Exception('Generation request \'fd868c358d61531b5bff83e3deb1052f789ad9fd3e8d4d52359e534bf174cb7b_000000000\' failed with error: "Unexpected response s
+attempt 15 mt=78 not ready: Exception('Generation request \'704b53ba83f43b9863bec3a74a49f82ef7bb9c2eee4458df3be5efba8372412e_000000000\' failed with error: "Unexpected response s
+attempt 16 mt=79 not ready: Exception('Generation request \'37e15b25db25c9958457ce367e74fc5af751638e64aa1d68f7a95bbdcf10054f_000000000\' failed with error: "Unexpected response s
+attempt 17 mt=80 not ready: Exception('Generation request \'2821b061918a8d19c6a8a40128278668b153a1bf7257cddefb959f22b5d22318_000000000\' failed with error: "Unexpected response s
+attempt 18 mt=81 not ready: Exception('Generation request \'8113d8c198c9434036baa1bb1d64472059319d370c18b06754ebd02a5dd56084_000000000\' failed with error: "Unexpected response s
+attempt 19 mt=82 not ready: Exception('Generation request \'2d576f597ffcdb2638ad90f1710fefab8df1c2484ce872799385ec69a8a23a2d_000000000\' failed with error: "Unexpected response s
+attempt 20 mt=83 not ready: Exception('Generation request \'d7388798fe04ecc20664ec477093fb8c7b89e80ee49f15e7fe7a6f1c6534749b_000000000\' failed with error: "Unexpected response s
+attempt 21 mt=84 not ready: Exception('Generation request \'9b762a14282421e93fe14036405d46338760dcde6038820bd035ecb0375e2ff8_000000000\' failed with error: "Unexpected response s
+attempt 22 mt=85 not ready: Exception('Generation request \'75e594a8616407698e5d1b2f7b8a4ab9cfd1df7267d920480045366fe33593ea_000000000\' failed with error: "Unexpected response s
+attempt 23 mt=86 not ready: Exception('Generation request \'f3f47c7bcb70ad5f73500430f73b4621c367b449507d93dbd2a552c67c3b5ffc_000000000\' failed with error: "Unexpected response s
+attempt 24 mt=87 not ready: Exception('Generation request \'5bf17205df2c4e5d749d8473a79b5977e168dd4a7855401cd3a2fc404068a656_000000000\' failed with error: "Unexpected response s
+attempt 25 mt=88 not ready: Exception('Generation request \'e2b5037f3462677491b64bb2d68c53e2f5fc245ccefafcabfb83780966928962_000000000\' failed with error: "Unexpected response s
+attempt 26 mt=89 not ready: Exception('Generation request \'dc3da17ca32ba975dc0536378e6689cb97c2230debb5a51c610a726d93b5edcd_000000000\' failed with error: "Unexpected response s
+attempt 27 mt=90 not ready: Exception('Generation request \'9bea61a05abb9f7100b46262401f76e7000e9d4bddf2edeef5c7a922018057c6_000000000\' failed with error: "Unexpected response s
+attempt 28 mt=91 not ready: Exception('Generation request \'dc3b55f925ea1631b740ecb4b3609e1d757d169a060e5637254cf781077b0ec5_000000000\' failed with error: "Unexpected response s
+attempt 29 mt=92 not ready: Exception('Generation request \'3c74a2fbdd6c5c7b0ad22dd4d305f5def1cbc212dbacaf7f6515e205ee4fddc9_000000000\' failed with error: "Unexpected response s
+attempt 30 mt=93 not ready: Exception('Generation request \'e2f8791b14881e9a86e55f10600bfc179956f933f9dc451d76850181a897bc84_000000000\' failed with error: "Unexpected response s
+attempt 31 mt=94 not ready: Exception('Generation request \'3235c327942342ac68f05011dfc20175ead8de1eed5e824583ca95f58352d745_000000000\' failed with error: "Unexpected response s
+attempt 32 mt=95 not ready: Exception('Generation request \'f9896adc5f9f350b2988110c30097731b342b78d923b982cab0bd85c255c403a_000000000\' failed with error: "Unexpected response s
+attempt 33 mt=64 not ready: Exception('Generation request \'188b6ade1aad1ca1f0d1693029276964e834bc419f4ba79df83b3389cdeeba17_000000000\' failed with error: "Unexpected response s
+attempt 34 mt=65 not ready: Exception('Generation request \'5f2068e8efee9db8d642b6ac373a1d32293ce10bd1043082287a5e8c1dc6de32_000000000\' failed with error: "Unexpected response s
+attempt 35 mt=66 not ready: Exception('Generation request \'85ace342ab54fe93a3c0f27948d833ec70677d71af4730da1c68c05b785c32e1_000000000\' failed with error: "Unexpected response s
+attempt 36 mt=67 not ready: Exception('Generation request \'6d27b12023c50bb8002258c12633f5c3c0cfb458796a1ea5ade669e9c41590d9_000000000\' failed with error: "Unexpected response s
+attempt 37 mt=68 not ready: Exception('Generation request \'28a64272770ea5d173eca4ca06c75f24af7fd25ab42a62149f5ae2a69bb4910f_000000000\' failed with error: "Unexpected response s
+attempt 38 mt=69 not ready: Exception('Generation request \'81f61e85ac3d1d2ebf8d9a8f874778edafc793b86ac33d7e8ae2ee4bedf3124e_000000000\' failed with error: "Unexpected response s
+attempt 39 mt=70 not ready: Exception('Generation request \'55cc4d123bf97489cec266019f7224376a6dce27fa29d8c893c02474f3ca83c2_000000000\' failed with error: "Unexpected response s
+attempt 40 mt=71 not ready: Exception('Generation request \'1313c3429dc38da1193c3dd5bdd9ab0a4e05bce9d1dcfd64599c03506bd1abbd_000000000\' failed with error: "Unexpected response s
+attempt 41 mt=72 not ready: Exception('Generation request \'962ce219e39050fc52d4da40a720eb7e8ed8a69b97e0e30218f3b9e47011c1b3_000000000\' failed with error: "Unexpected response s
+attempt 42 mt=73 not ready: Exception('Generation request \'5453e597a1acc60e3dacd27fda0783e1c97c68ab85f2582361b1604da4299214_000000000\' failed with error: "Unexpected response s
+attempt 43 mt=74 not ready: Exception('Generation request \'6164197f0a84ff8a82779db5f542afe70294c7de44f075ac9a890fdb9f05c951_000000000\' failed with error: "Unexpected response s
+attempt 44 mt=75 not ready: Exception('Generation request \'d8aecf88b80b793669ca2023225374d060e9d92d819d776f1335574d26d15549_000000000\' failed with error: "Unexpected response s
+attempt 45 mt=76 not ready: Exception('Generation request \'05ac0ae2f6066a2f8c1caa84de1f7071c3313909fc79e925bc443c233203d962_000000000\' failed with error: "Unexpected response s
+attempt 46 mt=77 not ready: Exception('Generation request \'fd868c358d61531b5bff83e3deb1052f789ad9fd3e8d4d52359e534bf174cb7b_000000000\' failed with error: "Unexpected response s
+attempt 47 mt=78 not ready: Exception('Generation request \'704b53ba83f43b9863bec3a74a49f82ef7bb9c2eee4458df3be5efba8372412e_000000000\' failed with error: "Unexpected response s
+attempt 48 mt=79 not ready: Exception('Generation request \'37e15b25db25c9958457ce367e74fc5af751638e64aa1d68f7a95bbdcf10054f_000000000\' failed with error: "Unexpected response s
+attempt 49 mt=80 not ready: Exception('Generation request \'2821b061918a8d19c6a8a40128278668b153a1bf7257cddefb959f22b5d22318_000000000\' failed with error: "Unexpected response s
+attempt 50 mt=81 not ready: Exception('Generation request \'8113d8c198c9434036baa1bb1d64472059319d370c18b06754ebd02a5dd56084_000000000\' failed with error: "Unexpected response s
+attempt 51 mt=82 not ready: Exception('Generation request \'2d576f597ffcdb2638ad90f1710fefab8df1c2484ce872799385ec69a8a23a2d_000000000\' failed with error: "Unexpected response s
+attempt 52 mt=83 not ready: Exception('Generation request \'d7388798fe04ecc20664ec477093fb8c7b89e80ee49f15e7fe7a6f1c6534749b_000000000\' failed with error: "Unexpected response s
+attempt 53 mt=84 not ready: Exception('Generation request \'9b762a14282421e93fe14036405d46338760dcde6038820bd035ecb0375e2ff8_000000000\' failed with error: "Unexpected response s
+attempt 54 mt=85 not ready: Exception('Generation request \'75e594a8616407698e5d1b2f7b8a4ab9cfd1df7267d920480045366fe33593ea_000000000\' failed with error: "Unexpected response s
+attempt 55 mt=86 not ready: Exception('Generation request \'f3f47c7bcb70ad5f73500430f73b4621c367b449507d93dbd2a552c67c3b5ffc_000000000\' failed with error: "Unexpected response s
+attempt 56 mt=87 not ready: Exception('Generation request \'5bf17205df2c4e5d749d8473a79b5977e168dd4a7855401cd3a2fc404068a656_000000000\' failed with error: "Unexpected response s
+attempt 57 mt=88 not ready: Exception('Generation request \'e2b5037f3462677491b64bb2d68c53e2f5fc245ccefafcabfb83780966928962_000000000\' failed with error: "Unexpected response s
+attempt 58 mt=89 not ready: Exception('Generation request \'dc3da17ca32ba975dc0536378e6689cb97c2230debb5a51c610a726d93b5edcd_000000000\' failed with error: "Unexpected response s
+attempt 59 mt=90 not ready: Exception('Generation request \'9bea61a05abb9f7100b46262401f76e7000e9d4bddf2edeef5c7a922018057c6_000000000\' failed with error: "Unexpected response s
+attempt 60 mt=91 not ready: Exception('Generation request \'dc3b55f925ea1631b740ecb4b3609e1d757d169a060e5637254cf781077b0ec5_000000000\' failed with error: "Unexpected response s
+attempt 61 mt=92 not ready: Exception('Generation request \'3c74a2fbdd6c5c7b0ad22dd4d305f5def1cbc212dbacaf7f6515e205ee4fddc9_000000000\' failed with error: "Unexpected response s
+attempt 62 mt=93 not ready: Exception('Generation request \'e2f8791b14881e9a86e55f10600bfc179956f933f9dc451d76850181a897bc84_000000000\' failed with error: "Unexpected response s
+attempt 63 mt=94 not ready: Exception('Generation request \'3235c327942342ac68f05011dfc20175ead8de1eed5e824583ca95f58352d745_000000000\' failed with error: "Unexpected response s
+attempt 64 mt=95 not ready: Exception('Generation request \'f9896adc5f9f350b2988110c30097731b342b78d923b982cab0bd85c255c403a_000000000\' failed with error: "Unexpected response s
+attempt 65 mt=64 not ready: Exception('Generation request \'188b6ade1aad1ca1f0d1693029276964e834bc419f4ba79df83b3389cdeeba17_000000000\' failed with error: "Unexpected response s
+attempt 66 mt=65 not ready: Exception('Generation request \'5f2068e8efee9db8d642b6ac373a1d32293ce10bd1043082287a5e8c1dc6de32_000000000\' failed with error: "Unexpected response s
+attempt 67 mt=66 not ready: Exception('Generation request \'85ace342ab54fe93a3c0f27948d833ec70677d71af4730da1c68c05b785c32e1_000000000\' failed with error: "Unexpected response s
+attempt 68 mt=67 not ready: Exception('Generation request \'6d27b12023c50bb8002258c12633f5c3c0cfb458796a1ea5ade669e9c41590d9_000000000\' failed with error: "Unexpected response s
+attempt 69 mt=68 not ready: Exception('Generation request \'28a64272770ea5d173eca4ca06c75f24af7fd25ab42a62149f5ae2a69bb4910f_000000000\' failed with error: "Unexpected response s
+attempt 70 mt=69 not ready: Exception('Generation request \'81f61e85ac3d1d2ebf8d9a8f874778edafc793b86ac33d7e8ae2ee4bedf3124e_000000000\' failed with error: "Unexpected response s
+[01:49:15] RESULT: google/gemma-3-27b-it NO_MEM (hash=a95d9f629bc9ffd2045edb10f5d164e407809cf4e50ca440dbf8d0bef4bd7970 lr=1e-3)
+[01:49:15] ===== GEMMA CONFIRM DONE (adapter + logs kept, no cleanup) =====
