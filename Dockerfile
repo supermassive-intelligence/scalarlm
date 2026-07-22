@@ -2,7 +2,11 @@ ARG BASE_NAME=cpu
 
 ###############################################################################
 # NVIDIA BASE IMAGE
-FROM nvcr.io/nvidia/pytorch:26.01-py3 AS nvidia
+# NGC 26.04-py3 (torch 2.12.0a0) is the floor for the vLLM 0.25 migration:
+# 0.25's register_opaque_type(...) uses the `hoist` kwarg that first lands in
+# torch 2.12 — NGC 26.03 (torch 2.11.0a0) crashes on import. See the Phase-2
+# toolchain spike (docs/reports/2026-07-14-phase2-toolchain-spike-findings.md).
+FROM nvcr.io/nvidia/pytorch:26.04-py3 AS nvidia
 
 RUN apt-get update -y && apt-get install -y python3-venv slurm-wlm libslurm-dev
 
@@ -120,7 +124,7 @@ ARG INSTALL_ROOT=/app/cray
 WORKDIR ${INSTALL_ROOT}
 
 # Install build dependencies FIRST
-RUN pip install setuptools-scm
+RUN pip install setuptools-scm setuptools-rust
 
 # Configure vLLM source - can use either local directory or remote repo.
 #
