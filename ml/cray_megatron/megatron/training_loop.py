@@ -10,9 +10,13 @@ from cray_megatron.models.get_latest_checkpoint_path import (
 from cray_megatron.collectives.main_rank_only import main_rank_only, is_main_rank
 from cray_megatron.megatron.training_harness import TrainingHarness
 from cray_megatron.megatron import stop_flag
+from cray_megatron.megatron.diffusion_corruption import corrupt_canvas
+from cray_megatron.megatron.dataset.diffusion_canvas import anchor_token_id
+from cray_megatron.megatron.determinism import apply_seed
 from cray_megatron.megatron.doc_mask import (
     doc_mask_decision,
     is_multimodal,
+    is_diffusion,
     BUILD,
     SKIP_SEQLEN,
     SKIP_MULTIMODAL,
@@ -213,6 +217,12 @@ class TrainingLoop:
         self.training_state = TrainingState()
 
     def train(self):
+        # Seed BEFORE load_model() so PEFT's lora_A init and every subsequent
+        # global-RNG draw (corruption, SC mask) form one deterministic sequence.
+        # On resume, checkpoint RNG-state restore (inside load_model) overrides
+        # this, keeping resumed slices bit-identical. No-op when seed is unset.
+        apply_seed(get_job_config().get("seed"))
+
         self.model_manager = get_model_manager()
 
         self.training_state.model_info = self.model_manager.load_model()
@@ -452,6 +462,18 @@ class TrainingLoop:
 
     def training_step_accumulate(self, batch, accum_step, gradient_accumulation_steps):
         """Perform a single forward/backward pass with gradient accumulation."""
+        model_config = self.training_state.model_info.get("model_config")
+
+        # DiffusionGemma has a wholly different forward contract: encoder prompt +
+        # corrupted canvas in, canvas logits out (NO `labels` kwarg, NO internal
+        # `.loss`), with live per-step corruption. It also doesn't use packed-
+        # document masking. Handle it on its own path rather than threading branches
+        # through the causal construction below.
+        if is_diffusion(model_config):
+            return self._diffusion_training_step_accumulate(
+                batch, accum_step, gradient_accumulation_steps
+            )
+
         device = self.training_state.model_info["distribution_strategy"]["device"]
 
         start_time = time.time()
@@ -554,6 +576,190 @@ class TrainingLoop:
         self.print_microbatch_info(accum_step, avg_loss, start_time)
 
         return avg_loss
+
+    def _diffusion_training_step_accumulate(
+        self, batch, accum_step, gradient_accumulation_steps
+    ):
+        """DiffusionGemma canvas-denoising training step.
+
+        The model encodes ``encoder_input_ids`` into a prompt KV cache and denoises
+        a corrupted canvas, returning canvas logits ``(B, canvas_length, vocab)``.
+        Unlike the causal path it takes NO ``labels`` kwarg and computes NO internal
+        ``.loss`` — so the corrupted canvas is built here (resampled fresh every
+        step) and the cross-entropy against the clean canvas labels is computed
+        explicitly. See ``load_diffusion_dataset.py`` and the design spec §3."""
+        device = self.training_state.model_info["distribution_strategy"]["device"]
+        model = self.training_state.model_info["model"]
+        model_config = self.training_state.model_info.get("model_config")
+
+        start_time = time.time()
+
+        encoder_input_ids = batch["encoder_input_ids"].to(device)
+        encoder_attention_mask = batch["encoder_attention_mask"].to(device)
+        canvas_input_ids = batch["canvas_input_ids"].to(device)  # clean, pad-filled
+        canvas_labels = batch["canvas_labels"].to(device)        # clean, -100 on pad
+
+        vocab_size = model_config.text_config.vocab_size
+        eps = self._diffusion_eps()
+
+        # Live uniform-vocabulary corruption, resampled every step (baking it into a
+        # dataset .map would freeze one pattern per epoch). generator=None uses the
+        # global RNG, which the checkpoint resume restores. See diffusion_corruption.
+        # protect_prefix keeps the Tier-2 anchor (canvas position 0) clean every
+        # step; resolved from the SAME tokenizer/config the loader used so the
+        # protected count exactly matches the anchor the canvas actually carries
+        # (0 when the anchor is disabled or the tokenizer lacks BOS).
+        protect_prefix = 1 if self._diffusion_anchor_id() is not None else 0
+
+        # NaRA (noise-aware LoRA): the per-example corruption level t IS the noise
+        # level lambda the adapter conditions on. When NaRA is active, capture t and
+        # push it into the shared hypernetwork BEFORE any forward pass (both the
+        # self-conditioning no-grad pass and the gradient pass see the same Ceff).
+        # See ADR 0012 and adapters/nara_prototype.py.
+        nara_context = self._diffusion_nara_context()
+        if nara_context is not None:
+            decoder_input_ids, noise_level = corrupt_canvas(
+                canvas_input_ids, canvas_labels, vocab_size, eps,
+                protect_prefix=protect_prefix, return_noise_level=True,
+            )
+            nara_context.set_noise_level(noise_level)
+        else:
+            decoder_input_ids = corrupt_canvas(
+                canvas_input_ids, canvas_labels, vocab_size, eps,
+                protect_prefix=protect_prefix,
+            )
+
+        base_kwargs = {
+            "input_ids": encoder_input_ids,
+            "attention_mask": encoder_attention_mask,
+            "decoder_input_ids": decoder_input_ids,
+        }
+        # DiffusionGemmaEncoderModel is "very similar to Gemma4Model", whose
+        # ...ForConditionalGeneration lineage can crash without mm_token_type_ids on
+        # text-only batches despite it being documented optional. Pass zeros
+        # defensively (flows to the encoder via **kwargs).
+        if is_multimodal(model_config):
+            base_kwargs["mm_token_type_ids"] = torch.zeros_like(encoder_input_ids)
+
+        # Self-conditioning (Analog-Bits scheme). At serve the diffusion sampler
+        # feeds each denoise step's prediction back as the next step's
+        # self-conditioning signal; a model trained with self_conditioning=None
+        # never sees that feedback, so iterative serve decode misconverges the
+        # early canvas positions (the exact-hash near-miss). To match serve, run
+        # a no-grad pass to predict the clean canvas, then feed that prediction
+        # back as the self-conditioning signal on the gradient-carrying pass for
+        # a random ~sc_prob subset of the batch (the per-example mask teaches both
+        # the conditioned and unconditioned modes, so step-1 — which has no prior
+        # prediction — still works). sc_prob=0 restores the single-pass v1 path.
+        sc_prob = self._diffusion_self_conditioning_prob()
+        if sc_prob > 0.0:
+            with torch.no_grad():
+                sc_logits = model(
+                    **base_kwargs,
+                    self_conditioning_logits=None,
+                    self_conditioning_mask=None,
+                ).logits.detach()
+            sc_mask = torch.rand(decoder_input_ids.size(0), device=device) < sc_prob
+            forward_kwargs = {
+                **base_kwargs,
+                "self_conditioning_logits": sc_logits,
+                "self_conditioning_mask": sc_mask,
+            }
+        else:
+            forward_kwargs = {
+                **base_kwargs,
+                "self_conditioning_logits": None,
+                "self_conditioning_mask": None,
+            }
+
+        outputs = model(**forward_kwargs)
+        logits = outputs.logits  # (B, canvas_length, vocab)
+
+        # fp32 CE for numerical stability; ignore padded canvas slots.
+        # When supervise_termination emits a per-position canvas_loss_weight (only
+        # when pad_loss_weight != 1.0), down-weight the supervised pad-tail targets
+        # so the ~230 pad positions don't swamp the ~24 answer/EOS targets. The
+        # weight comes from the loader (not label==pad_id) so it stays unambiguous
+        # if an answer ever contains the pad token. Absent it, the loss is byte-
+        # identical to the prior uniform CE.
+        canvas_loss_weight = batch.get("canvas_loss_weight")
+        if canvas_loss_weight is not None:
+            per_position = torch.nn.functional.cross_entropy(
+                logits.reshape(-1, logits.size(-1)).float(),
+                canvas_labels.reshape(-1),
+                ignore_index=-100,
+                reduction="none",
+            )
+            weights = canvas_loss_weight.to(device).reshape(-1).to(per_position.dtype)
+            loss = (per_position * weights).sum() / weights.sum().clamp_min(1e-8)
+        else:
+            loss = torch.nn.functional.cross_entropy(
+                logits.reshape(-1, logits.size(-1)).float(),
+                canvas_labels.reshape(-1),
+                ignore_index=-100,
+            )
+
+        scaled_loss = loss / gradient_accumulation_steps
+        _, avg_loss = self.sync_loss(loss)
+        scaled_loss.backward()
+
+        self.print_microbatch_info(accum_step, avg_loss, start_time)
+        return avg_loss
+
+    def _diffusion_nara_context(self):
+        """Return the model's NaRAContext when NaRA is enabled for this job, else None.
+        Resolved once and cached (the module tree doesn't change after load). Walks the
+        module tree so it works regardless of distribution-strategy wrapping. See
+        adapters/nara_prototype.find_nara_context and ADR 0012."""
+        if getattr(self, "_nara_context_resolved", False):
+            return self._nara_context_cache
+
+        self._nara_context_resolved = True
+        self._nara_context_cache = None
+
+        job_config = get_job_config()
+        diffusion = job_config.get("diffusion") or {}
+        nara = diffusion.nara if hasattr(diffusion, "nara") else diffusion.get("nara")
+        if nara is not None:
+            enabled = nara.enabled if hasattr(nara, "enabled") else nara.get("enabled", False)
+            if enabled:
+                from adapters.nara_prototype import find_nara_context
+                self._nara_context_cache = find_nara_context(
+                    self.training_state.model_info["model"]
+                )
+        return self._nara_context_cache
+
+    def _diffusion_eps(self):
+        job_config = get_job_config()
+        diffusion = job_config.get("diffusion") or {}
+        if hasattr(diffusion, "eps"):
+            return diffusion.eps
+        return diffusion.get("eps", 0.001)
+
+    def _diffusion_anchor_id(self):
+        """Resolve the Tier-2 canvas anchor id when enabled, else None — mirrors
+        load_diffusion_dataset._resolve_anchor_id so the per-step protect_prefix
+        matches the anchor the loader baked into the canvas."""
+        job_config = get_job_config()
+        diffusion = job_config.get("diffusion") or {}
+        if hasattr(diffusion, "anchor_token"):
+            enabled = bool(diffusion.anchor_token)
+        else:
+            enabled = bool(diffusion.get("anchor_token", False))
+        if not enabled:
+            return None
+        tokenizer = self.training_state.model_info["tokenizer"]
+        return anchor_token_id(tokenizer)
+
+    def _diffusion_self_conditioning_prob(self):
+        """Per-step probability of feeding the model's own prediction back as the
+        self-conditioning signal during training (0 disables the two-pass scheme).
+        Default 0.5 per Analog-Bits; see _diffusion_training_step_accumulate."""
+        job_config = get_job_config()
+        diffusion = job_config.get("diffusion") or {}
+        if hasattr(diffusion, "self_conditioning_prob"):
+            return diffusion.self_conditioning_prob
+        return diffusion.get("self_conditioning_prob", 0.5)
 
     def optimizer_step(self):
         """Perform optimizer and scheduler step after gradient accumulation."""

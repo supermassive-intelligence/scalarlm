@@ -10,6 +10,61 @@ class LoraConfig(BaseModel):
     target_modules: Union[str, list] = "all-linear"  # or list of module names
 
 
+class NaraConfig(BaseModel):
+    # Noise-aware LoRA (NaRA, arXiv 2605.29716) for DiffusionGemma — PROTOTYPE.
+    # See docs/adr/0012-nara-noise-aware-lora-integration.md and
+    # docs/references/nara-noise-aware-lora.md. When enabled, the diffusion adapter
+    # path swaps plain LoRA for NaRA: the low-rank update becomes noise-conditioned
+    # (dW(t) = B @ C(t) @ A), where t is the per-example corruption level from
+    # corrupt_canvas. Rank/alpha/dropout are inherited from lora_config; the knobs
+    # below are the NaRA-only extras. Nested block — MUST be declared on the Pydantic
+    # model or get_job_config() silently drops it (the trust_remote_code footgun).
+    enabled: bool = False
+    c_scale: float = 0.1          # residual gain eta: Ceff = c_scale * C(t) + I
+    fnn_hidden_1: int = 256       # shared hypernetwork hidden sizes
+    fnn_hidden_2: int = 512
+    noise_embed_dim: int = 128    # Gaussian-Fourier embedding width for t (even)
+    fourier_scale: float = 16.0
+
+
+class DiffusionConfig(BaseModel):
+    # DiffusionGemma canvas denoising knobs (see ADR 0007/0008 and
+    # docs/superpowers/specs/2026-07-01-diffusiongemma-design.md). Only consumed
+    # when the model is DiffusionGemma (auto-detected via is_diffusion()); ignored
+    # otherwise. Nested block like lora_config; MUST be declared here or
+    # get_job_config()'s Pydantic model silently DROPS it from train_args (the same
+    # footgun that hid trust_remote_code).
+    canvas_length: int = 256   # decoder block size = the loader's pad/truncate target
+    eps: float = 0.001         # minimum corruption level for t ~ U(eps, 1)
+    # Per-step probability of the two-pass self-conditioning scheme (Analog-Bits):
+    # feed the model's own no-grad prediction back as the self-conditioning signal
+    # to match the iterative serve decode. 0 disables it (single-pass v1 training).
+    self_conditioning_prob: float = 0.5
+    # Tier-2 reliability lever (see docs/reports/2026-07-16-diffusiongemma-validation-runs.md).
+    # Prepend one fixed, never-corrupted, supervised anchor token (BOS) at canvas
+    # position 0 so the real output's first token gains a stable left-neighbor. The
+    # cccc/fragment-repeat collapses all begin at positions 0-2, where position 0
+    # otherwise sits at a boundary with no left-context (output is tokenized with
+    # add_special_tokens=False). Default False = byte-identical to prior runs.
+    anchor_token: bool = False
+    # Supervise the FULL fixed-length canvas (answer + terminating EOS + pad tail)
+    # instead of masking the tail with -100. Fixes the train/serve canvas mismatch
+    # that made DiffusionGemma fail the exact-hash memorize test (adapter memorized
+    # perfectly under a clean pad tail, but generate() seeds all canvas positions
+    # from uniform noise). Two effects: (1) the tail becomes corruptible, so the
+    # answer trains under serve's noisy-init context; (2) the model learns to emit
+    # EOS/pad, so a from-noise decode terminates cleanly. See
+    # docs/reports/2026-07-17-diffusiongemma-canvas-termination-plan.md. Default
+    # False = byte-identical to prior runs.
+    supervise_termination: bool = False
+    # Only used when supervise_termination is True and != 1.0: relative CE weight on
+    # the pad-tail positions (answer + EOS always weight 1.0). Lower it if the ~230
+    # pad targets swamp the ~24 answer targets. 1.0 = uniform (try this first).
+    pad_loss_weight: float = 1.0
+    # Noise-aware LoRA (NaRA) prototype. None/omitted or enabled=False = plain LoRA
+    # (byte-identical to prior runs). See NaraConfig.
+    nara: Optional[NaraConfig] = None
+
 class JobConfig(BaseModel):
 
     job_directory: str
@@ -22,6 +77,13 @@ class JobConfig(BaseModel):
     # Training
     max_steps: int = 100
     learning_rate: float = 3e-3
+    # Global training RNG seed (applied before the adapter is built, so PEFT's
+    # lora_A init, the per-step canvas corruption, and the SC mask are all
+    # deterministic). None = historical non-deterministic behavior (byte-identical
+    # to prior runs). Set it to make a run reproducible and to seed-sweep for a
+    # DiffusionGemma draw that lands in the clean-serving basin (see the 2026-07-16
+    # validation report's "State archaeology" section). See determinism.apply_seed.
+    seed: Optional[int] = None
     batch_size: int = 1
     gradient_clip_value: float = 1.0
     gradient_accumulation_steps: int = 4
@@ -66,6 +128,10 @@ class JobConfig(BaseModel):
     # Adapters
     adapter_type: str = "tokenformer"
     lora_config: Optional[LoraConfig] = LoraConfig()
+
+    # DiffusionGemma-only canvas denoising config (nested, like lora_config).
+    # None for every non-diffusion model; is_diffusion() gates whether it is read.
+    diffusion: Optional[DiffusionConfig] = None
 
     # 4 hours in seconds
     timeout: int = 4 * 60 * 60
