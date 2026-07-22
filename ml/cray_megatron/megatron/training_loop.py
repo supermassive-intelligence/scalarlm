@@ -16,6 +16,7 @@ from cray_megatron.megatron.doc_mask import (
     BUILD,
     SKIP_SEQLEN,
     SKIP_MULTIMODAL,
+    SKIP_SSM,
 )
 
 from cray_infra.training.training_job_status import TrainingJobStatus
@@ -46,6 +47,7 @@ logger = logging.getLogger(__name__)
 _MAX_4D_MASK_SEQ_LEN = 16384
 _doc_mask_skip_warned = False
 _doc_mask_multimodal_warned = False
+_doc_mask_ssm_warned = False
 
 
 def _warn_doc_mask_skipped(seq_len: int) -> None:
@@ -71,6 +73,20 @@ def _warn_doc_mask_skipped_multimodal() -> None:
         "attention_mask (e.g. Gemma3ForConditionalGeneration indexes shift_logits "
         "by it), so a 4D mask raises IndexError. Falling back to the 2D mask; "
         "packed documents will attend across each other in this run."
+    )
+
+
+def _warn_doc_mask_skipped_ssm() -> None:
+    global _doc_mask_ssm_warned
+    if _doc_mask_ssm_warned:
+        return
+    _doc_mask_ssm_warned = True
+    logger.warning(
+        "Skipping 4D document mask: hybrid Mamba/SSM model. Its kernel-less "
+        "torch_forward mixer multiplies hidden states by a 2D padding mask, so a "
+        "4D mask broadcasts to 5D and crashes (NemotronH). Falling back to the 2D "
+        "mask; packed documents will attend across each other in this run. (The "
+        "flex_attention BlockMask can't be consumed by the SSM path either.)"
     )
 
 
@@ -465,6 +481,13 @@ class TrainingLoop:
             # the logits by a 2D attention_mask (gemma-3-4b-it). Keep the 2D mask
             # from the batch — a 4D mask (SDPA or flex BlockMask) would IndexError.
             _warn_doc_mask_skipped_multimodal()
+        elif decision == SKIP_SSM:
+            # A hybrid Mamba/SSM model (NemotronH, …). Its kernel-less mixer
+            # torch_forward does `hidden_states * attention_mask[:, :, None]`,
+            # assuming a 2D mask; a 4D mask (SDPA or flex) broadcasts to 5D and
+            # crashes. Keep the 2D mask from the batch — never build, even under
+            # flex_attention (the SSM path can't consume a BlockMask either).
+            _warn_doc_mask_skipped_ssm()
         elif decision == BUILD or (decision == SKIP_SEQLEN and use_flex):
             # BUILD, or a sequence past the SDPA cap when flex_attention is on —
             # the flex BlockMask is O(S/128), so _MAX_4D_MASK_SEQ_LEN doesn't apply.
