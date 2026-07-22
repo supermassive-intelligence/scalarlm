@@ -36,6 +36,18 @@ def test_diffusion_block_survives_roundtrip():
     assert cfg["diffusion"]["self_conditioning_prob"] == 0.5
     # anchor_token defaults off so prior runs stay byte-identical.
     assert cfg["diffusion"]["anchor_token"] is False
+    # Termination-supervision defaults off; pad weight uniform.
+    assert cfg["diffusion"]["supervise_termination"] is False
+    assert cfg["diffusion"]["pad_loss_weight"] == 1.0
+
+
+def test_diffusion_supervise_termination_survives_roundtrip():
+    cfg = JobConfig(
+        **REQUIRED_FIELDS,
+        diffusion={"supervise_termination": True, "pad_loss_weight": 0.3},
+    ).dict()
+    assert cfg["diffusion"]["supervise_termination"] is True
+    assert cfg["diffusion"]["pad_loss_weight"] == 0.3
 
 
 def test_diffusion_anchor_token_survives_roundtrip():

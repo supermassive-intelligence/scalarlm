@@ -653,11 +653,28 @@ class TrainingLoop:
         logits = outputs.logits  # (B, canvas_length, vocab)
 
         # fp32 CE for numerical stability; ignore padded canvas slots.
-        loss = torch.nn.functional.cross_entropy(
-            logits.reshape(-1, logits.size(-1)).float(),
-            canvas_labels.reshape(-1),
-            ignore_index=-100,
-        )
+        # When supervise_termination emits a per-position canvas_loss_weight (only
+        # when pad_loss_weight != 1.0), down-weight the supervised pad-tail targets
+        # so the ~230 pad positions don't swamp the ~24 answer/EOS targets. The
+        # weight comes from the loader (not label==pad_id) so it stays unambiguous
+        # if an answer ever contains the pad token. Absent it, the loss is byte-
+        # identical to the prior uniform CE.
+        canvas_loss_weight = batch.get("canvas_loss_weight")
+        if canvas_loss_weight is not None:
+            per_position = torch.nn.functional.cross_entropy(
+                logits.reshape(-1, logits.size(-1)).float(),
+                canvas_labels.reshape(-1),
+                ignore_index=-100,
+                reduction="none",
+            )
+            weights = canvas_loss_weight.to(device).reshape(-1).to(per_position.dtype)
+            loss = (per_position * weights).sum() / weights.sum().clamp_min(1e-8)
+        else:
+            loss = torch.nn.functional.cross_entropy(
+                logits.reshape(-1, logits.size(-1)).float(),
+                canvas_labels.reshape(-1),
+                ignore_index=-100,
+            )
 
         scaled_loss = loss / gradient_accumulation_steps
         _, avg_loss = self.sync_loss(loss)

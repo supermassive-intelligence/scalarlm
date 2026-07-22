@@ -135,6 +135,103 @@ def test_anchor_token_id_none_without_bos():
     assert anchor_token_id(_FakeTokenizer()) is None
 
 
+def test_supervise_termination_appends_eos_and_supervises_tail():
+    tok = _FakeTokenizer()  # pad_token_id=0, eos_token_id=1
+    out = tokenize_canvas_batch(
+        tok, canvas_length=8, inputs=["hi"], outputs=["ab"],
+        supervise_termination=True,
+    )
+    ci = out["canvas_input_ids"][0]
+    cl = out["canvas_labels"][0]
+
+    t0, t1 = (ord("a") % 40) + 2, (ord("b") % 40) + 2
+    # Answer, then a terminating EOS (1), then the pad tail (0) — and every slot is
+    # supervised (labels mirror inputs; no -100 anywhere).
+    assert ci == [t0, t1, 1, 0, 0, 0, 0, 0]
+    assert cl == [t0, t1, 1, 0, 0, 0, 0, 0]
+    assert -100 not in cl
+    # No loss-weight field at the default uniform weight.
+    assert "canvas_loss_weight" not in out
+
+
+def test_supervise_termination_over_budget_reserves_eos_slot():
+    tok = _FakeTokenizer()
+    # 5-token output into a length-3 canvas: budget = 3 - 0 (no anchor) - 1 (EOS) = 2.
+    out = tokenize_canvas_batch(
+        tok, canvas_length=3, inputs=["x"], outputs=["abcde"],
+        supervise_termination=True,
+    )
+    ci = out["canvas_input_ids"][0]
+    cl = out["canvas_labels"][0]
+    t0, t1 = ((ord(c) % 40) + 2 for c in "ab")
+    # First 2 answer tokens + EOS fill the canvas exactly; EOS is never truncated.
+    assert ci == [t0, t1, 1]
+    assert cl == [t0, t1, 1]
+    assert len(ci) == 3
+
+
+def test_supervise_termination_off_is_byte_identical():
+    tok = _FakeTokenizer()
+    default = tokenize_canvas_batch(tok, canvas_length=6, inputs=["hi"], outputs=["ab"])
+    explicit_off = tokenize_canvas_batch(
+        tok, canvas_length=6, inputs=["hi"], outputs=["ab"],
+        supervise_termination=False,
+    )
+    assert default == explicit_off
+    assert -100 in default["canvas_labels"][0]  # tail still masked when off
+
+
+def test_supervise_termination_with_anchor():
+    tok = _FakeTokenizerBOS()  # bos=99
+    out = tokenize_canvas_batch(
+        tok, canvas_length=8, inputs=["hi"], outputs=["ab"],
+        anchor_id=99, supervise_termination=True,
+    )
+    ci = out["canvas_input_ids"][0]
+    cl = out["canvas_labels"][0]
+    t0, t1 = (ord("a") % 40) + 2, (ord("b") % 40) + 2
+    # anchor(99) + answer + EOS(1) + pad(0) tail, all supervised.
+    assert ci == [99, t0, t1, 1, 0, 0, 0, 0]
+    assert cl == [99, t0, t1, 1, 0, 0, 0, 0]
+    assert len(ci) == 8
+
+
+def test_supervise_termination_emits_loss_weight_when_downweighted():
+    tok = _FakeTokenizer()
+    out = tokenize_canvas_batch(
+        tok, canvas_length=6, inputs=["hi"], outputs=["ab"],
+        supervise_termination=True, pad_loss_weight=0.25,
+    )
+    w = out["canvas_loss_weight"][0]
+    # answer(2) + EOS(1) weight 1.0; the 3 pad-tail slots weight 0.25.
+    assert w == [1.0, 1.0, 1.0, 0.25, 0.25, 0.25]
+    assert len(w) == 6
+    # Uniform weight (1.0) emits no field even with supervise_termination on.
+    out_uniform = tokenize_canvas_batch(
+        tok, canvas_length=6, inputs=["hi"], outputs=["ab"],
+        supervise_termination=True, pad_loss_weight=1.0,
+    )
+    assert "canvas_loss_weight" not in out_uniform
+
+
+def test_supervise_termination_no_eos_token():
+    class NoEos(_FakeTokenizer):
+        eos_token_id = None
+        pad_token_id = 3
+
+    out = tokenize_canvas_batch(
+        NoEos(), canvas_length=5, inputs=["x"], outputs=["ab"],
+        supervise_termination=True,
+    )
+    ci = out["canvas_input_ids"][0]
+    cl = out["canvas_labels"][0]
+    t0, t1 = (ord("a") % 40) + 2, (ord("b") % 40) + 2
+    # No EOS to append -> answer + supervised pad(3) tail, no reserved EOS slot.
+    assert ci == [t0, t1, 3, 3, 3]
+    assert cl == [t0, t1, 3, 3, 3]
+    assert -100 not in cl
+
+
 def test_pad_token_id_fallbacks():
     class NoPad:
         pad_token_id = None

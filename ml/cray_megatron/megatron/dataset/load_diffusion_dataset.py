@@ -53,6 +53,8 @@ _DEFAULT_CANVAS_LENGTH = 256
 def load_diffusion_dataset(model, tokenizer, epoch):
     canvas_length = _get_canvas_length()
     anchor_id = _resolve_anchor_id(tokenizer)
+    supervise_termination = _supervise_termination()
+    pad_loss_weight = _pad_loss_weight()
 
     hf_dataset = datasets.IterableDataset.from_generator(
         make_dataset_generator(),
@@ -67,7 +69,13 @@ def load_diffusion_dataset(model, tokenizer, epoch):
     split_dataset = split_dataset_by_node(shuffled_dataset)
 
     tokenized_dataset = split_dataset.map(
-        get_canvas_tokenize_function(tokenizer, canvas_length, anchor_id),
+        get_canvas_tokenize_function(
+            tokenizer,
+            canvas_length,
+            anchor_id,
+            supervise_termination,
+            pad_loss_weight,
+        ),
         batched=True,
         remove_columns=["input", "output"],
     )
@@ -124,6 +132,27 @@ def _anchor_enabled():
     return bool(diffusion.get("anchor_token", False))
 
 
+def _supervise_termination():
+    """Whether to supervise the full canvas (answer + EOS + pad tail) instead of
+    masking the tail with -100. See diffusion_canvas.tokenize_canvas_batch and
+    docs/reports/2026-07-17-diffusiongemma-canvas-termination-plan.md."""
+    job_config = get_job_config()
+    diffusion = job_config.get("diffusion") or {}
+    if hasattr(diffusion, "supervise_termination"):
+        return bool(diffusion.supervise_termination)
+    return bool(diffusion.get("supervise_termination", False))
+
+
+def _pad_loss_weight():
+    """Relative CE weight on the supervised pad tail (only meaningful when
+    supervise_termination is on and != 1.0). 1.0 = uniform."""
+    job_config = get_job_config()
+    diffusion = job_config.get("diffusion") or {}
+    if hasattr(diffusion, "pad_loss_weight"):
+        return float(diffusion.pad_loss_weight)
+    return float(diffusion.get("pad_loss_weight", 1.0))
+
+
 def _resolve_anchor_id(tokenizer):
     """Resolve the anchor token id when enabled, else None. Warns and disables the
     anchor if the tokenizer has no BOS rather than inventing a spurious id."""
@@ -138,10 +167,22 @@ def _resolve_anchor_id(tokenizer):
     return anchor_id
 
 
-def get_canvas_tokenize_function(tokenizer, canvas_length, anchor_id=None):
+def get_canvas_tokenize_function(
+    tokenizer,
+    canvas_length,
+    anchor_id=None,
+    supervise_termination=False,
+    pad_loss_weight=1.0,
+):
     def tokenize(dataset):
         return tokenize_canvas_batch(
-            tokenizer, canvas_length, dataset["input"], dataset["output"], anchor_id
+            tokenizer,
+            canvas_length,
+            dataset["input"],
+            dataset["output"],
+            anchor_id,
+            supervise_termination,
+            pad_loss_weight,
         )
 
     return tokenize

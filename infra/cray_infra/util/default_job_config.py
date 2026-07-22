@@ -47,6 +47,20 @@ class DiffusionConfig(BaseModel):
     # otherwise sits at a boundary with no left-context (output is tokenized with
     # add_special_tokens=False). Default False = byte-identical to prior runs.
     anchor_token: bool = False
+    # Supervise the FULL fixed-length canvas (answer + terminating EOS + pad tail)
+    # instead of masking the tail with -100. Fixes the train/serve canvas mismatch
+    # that made DiffusionGemma fail the exact-hash memorize test (adapter memorized
+    # perfectly under a clean pad tail, but generate() seeds all canvas positions
+    # from uniform noise). Two effects: (1) the tail becomes corruptible, so the
+    # answer trains under serve's noisy-init context; (2) the model learns to emit
+    # EOS/pad, so a from-noise decode terminates cleanly. See
+    # docs/reports/2026-07-17-diffusiongemma-canvas-termination-plan.md. Default
+    # False = byte-identical to prior runs.
+    supervise_termination: bool = False
+    # Only used when supervise_termination is True and != 1.0: relative CE weight on
+    # the pad-tail positions (answer + EOS always weight 1.0). Lower it if the ~230
+    # pad targets swamp the ~24 answer targets. 1.0 = uniform (try this first).
+    pad_loss_weight: float = 1.0
     # Noise-aware LoRA (NaRA) prototype. None/omitted or enabled=False = plain LoRA
     # (byte-identical to prior runs). See NaraConfig.
     nara: Optional[NaraConfig] = None
