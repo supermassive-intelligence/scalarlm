@@ -626,3 +626,81 @@ models:
     # learning_rate 1e-3: grouped-expert MoE diverges at the default 3e-3 warmup peak
     # (see PhiMoE RUN phimoe-083202 note); 1e-3 is the validated grouped-MoE rate.
     train_args: {dtype: bfloat16, max_steps: 450, warmup_steps: 30, steps_per_checkpoint: 450, learning_rate: 1.0e-3, lora_config: {lora_dropout: 0}}
+
+  # === Gemma 4 family (added 2026-07-21) ===
+  # Google's Gemma 4 release (2026-04-02): five sizes, all served as
+  # `Gemma4ForConditionalGeneration` (the multimodal wrapper — text/image, +audio on
+  # E2B/E4B/12B). All GATED (HF_TOKEN + license). E2B/E4B use the "effective
+  # parameter" (MatFormer) convention: raw weights are ~5.1B / ~8B.
+  #
+  # KNOWN BLOCKER — read before trusting a PASS here. `tiny-random/gemma-4-dense`
+  # (same `Gemma4ForConditionalGeneration` arch) is the sweep's one BLOCKED Gemma 4
+  # entry: it serves + partially applies the adapter but NO_MEMORIZATION, because the
+  # fork's two-pass key normalization only PARTIALLY maps the trainer's `.pt` keys onto
+  # the MM-wrapped decoder tree (`language_model.model.layers.*`, not `model.layers.*`)
+  # — some module classes land, the rest silently no-op. Root-caused to the durable
+  # adapter layer (`adapter_format.normalize_lora_key`'s gemma4 `language_model`-infix
+  # rule), NOT the model class — see docs/reports/2026-06-18-gemma4-dense-adapter-noop-
+  # diagnostic.md (G4D) + ADR 0005/0006. So EXPECT these real entries to reproduce that
+  # partial-key no-op until that fix lands; they are what validates it on a real model
+  # (the tiny-random fixture's synthetic keys can't localize it — G4D box result).
+  # Run with --no-preflight (the 2/7 fusion artifact + this arch's MM tree confuse the
+  # offline heuristic, same as the other MM/MoE archs).
+  #
+  # dtype bf16 across the board (≥5B weights → the ≥7B fp32-mode-collapse defense);
+  # LRs are arch-precedent STARTING points (dense ≥4B mode-collapsed at 3e-3 →
+  # Qwen3-4B/14B/32B use 1e-3; grouped MoE overshoots at the 3e-3 warmup peak → 1e-3),
+  # tune on the first real run. gate_gb is a cuda-docker no-op on the unified-mem Spark.
+  # NOT cpu_ok: the CPU image can't inspect `Gemma4ForConditionalGeneration` (cpp
+  # extensions skipped under CPU torch — G4D), so these need a GPU target.
+
+  - id: google/gemma-4-E2B-it                   # Gemma4ForConditionalGeneration; ~2.3B eff (5.1B weights) dense mm
+    multimodal: true
+    adapters: {lora: {gate_gb: 12}}
+    # RESULT 2026-07-21: PASS on cuda-spark (train 707s, loss 0.0000, exact golden hash).
+    # First real Gemma-4 validated end-to-end. Default lr 3e-3 tolerated — a brief step-32
+    # overshoot (loss→1.6) self-recovered to 0.0 by step 100 (small dense, like Qwen3-1.7B).
+    train_args: {dtype: bfloat16}
+  - id: google/gemma-4-E4B-it                   # Gemma4ForConditionalGeneration; ~4.5B eff (8B weights) dense mm
+    multimodal: true
+    adapters: {lora: {gate_gb: 18}}
+    # RESULT 2026-07-21: PASS on cuda-spark (train 666s/300 steps, exact golden hash).
+    # lr 1e-3 = clean monotone descent (loss ~1e-5 by step 12, ~5e-7 floor, NO overshoot,
+    # unlike E2B's 3e-3). Confirms the Gemma-4 LoRA path scales to the 8B dense-mm tier.
+    train_args: {dtype: bfloat16, learning_rate: 1.0e-3}
+  - id: google/gemma-4-12B-it                   # Gemma4ForConditionalGeneration; 11.95B dense mm ("12B Unified")
+    multimodal: true
+    adapters: {lora: {gate_gb: 28}}
+    # RESULT 2026-07-21: PASS on cuda-spark (train 2045s/450 steps, exact golden hash).
+    # lr 1e-3 clean descent (loss ~5e-6 by step 47, no overshoot). Largest dense Gemma-4
+    # on a single GB10 so far; weights 23GiB, serve EngineCore ~103GiB.
+    train_args: {dtype: bfloat16, learning_rate: 1.0e-3, max_steps: 450, warmup_steps: 30, steps_per_checkpoint: 450}
+  - id: google/gemma-4-26B-A4B-it              # Gemma4ForConditionalGeneration MoE; 25.2B/3.8B active, 8-of-128 exp, mm
+    # MoE: same shape as DiffusionGemma's backbone. Grouped experts → LoRA via
+    # target_parameters (resolve_target_modules' MoE-aware MM branch must recognize
+    # Gemma4's expert container; router/vision excluded); lora_dropout:0 for PEFT's
+    # ParamWrapper (same knob as the other grouped MoEs). Large → phase-scaled targets
+    # only (~50GiB bf16; peak = 1 model). lr 1e-3 (grouped MoE overshoots at 3e-3).
+    # RESULT 2026-07-22: PASS on cuda-spark (train 2694.6s/150 steps, adapter sample ==
+    # exact golden hash, baseline "is is is"; serve 12.3s). First Gemma-4 MoE end-to-end.
+    # Serve needed a fork fix: expert-key renorm collapsed all layers onto layers.moe.experts
+    # (Gemma4 .pt has experts directly under layer index, no container; vLLM wraps in Gemma4MoE)
+    # → insert-not-replace in _renormalize_lora_sd_for_model (hybrid_adapter_manager.py).
+    # Serve args: --gpu-memory-utilization 0.85 --max-model-len 4096 --enforce-eager.
+    # 150 steps (memorized by ~60); training-finalization can flakily hang on save → retry.
+    multimodal: true
+    adapters: {lora: {gate_gb: 60}}
+    train_args: {dtype: bfloat16, learning_rate: 1.0e-3, max_steps: 150, warmup_steps: 30, steps_per_checkpoint: 150, lora_config: {lora_dropout: 0}}
+  - id: google/gemma-4-31B-it                   # Gemma4ForConditionalGeneration; 30.7B dense mm (text/image, no audio)
+    # Dense-31B: like Qwen3-32B, relies on phase-scaling (whole-GPU-per-phase); ~62GiB
+    # bf16 activates ALL params in the train forward/backward, so the GB10 unified pool
+    # is VRAM-MARGINAL — a TRAIN_TIMEOUT/OOM here is expected-territory (cf. Qwen3-32B,
+    # which cleared on cuda-vast H200). Run the 26B/31B tier on cuda-vast if the Spark
+    # can't hold it. lr 1e-3 (dense ≥4B mode-collapses at 3e-3).
+    # RESULT 2026-07-22: PASS on cuda-spark (train 1809.5s/150 steps, adapter sample ==
+    # exact golden hash, baseline "is is is"; serve 14.3s / restart 55.8s). Largest Gemma-4
+    # (and largest dense) end-to-end on a single GB10 — ~62GiB bf16 activation was
+    # VRAM-marginal on the 128GiB unified pool but HELD (no OOM/TIMEOUT; cuda-vast not needed).
+    # Completes the Gemma-4 ladder: E2B→E4B→12B→26B-A4B(MoE)→31B(dense) all PASS.
+    adapters: {lora: {gate_gb: 70}}
+    train_args: {dtype: bfloat16, learning_rate: 1.0e-3, max_steps: 150, warmup_steps: 30, steps_per_checkpoint: 150}
