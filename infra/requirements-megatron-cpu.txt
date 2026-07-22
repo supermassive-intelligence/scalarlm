@@ -1,5 +1,7 @@
+scipy==1.15.3
 sentence-transformers
 torchao>=0.16.1
 transformers>=5.5.0
 huggingface_hub>=0.37
 peft
+torchvision==0.25.0
