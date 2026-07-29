@@ -25,7 +25,7 @@ def test_config_defaults_when_no_yaml_and_no_env(tmp_path, monkeypatch):
 
     assert cfg["model"] == "tiny-random/gemma-4-dense"
     assert cfg["api_url"] == "http://localhost:8000"
-    assert cfg["max_model_length"] == 256
+    assert cfg["max_model_length"] == 0
     assert cfg["gpu_memory_utilization"] == pytest.approx(0.40)
     assert cfg["tokenformer_r"] == 32
     assert cfg["tokenformer_num_heads"] == 4
