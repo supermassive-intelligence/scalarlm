@@ -69,7 +69,7 @@ def clean_old_node_info():
                 os.remove(file_path)
 
 
-def get_node_info():
+def get_node_info() -> dict:
     hostname = get_hostname()
     cpu_count = get_cpu_count()
     gpu_count = get_gpu_count()
@@ -79,6 +79,7 @@ def get_node_info():
         "machine_id": machine_id,
         "hostname": hostname,
         "cpu_count": cpu_count,
+        "memory_mb": get_memory_mb(),
         "gpu_count": gpu_count,
         "gpu_type": get_gpu_type(),
         "gpu_indexes": get_gpu_indexes(),
@@ -108,8 +109,28 @@ def get_hostname():
     return socket.gethostname()
 
 
-def get_cpu_count():
+def get_cpu_count() -> int | None:
     return os.cpu_count()
+
+
+def get_memory_mb() -> int | None:
+    """Read total host memory from ``/proc/meminfo``, in MB.
+
+    Mirrors ``get_cpu_count()``'s style: a thin wrapper with no new
+    dependency, best-effort rather than fatal. Returns ``None`` (rather
+    than raising) if ``/proc/meminfo`` is missing, unreadable (e.g.
+    ``PermissionError`` in a restricted container), or unparseable —
+    callers then omit ``RealMemory`` from the generated node config
+    instead of writing a bogus value.
+    """
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    return int(line.split()[1]) // 1024
+    except (OSError, ValueError, IndexError) as e:
+        logger.debug(f"Error reading total memory: {e}")
+    return None
 
 
 def get_gpu_count():
@@ -276,9 +297,17 @@ def save_slurm_conf_values(slurm_conf_values):
     return config
 
 
-def write_node_config(node):
-    """
-    NodeName=hostname CPUs=64 Gres=gpu:6 State=UNKNOWN
+def write_node_config(node: dict) -> str:
+    """Render one ``NodeName=...`` line for ``slurm.conf``.
+
+    Example output::
+
+        NodeName=hostname CPUs=64 RealMemory=257723 Gres=gpu:6 State=UNKNOWN
+
+    ``RealMemory`` is omitted when ``node["memory_mb"]`` is missing or
+    falsy (e.g. ``get_memory_mb()`` couldn't read ``/proc/meminfo``),
+    matching how ``Gres`` is already omitted for GPU-less nodes rather
+    than writing a misleading value.
     """
     max_gpus_per_node = get_config()["max_gpus_per_node"]
     gres_string = (
@@ -286,7 +315,16 @@ def write_node_config(node):
         if node["gpu_count"] > 0
         else ""
     )
-    node_config = f"NodeName={node['hostname']} CPUs={node['cpu_count']} {gres_string} State=UNKNOWN"
+    memory_mb = node.get("memory_mb")
+    memory_string = f"RealMemory={memory_mb}" if memory_mb else ""
+    fields = [
+        f"NodeName={node['hostname']}",
+        f"CPUs={node['cpu_count']}",
+        memory_string,
+        gres_string,
+        "State=UNKNOWN",
+    ]
+    node_config = " ".join(field for field in fields if field)
     return node_config + "\n"
 
 
