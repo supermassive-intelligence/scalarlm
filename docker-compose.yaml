@@ -1,6 +1,7 @@
 services:
 
     cray: &cray
+        image: cray:latest
         command: /app/cray/scripts/start_one_server.sh
         build:
             context: .

@@ -154,6 +154,65 @@ def patch_output_handler_metrics_offload(vllm_root: Path) -> None:
     target.write_text(patched)
     print(f"[vllm_patches] Applied output_handler metrics offload to {target}")
 
+def patch_instrumentator_route_name_signature(vllm_root: Path) -> None:
+    """Forward kwargs through the fork's `get_route_name` monkeypatch.
+
+    `vllm/entrypoints/serve/instrumentator/metrics.py` wraps
+    `prometheus_fastapi_instrumentator.routing.get_route_name` to swallow the
+    `AttributeError` that nested routers trigger. The wrapper takes only
+    `request`, but current instrumentator releases call it as
+    `get_route_name(request, should_include_root_path=...)`, so every request
+    through the metrics middleware raises TypeError -> HTTP 400 on all
+    endpoints, including /health. ScalarLM then reports vLLM down while the
+    engine is running fine.
+
+    Both the signature and the forwarded call need widening: `**kwargs` alone
+    fixes the inbound call and then fails on the outbound one, because the real
+    `get_route_name` *requires* should_include_root_path.
+
+    Skips cleanly if the anchor is absent -- newer fork revisions replaced this
+    shim with a `_get_route_name` walk that doesn't have the problem.
+    """
+    target = (
+        vllm_root / "vllm" / "entrypoints" / "serve" / "instrumentator" / "metrics.py"
+    )
+    if not target.exists():
+        print(f"[vllm_patches] {target} not found; skipping route-name patch")
+        return
+
+    src = target.read_text()
+
+    anchor_def = "def patched_get_route_name(request):\n"
+    anchor_call = "        return _original_get_route_name(request)\n"
+
+    if anchor_def not in src:
+        print(
+            "[vllm_patches] patched_get_route_name shim absent; "
+            "route-name patch not needed for this revision"
+        )
+        return
+
+    assert anchor_call in src, (
+        "metrics.py: found `def patched_get_route_name(request):` but not the "
+        "expected `return _original_get_route_name(request)` call. The shim has "
+        "drifted -- re-anchor this patch."
+    )
+
+    patched = (
+        src
+        .replace(anchor_def, "def patched_get_route_name(request, **kwargs):\n", 1)
+        .replace(
+            anchor_call,
+            "        return _original_get_route_name(request, **kwargs)\n",
+            1,
+        )
+    )
+
+    assert patched != src, "patch produced identical output — something's wrong"
+    compile(patched, str(target), "exec")
+
+    target.write_text(patched)
+    print(f"[vllm_patches] Forwarded kwargs through patched_get_route_name in {target}")
 
 def main() -> int:
     if len(sys.argv) != 2:
@@ -165,6 +224,7 @@ def main() -> int:
         return 3
 
     patch_output_handler_metrics_offload(vllm_root)
+    patch_instrumentator_route_name_signature(vllm_root)
     print("[vllm_patches] All patches applied.")
     return 0
 

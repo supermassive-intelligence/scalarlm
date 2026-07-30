@@ -2,7 +2,7 @@ ARG BASE_NAME=cpu
 
 ###############################################################################
 # NVIDIA BASE IMAGE
-FROM nvcr.io/nvidia/pytorch:26.01-py3 AS nvidia
+FROM nvcr.io/nvidia/pytorch:26.05-py3 AS nvidia
 
 RUN apt-get update -y && apt-get install -y python3-venv slurm-wlm libslurm-dev
 
@@ -124,18 +124,28 @@ RUN pip install setuptools-scm
 
 # Configure vLLM source - can use either local directory or remote repo.
 #
-# VLLM_BRANCH defaults to `main` on vllm-fork. The fixes that previously
-# required pinning to scalarlm-on-v0.19.0 at a specific SHA (TorchAllocator
-# crash, Triton scratch-allocator memleak, torch 2.10 ABI) are now merged
-# into vllm-fork's main branch, so the branch tip is sufficient.
+# VLLM_BRANCH tracks sync/upstream-v0.26.0 on vllm-fork. The fork's C++
+# divergence from upstream is ~63 lines of stable-ABI shimming across 6 files;
+# CMakeLists.txt is untouched, so TORCH_TARGET_VERSION=0x020B comes from
+# upstream and this branch requires a torch with the 2.11+ stable ABI. The
+# NVIDIA base image supplies it (hence the NGC 26.05 pin, and why nothing here
+# installs its own torch).
 #
-# VLLM_COMMIT remains available as an opt-in pin if a deployment needs
-# reproducibility across time or wants to roll back to a specific SHA;
-# leave it empty to use BRANCH tip (the default).
+# Changing VLLM_BRANCH can therefore break the build via the base image. If you
+# do, verify by compiling csrc/libtorch_stable/cuda_view.cu against the
+# candidate tag's headers -- version strings aren't enough: NGC 26.04 and 26.05
+# both report torch 2.12.0a0 and only 26.05 compiles.
+#
+# VLLM_COMMIT pins a SHA; empty uses BRANCH tip. Note the vllm version string in
+# the image comes from build-copy-vllm.sh's synthetic git tag, so it does not
+# tell you which source was used -- diff a known file instead.
+#
+# NOTE: the RUN below bind-mounts ./vllm unconditionally, so a ./vllm directory
+# must exist in the build context even when VLLM_SOURCE=remote.
 ARG VLLM_SOURCE=remote
-ARG VLLM_BRANCH=main
+ARG VLLM_BRANCH=sync/upstream-v0.26.0
 ARG VLLM_COMMIT=
-ARG VLLM_REPO=https://github.com/supermassive-intelligence/vllm-fork.git
+ARG VLLM_REPO=https://github.com/tmielika/vllm-fork.git
 
 # Handle vLLM source - support both local and remote modes.
 # build-copy-vllm.sh and apply_patches.py are copied in a single COPY
@@ -163,7 +173,7 @@ ENV CMAKE_BUILD_TYPE=Release
 # vLLM dependencies
 COPY ./infra/requirements-vllm.txt ${INSTALL_ROOT}/requirements-vllm.txt
 RUN uv pip install --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements-vllm.txt && \
-    python ${INSTALL_ROOT}/vllm/use_existing_torch.py
+    python ${INSTALL_ROOT}/vllm/use_existing_torch.py --prefix
 
 RUN \
     --mount=type=cache,target=/root/.cache/pip \
@@ -174,7 +184,8 @@ RUN \
     COMPUTED=$(( NPROC < MEM_BASED ? NPROC : MEM_BASED )) && \
     export MAX_JOBS=$(( COMPUTED < 16 ? COMPUTED : 16 )) && \
     echo "MAX_JOBS=${MAX_JOBS} (nproc=${NPROC}, mem-based=${MEM_BASED}, capped at 16)" && \
-    pip install --no-build-isolation -e . --verbose
+    pip install --no-build-isolation -e . --verbose && \
+    uv pip install "safetensors>=0.8.0" 
 
 WORKDIR ${INSTALL_ROOT}
 

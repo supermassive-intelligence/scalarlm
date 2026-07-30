@@ -11,7 +11,8 @@ imagePullSecrets: []
 
 # Model + cray-config.yaml. extraConfig is merged verbatim into every
 # ConfigMap, so you can set any key the server's get_config() reads.
-model: Qwen/Qwen3-14B
+#model: Qwen/Qwen3-14B
+model: google/diffusiongemma-26B-A4B-it
 gpu_memory_utilization: 0.85
 max_train_time: 86400
 extraConfig: {}
