@@ -86,17 +86,34 @@ class Config(BaseModel):
     dtype: str = "auto"
     limit_mm_per_prompt:str = '{"image":2}'
 
-    # Whether to pass --enable-lora to vLLM on startup. When true (default),
-    # every layer in the model is wrapped in a LoRA-aware shim so adapters
-    # can be hot-loaded. That wrapping has cost on every forward pass even
-    # with no adapter loaded, and on some vLLM-fork builds the MoE LoRA
-    # wrapper has outright bugs (e.g. the TorchAllocator.set interface drift
-    # on scalarlm-on-v0.19.0 HEAD). Deployments that know they won't use
-    # LoRA/tokenformer adapters should set SCALARLM_ENABLE_LORA=false to
-    # skip the wrapping entirely. Dynamic adapter loading via
-    # /v1/load_lora_adapter won't be available in that mode — fine for
-    # pure-inference pods, not fine for training-eval pods.
-    enable_lora: bool = True
+    # Whether to pass --enable-lora to vLLM on startup.
+    #
+    # Defaults to false: with both flags set the fork selects its
+    # HybridAdapterManager, which nests every targeted layer under
+    # `.base_layer.`, so the attention weights in a ScalarLM Tokenformer
+    # checkpoint match nothing and are dropped at activation — the model
+    # then serves with attention still at initialization. job_config's
+    # adapter_type defaults to "tokenformer", so false matches what the
+    # trainer produces.
+    #
+    # Cost: adapter_type="lora" jobs are ignored in this mode. One server
+    # cannot serve both types today. Set SCALARLM_ENABLE_LORA=true for a
+    # LoRA-dedicated server.
+    enable_lora: bool = False
+
+    # Whether to pass --enable-tokenformer to vLLM on startup. The ScalarLM
+    # trainer only ever emits Tokenformer adapters (see
+    # ml/cray_megatron/models/get_model_manager.py, which returns
+    # TokenformerModelManager unconditionally), so without this flag the vLLM
+    # fork picks its LoRA-only adapter manager and rejects every checkpoint
+    # this stack produces with "has no LoRA tensors (found only Tokenformer
+    # keys)". The adapter then never registers as a served model, and
+    # generation against a freshly trained model 404s.
+    #
+    # With enable_lora false (the default) this selects the Tokenformer-only
+    # manager, which leaves the model's parameter names untouched — see the
+    # enable_lora comment above for why that matters.
+    enable_tokenformer: bool = True
 
     max_log_length: int = 100
 

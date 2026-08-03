@@ -1,4 +1,4 @@
-from tokenformer.tokenformer_surgeon import TokenformerSurgeon
+from tokenformer.tokenformer_surgeon import TokenformerSurgeon, is_non_language_path
 
 import time
 import logging
@@ -48,7 +48,19 @@ def create_tokenformer_model(model, device, train_lm_head=None):
     logger.info("Unfreezing tokenformer parameters...")
     step5_start = time.time()
     unfrozen_count = 0
+    skipped_non_language = 0
     for name, param in tokenformer_model.named_parameters():
+        # Tokenformer is a language-model adapter. Without this guard the
+        # substring matches below also fire inside the vision/audio towers
+        # of a multimodal model, so their attention projections and norms
+        # get trained and written into the checkpoint. vLLM exposes those
+        # parameters under a different layout, so at serve time they either
+        # kill the engine or get silently dropped — either way the training
+        # was wasted. Text-only models have no such components, so this
+        # changes nothing for them.
+        if is_non_language_path(name):
+            skipped_non_language += 1
+            continue
         if any(
             module_name in name
             for module_name in [
@@ -66,6 +78,11 @@ def create_tokenformer_model(model, device, train_lm_head=None):
         ):
             param.requires_grad = True
             unfrozen_count += 1
+    if skipped_non_language:
+        logger.info(
+            f"Kept {skipped_non_language:,} non-language (vision/audio tower) "
+            f"parameters frozen"
+        )
     step5_time = time.time() - step5_start
     logger.info(
         f"Tokenformer parameter unfreezing completed: {step5_time:.2f}s, unfrozen {unfrozen_count:,} parameters"

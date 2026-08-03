@@ -17,7 +17,7 @@ import {
   exportConversation,
 } from "@/stores/conversationIO";
 import { useMessages } from "@/stores/useConversationStore";
-import { getTemperature } from "@/stores/sampling";
+import { getTemperatureForRequest } from "@/stores/sampling";
 
 import { ConversationMenu } from "./ConversationMenu";
 import { MarkdownMessage } from "./MarkdownMessage";
@@ -120,7 +120,7 @@ export function ConversationView({
           messages: openAIMessages,
           signal: controller.signal,
           max_tokens: conversation.maxTokens,
-          temperature: getTemperature(),
+          temperature: getTemperatureForRequest(),
           onDelta: (delta) => {
             buffered += delta;
             if (!flushPending) {

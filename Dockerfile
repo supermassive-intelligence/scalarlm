@@ -124,28 +124,18 @@ RUN pip install setuptools-scm
 
 # Configure vLLM source - can use either local directory or remote repo.
 #
-# VLLM_BRANCH tracks sync/upstream-v0.26.0 on vllm-fork. The fork's C++
-# divergence from upstream is ~63 lines of stable-ABI shimming across 6 files;
-# CMakeLists.txt is untouched, so TORCH_TARGET_VERSION=0x020B comes from
-# upstream and this branch requires a torch with the 2.11+ stable ABI. The
-# NVIDIA base image supplies it (hence the NGC 26.05 pin, and why nothing here
-# installs its own torch).
+# VLLM_BRANCH defaults to `main` on vllm-fork. The fixes that previously
+# required pinning to scalarlm-on-v0.19.0 at a specific SHA (TorchAllocator
+# crash, Triton scratch-allocator memleak, torch 2.10 ABI) are now merged
+# into vllm-fork's main branch, so the branch tip is sufficient.
 #
-# Changing VLLM_BRANCH can therefore break the build via the base image. If you
-# do, verify by compiling csrc/libtorch_stable/cuda_view.cu against the
-# candidate tag's headers -- version strings aren't enough: NGC 26.04 and 26.05
-# both report torch 2.12.0a0 and only 26.05 compiles.
-#
-# VLLM_COMMIT pins a SHA; empty uses BRANCH tip. Note the vllm version string in
-# the image comes from build-copy-vllm.sh's synthetic git tag, so it does not
-# tell you which source was used -- diff a known file instead.
-#
-# NOTE: the RUN below bind-mounts ./vllm unconditionally, so a ./vllm directory
-# must exist in the build context even when VLLM_SOURCE=remote.
+# VLLM_COMMIT remains available as an opt-in pin if a deployment needs
+# reproducibility across time or wants to roll back to a specific SHA;
+# leave it empty to use BRANCH tip (the default).
 ARG VLLM_SOURCE=remote
-ARG VLLM_BRANCH=sync/upstream-v0.26.0
+ARG VLLM_BRANCH=main
 ARG VLLM_COMMIT=
-ARG VLLM_REPO=https://github.com/tmielika/vllm-fork.git
+ARG VLLM_REPO=https://github.com/supermassive-intelligence/vllm-fork.git
 
 # Handle vLLM source - support both local and remote modes.
 # build-copy-vllm.sh and apply_patches.py are copied in a single COPY

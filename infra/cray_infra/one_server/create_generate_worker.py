@@ -51,6 +51,7 @@ from cray_infra.api.fastapi.routers.request_types.get_work_response import (
 from cray_infra.api.fastapi.aiohttp.get_global_session import get_global_session
 from cray_infra.one_server.decode_error_body import decode_error_body
 from cray_infra.one_server.format_exception import format_exception
+from cray_infra.one_server.sampling_params import sampling_params_for
 
 from cray_infra.util.get_config import get_config
 
@@ -435,9 +436,9 @@ async def async_chat_completion_task(request, app):
         model=request["model"],
         messages=convert_prompt_to_openai_format(request["prompt"]),
         max_tokens=request["max_tokens"],
-        temperature=request.get("temperature", 0.0),
         tools=request.get("tools"),
         tool_choice=request.get("tool_choice"),
+        **sampling_params_for(app, request),
     )
 
     raw_request = Request(
@@ -569,7 +570,9 @@ async def async_completion_task(request, app):
         model=request["model"],
         prompt=request["prompt"],
         max_tokens=request["max_tokens"],
-        temperature=request.get("temperature", 0.0), tools=request.get("tools"), tool_choice=request.get("tool_choice"),
+        tools=request.get("tools"),
+        tool_choice=request.get("tool_choice"),
+        **sampling_params_for(app, request),
     )
 
     raw_request = Request(
