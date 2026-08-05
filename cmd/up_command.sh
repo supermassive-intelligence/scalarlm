@@ -45,9 +45,22 @@ mkdir -p chat-ui
 
 echo "SM arch is ${sm_arch}"
 
+# Explicit -f (not Compose's native override auto-discovery) keeps
+# compose-file selection deterministic: an inherited COMPOSE_FILE env var,
+# or a stray .env in this directory, would otherwise silently redirect
+# `docker compose` at an unrelated project when no -f is given at all.
+# Check both override extensions since Compose itself accepts either -- but
+# since both names are gitignored (so a stale one is invisible to `git
+# status`), fail loudly if both exist instead of silently picking one and
+# layering them, which would concatenate some config unexpectedly.
 compose_files=(-f docker-compose.yaml)
-if [ -f docker-compose.override.yaml ]; then
+if [ -f docker-compose.override.yaml ] && [ -f docker-compose.override.yml ]; then
+    echo "Both docker-compose.override.yaml and docker-compose.override.yml exist; remove one." >&2
+    exit 1
+elif [ -f docker-compose.override.yaml ]; then
     compose_files+=(-f docker-compose.override.yaml)
+elif [ -f docker-compose.override.yml ]; then
+    compose_files+=(-f docker-compose.override.yml)
 fi
 
 BASE_NAME=${target} VLLM_TARGET_DEVICE=${vllm_target_device} \
