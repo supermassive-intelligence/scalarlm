@@ -34,6 +34,12 @@ services:
                 - VLLM_SOURCE=${VLLM_SOURCE:-remote}
                 - VLLM_BRANCH=${VLLM_BRANCH:-main}
                 - VLLM_REPO=${VLLM_REPO:-https://github.com/supermassive-intelligence/vllm-fork.git}
+                # Note the missing ':' -- unset uses the Dockerfile's verified
+                # pin, but `VLLM_COMMIT= docker compose build` (explicitly set
+                # to empty) opts out to track VLLM_BRANCH tip, e.g. when
+                # pointing VLLM_REPO/VLLM_BRANCH at a custom fork or branch
+                # that doesn't contain the pinned commit.
+                - VLLM_COMMIT=${VLLM_COMMIT-e01dda4f7814d50275dca507759815e205c079f5}
         ports:
             - "8000:8000"
             - "8001:8001"
