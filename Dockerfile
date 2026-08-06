@@ -124,17 +124,15 @@ RUN pip install setuptools-scm
 
 # Configure vLLM source - can use either local directory or remote repo.
 #
-# VLLM_BRANCH defaults to `main` on vllm-fork. The fixes that previously
-# required pinning to scalarlm-on-v0.19.0 at a specific SHA (TorchAllocator
-# crash, Triton scratch-allocator memleak, torch 2.10 ABI) are now merged
-# into vllm-fork's main branch, so the branch tip is sufficient.
-#
-# VLLM_COMMIT remains available as an opt-in pin if a deployment needs
-# reproducibility across time or wants to roll back to a specific SHA;
-# leave it empty to use BRANCH tip (the default).
+# VLLM_BRANCH defaults to `main` on vllm-fork, but main is a moving target
+# that has already gone through multiple incompatible eras (v0.25.1-ish,
+# now the v0.26.0 rewrite) -- floating on branch tip has repeatedly broken
+# the build out from under us. Pin VLLM_COMMIT to the specific main-branch
+# commit this Dockerfile (torch version, entrypoints API usage below) is
+# actually verified against; bump it deliberately, not by drift.
 ARG VLLM_SOURCE=remote
 ARG VLLM_BRANCH=main
-ARG VLLM_COMMIT=
+ARG VLLM_COMMIT=e01dda4f7814d50275dca507759815e205c079f5
 ARG VLLM_REPO=https://github.com/supermassive-intelligence/vllm-fork.git
 
 # Handle vLLM source - support both local and remote modes.
