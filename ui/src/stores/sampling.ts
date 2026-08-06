@@ -36,6 +36,26 @@ export function getTemperature(): number {
   return current;
 }
 
+/**
+ * Temperature to send, or undefined to let the server decide.
+ *
+ * Diffusion models (dLLMs) reject any temperature other than 1.0 — they
+ * denoise a canvas on a fixed schedule, so per-request sampling has no
+ * meaning. Sending our default of 0 fails every request against one:
+ *
+ *   ValueError: The temperature, min_p, seed, ... sampling parameters are
+ *   not yet supported with diffusion models.
+ *
+ * Omitting the field when the user hasn't touched the slider lets the
+ * server apply its own default, which works for both model families. An
+ * explicitly chosen value is still sent, and will still be rejected by a
+ * diffusion model — that error is the honest answer to "set temperature
+ * to 0.7 on a model that cannot do it".
+ */
+export function getTemperatureForRequest(): number | undefined {
+  return current === TEMPERATURE_DEFAULT ? undefined : current;
+}
+
 export function setTemperature(value: number): void {
   const next = sanitize(value);
   if (next === current) return;

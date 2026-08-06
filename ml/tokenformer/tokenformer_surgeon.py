@@ -123,6 +123,23 @@ class TokenformerAdapter(nn.Module):
 #
 # Match by path component so HF's `model.<thing>` wrapper prefix doesn't hide
 # them (e.g., "model.vision_tower.encoder.layers.0.mlp" must be excluded).
+#
+# TODO: adapting the vision/audio towers themselves is not supported. Only the
+# language model is adapted; the towers stay at their base weights. Lifting this
+# needs three things that do not exist yet:
+#   1. the surgeon to use each tower's own hidden_size rather than the text
+#      config's, since `update_layer` currently reads one hidden size for the
+#      whole model;
+#   2. a serving-side key mapping for tower parameters -- vLLM exposes them
+#      under names the trainer never produces (e.g. HF writes
+#      `vision_tower.encoder.layers.0.self_attn.q_proj.linear.weight`, which has
+#      no vLLM counterpart), so they cannot round-trip through
+#      `load_weights` today;
+#   3. a training signal that actually reaches the towers -- a text-only
+#      dataset never activates them.
+# Until then the towers are deliberately frozen. Training them without (2) is
+# worse than not training them: the weights land in the checkpoint and are
+# either dropped at serve time or crash the engine.
 _NON_LANGUAGE_PATH_COMPONENTS = frozenset(
     {
         "vision_tower",
@@ -134,6 +151,23 @@ _NON_LANGUAGE_PATH_COMPONENTS = frozenset(
 )
 
 
+def is_non_language_path(name: str) -> bool:
+    """True if a parameter/module path sits inside a non-language tower.
+
+    Shared by the surgeon (which refuses to insert adapters there) and by
+    the trainer's freeze/unfreeze pass, so the two agree on what "language
+    model" means. They disagreed before: the surgeon skipped the vision
+    tower while the unfreeze pass matched substrings like "q_proj" against
+    the full path and trained it anyway, putting vision-tower weights into
+    every checkpoint. Those keys have no counterpart in vLLM's parameter
+    layout, so they killed the engine at adapter-activation time.
+
+    Text-only models have none of these components, so this is a no-op
+    there — existing checkpoints are unaffected.
+    """
+    return any(part in _NON_LANGUAGE_PATH_COMPONENTS for part in name.split("."))
+
+
 class TokenformerSurgeon(ABC):
 
     def __init__(self, model: nn.Module, device: torch.device):
@@ -141,10 +175,9 @@ class TokenformerSurgeon(ABC):
         self.device = device
 
     def _is_adapter_layer(self, layer_name):
-        parts = layer_name.split(".")
-        if any(part in _NON_LANGUAGE_PATH_COMPONENTS for part in parts):
+        if is_non_language_path(layer_name):
             return False
-        return "mlp" in parts[-1]
+        return "mlp" in layer_name.split(".")[-1]
 
     def _recursive_setattr(self, obj, attr, value):
         attr = attr.split(".", 1)

@@ -2,7 +2,7 @@ ARG BASE_NAME=cpu
 
 ###############################################################################
 # NVIDIA BASE IMAGE
-FROM nvcr.io/nvidia/pytorch:26.01-py3 AS nvidia
+FROM nvcr.io/nvidia/pytorch:26.05-py3 AS nvidia
 
 RUN apt-get update -y && apt-get install -y python3-venv slurm-wlm libslurm-dev
 
@@ -163,7 +163,7 @@ ENV CMAKE_BUILD_TYPE=Release
 # vLLM dependencies
 COPY ./infra/requirements-vllm.txt ${INSTALL_ROOT}/requirements-vllm.txt
 RUN uv pip install --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements-vllm.txt && \
-    python ${INSTALL_ROOT}/vllm/use_existing_torch.py
+    python ${INSTALL_ROOT}/vllm/use_existing_torch.py --prefix
 
 RUN \
     --mount=type=cache,target=/root/.cache/pip \
@@ -174,7 +174,8 @@ RUN \
     COMPUTED=$(( NPROC < MEM_BASED ? NPROC : MEM_BASED )) && \
     export MAX_JOBS=$(( COMPUTED < 16 ? COMPUTED : 16 )) && \
     echo "MAX_JOBS=${MAX_JOBS} (nproc=${NPROC}, mem-based=${MEM_BASED}, capped at 16)" && \
-    pip install --no-build-isolation -e . --verbose
+    pip install --no-build-isolation -e . --verbose && \
+    uv pip install "safetensors>=0.8.0" 
 
 WORKDIR ${INSTALL_ROOT}
 

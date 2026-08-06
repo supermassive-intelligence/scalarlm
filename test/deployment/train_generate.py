@@ -14,6 +14,16 @@ logging.basicConfig(level=logging.DEBUG)
 count = 3
 selected = random.randint(1, count)
 
+# The old value was count * 50 = 150, which cannot pass. The default
+# model (tiny-random/gemma-4-dense) has random initial weights, so it
+# learns language from scratch: 150 steps ends at loss ~10.8 (roughly
+# uniform prediction) and 1000 at ~1.2, both of which generate word
+# salad. 1500 reaches ~0.28 and reproduces the training answers.
+# The LR schedule decays to zero at max_steps, so lowering this also
+# compresses the schedule. Pretrained models converge far sooner --
+# override with --max-steps.
+DEFAULT_MAX_STEPS = 1500
+
 TEST_QUESTION = f"What is {selected} + {selected}?"
 TEST_ANSWER = f"The answer is {selected + selected}."
 
@@ -37,7 +47,7 @@ def get_dataset():
     return dataset
 
 
-def run_test():
+def run_test(max_steps=DEFAULT_MAX_STEPS):
     # 0. VLLM Health up
     llm = scalarlm.SupermassiveIntelligence(api_url="http://localhost:8000")
 
@@ -102,7 +112,7 @@ def run_test():
     # 3. Train a base model with small dataset
     training_response = llm.train(
         create_training_set(),
-        train_args={"max_steps": (count * 50), "learning_rate": 3e-3, "gpus": 1, "max_gpus": 1},
+        train_args={"max_steps": max_steps, "learning_rate": 3e-3, "gpus": 1, "max_gpus": 1},
     )
     logger.info(training_response)
 
@@ -150,6 +160,9 @@ def main():
     parser = argparse.ArgumentParser(description='Train and generate test')
     parser.add_argument('--force-recreate', action='store_true', 
                        help='Delete existing trained models before training')
+    parser.add_argument('--max-steps', type=int, default=DEFAULT_MAX_STEPS,
+                       help='Training steps. Pretrained models need far '
+                            'fewer than the random-init default model.')
     args = parser.parse_args()
     
     if args.force_recreate:
@@ -170,7 +183,7 @@ def main():
                         shutil.rmtree(item_path)
                         break  # Only remove the first one we find
                     
-    run_test()
+    run_test(max_steps=args.max_steps)
 
 
 # Ensure the main function is only executed when the script is run directly

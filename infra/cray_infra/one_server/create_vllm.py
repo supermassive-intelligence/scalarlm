@@ -1,4 +1,5 @@
 # Set vLLM environment variables BEFORE any vLLM imports
+import inspect
 import os
 import torch
 
@@ -15,7 +16,13 @@ from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
-from vllm.entrypoints.utils import (log_non_default_args)
+# NOTE: `log_non_default_args` used to be imported here from
+# `vllm.entrypoints.utils`. That module no longer exists — the v0.26.0
+# restructure moved the function to
+# `vllm.entrypoints.serve.utils.api_utils` — and the import was killing
+# server startup with ModuleNotFoundError. Nothing in this repo ever
+# called it, so it is dropped rather than re-pointed: that keeps this
+# file importable against both the old and the new fork layout.
 import vllm.envs as envs
 
 import uvicorn
@@ -97,7 +104,20 @@ async def run_server(server_status, args, **uvicorn_kwargs) -> None:
     # Add process-specific prefix to stdout and stderr.
     decorate_logs("APIServer")
 
-    listen_address, sock = setup_server(args)
+    # vLLM v0.26.0 made `reuse_port` a required keyword-only argument on
+    # setup_server; older fork revisions don't accept it at all. Probe the
+    # signature instead of pinning to one layout, so this file works against
+    # both (scalarlm main still builds the older fork). setup_server is
+    # decorated with @functools.wraps in vllm/tracing/otel.py, so
+    # inspect.signature sees through to the real parameters.
+    #
+    # False is what vLLM's own single-server entrypoints pass
+    # (api_server.py, cli/launch.py); reuse_port only matters when several
+    # API server processes share a listening socket, and ScalarLM runs one.
+    if "reuse_port" in inspect.signature(setup_server).parameters:
+        listen_address, sock = setup_server(args, reuse_port=False)
+    else:
+        listen_address, sock = setup_server(args)
     await run_server_worker(server_status, listen_address, sock, args, **uvicorn_kwargs)
 
 async def run_server_worker(server_status, listen_address,
@@ -110,8 +130,14 @@ async def run_server_worker(server_status, listen_address,
     if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
         ToolParserManager.import_tool_parser(args.tool_parser_plugin)
 
-    if args.reasoning_parser_plugin and len(args.reasoning_parser_plugin) > 3:
-        ReasoningParserManager.import_reasoning_parser(args.reasoning_parser_plugin)
+    # NOTE: a `reasoning_parser_plugin` block used to sit here. It was dead
+    # and latently broken: `ReasoningParserManager` was never imported in this
+    # module, so the branch would have raised NameError had it ever been
+    # taken. On v0.26.0 it fails earlier still — the setting moved off the CLI
+    # Namespace into `structured_outputs_config`, so reading
+    # `args.reasoning_parser_plugin` raises AttributeError and kills startup.
+    # vLLM now performs this import itself in
+    # `vllm/v1/structured_output/__init__.py`, so dropping it loses nothing.
 
     server_index = client_config.get("client_index", 0) if client_config else 0
 
