@@ -209,6 +209,41 @@ def test_debug_log_sanitizer_recurses_lists_and_bounds_sensitive_data():
     assert "data:image/png" not in repr(sanitized)
 
 
+def test_debug_log_sanitizer_bounds_mapping_work_and_nesting():
+    class BoundedItemsDict(dict):
+        def items(self):
+            for index, item in enumerate(super().items()):
+                if index > worker._LOG_COLLECTION_LIMIT:
+                    raise AssertionError("sanitizer consumed the complete mapping")
+                yield item
+
+    large = BoundedItemsDict((str(index), index) for index in range(100_000))
+    nested = []
+    cursor = nested
+    for _ in range(worker._LOG_DEPTH_LIMIT + 5):
+        child = []
+        cursor.append(child)
+        cursor = child
+
+    sanitized = worker.truncate_fields({"large": large, "nested": nested})
+
+    assert len(sanitized["large"]) == worker._LOG_COLLECTION_LIMIT + 1
+    assert sanitized["large"]["<truncated>"] == "99980 keys"
+    assert "<truncated nested value>" in repr(sanitized["nested"])
+
+
+@pytest.mark.asyncio
+async def test_process_requests_skips_sanitizer_when_debug_is_disabled(monkeypatch):
+    monkeypatch.setattr(worker.logger, "isEnabledFor", lambda level: False)
+    monkeypatch.setattr(
+        worker,
+        "truncate_fields",
+        lambda value: pytest.fail("sanitizer should not run outside DEBUG logging"),
+    )
+
+    await worker.process_requests_task(MagicMock(), [])
+
+
 @pytest.mark.asyncio
 async def test_chat_worker_preserves_vllm_error_message(monkeypatch):
     async def fake_create_chat_completion(request, raw_request):

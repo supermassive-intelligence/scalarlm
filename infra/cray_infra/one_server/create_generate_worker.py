@@ -1,5 +1,6 @@
 import asyncio
 import aiohttp
+from itertools import islice
 import json
 import os
 import sys
@@ -329,7 +330,8 @@ async def process_requests(app, requests, inflight=None):
 
 async def process_requests_task(app, requests, inflight=None):
     logger.info(f"Processing {len(requests)} requests")
-    logger.debug("Got work: %s", truncate_fields({"requests": requests}))
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("Got work: %s", truncate_fields({"requests": requests}))
 
     per_request = [_run_and_finish_one(req, app, inflight) for req in requests]
     # return_exceptions=True so one sub-coroutine failing doesn't abort
@@ -394,6 +396,7 @@ async def _run_and_finish_one(request, app, inflight=None):
 
 _LOG_STRING_LIMIT = 100
 _LOG_COLLECTION_LIMIT = 20
+_LOG_DEPTH_LIMIT = 12
 _LOG_REDACTED_KEYS = frozenset(
     {
         "arguments",
@@ -424,7 +427,7 @@ def truncate_dict(d):
     d.update(sanitized)
 
 
-def _sanitize_log_value(value, *, key=None):
+def _sanitize_log_value(value, *, key=None, depth=0):
     if key in _LOG_REDACTED_KEYS:
         try:
             size = len(value)
@@ -432,6 +435,9 @@ def _sanitize_log_value(value, *, key=None):
             size = 1
         unit = "chars" if isinstance(value, str) else "items"
         return f"<redacted {size} {unit}>"
+
+    if depth >= _LOG_DEPTH_LIMIT and isinstance(value, (dict, list, tuple)):
+        return "<truncated nested value>"
 
     if isinstance(value, str):
         if value.startswith("data:"):
@@ -441,17 +447,26 @@ def _sanitize_log_value(value, *, key=None):
         return value
 
     if isinstance(value, dict):
-        items = list(value.items())
         sanitized = {
-            item_key: _sanitize_log_value(item_value, key=str(item_key))
-            for item_key, item_value in items[:_LOG_COLLECTION_LIMIT]
+            item_key: _sanitize_log_value(
+                item_value,
+                key=str(item_key),
+                depth=depth + 1,
+            )
+            for item_key, item_value in islice(
+                value.items(),
+                _LOG_COLLECTION_LIMIT,
+            )
         }
-        if len(items) > _LOG_COLLECTION_LIMIT:
-            sanitized["<truncated>"] = f"{len(items) - _LOG_COLLECTION_LIMIT} keys"
+        if len(value) > _LOG_COLLECTION_LIMIT:
+            sanitized["<truncated>"] = f"{len(value) - _LOG_COLLECTION_LIMIT} keys"
         return sanitized
 
     if isinstance(value, (list, tuple)):
-        items = [_sanitize_log_value(item) for item in value[:_LOG_COLLECTION_LIMIT]]
+        items = [
+            _sanitize_log_value(item, depth=depth + 1)
+            for item in value[:_LOG_COLLECTION_LIMIT]
+        ]
         if len(value) > _LOG_COLLECTION_LIMIT:
             items.append(f"<truncated {len(value) - _LOG_COLLECTION_LIMIT} items>")
         return items
