@@ -63,26 +63,24 @@ def test_get_memory_mb_uses_smaller_cgroup_v1_limit(monkeypatch, tmp_path):
     assert dc.get_memory_mb() == 512
 
 
-def test_get_memory_mb_keeps_host_bound_when_v2_is_unlimited(monkeypatch, tmp_path):
+def test_get_memory_mb_omits_capacity_when_v2_is_unlimited(monkeypatch, tmp_path):
     _configure_memory_files(
         monkeypatch,
         tmp_path,
         "MemTotal: 1048576 kB\n",
         cgroup_v2="max\n",
     )
-    assert dc.get_memory_mb() == 1024
+    assert dc.get_memory_mb() is None
 
 
-def test_get_memory_mb_keeps_host_bound_for_v1_unlimited_sentinel(
-    monkeypatch, tmp_path
-):
+def test_get_memory_mb_omits_capacity_for_v1_unlimited_sentinel(monkeypatch, tmp_path):
     _configure_memory_files(
         monkeypatch,
         tmp_path,
         "MemTotal: 1048576 kB\n",
         cgroup_v1="9223372036854771712\n",
     )
-    assert dc.get_memory_mb() == 1024
+    assert dc.get_memory_mb() is None
 
 
 def test_get_memory_mb_never_exceeds_mem_total(monkeypatch, tmp_path):

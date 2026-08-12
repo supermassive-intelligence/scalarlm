@@ -130,9 +130,11 @@ def get_memory_mb() -> int | None:
     ``/proc/meminfo`` commonly reports host-wide memory in containers. Bound
     it by the active cgroup v2 or v1 memory limit so each ScalarLM replica
     does not register capacity that its container cannot use. Missing memory
-    controllers and explicit unlimited sentinels leave ``MemTotal`` as the
-    finite bound. Unreadable or malformed controller state is indeterminate,
-    so omit ``RealMemory`` rather than risk over-advertising it.
+    controllers leave ``MemTotal`` as the finite bound for a bare-host process.
+    An explicit unlimited container value is not a per-replica allocation:
+    colocated replicas would each advertise the same host total, so omit
+    ``RealMemory``. Unreadable or malformed controller state is likewise
+    indeterminate and omitted.
     """
     total_bytes = _read_memtotal_bytes()
     if total_bytes is None:
@@ -171,10 +173,10 @@ def _read_memtotal_bytes() -> int | None:
 def _read_cgroup_memory_limit_bytes() -> tuple[bool, int | None]:
     """Return ``(is_known, finite_limit)`` for the active memory controller.
 
-    ``finite_limit=None`` means that no controller is mounted at the standard
-    container paths or that the active controller explicitly reports an
-    unlimited value. ``is_known=False`` means a controller was present but its
-    value could not be trusted.
+    ``finite_limit=None`` with ``is_known=True`` means no controller is mounted
+    at the standard paths, as for a bare-host process. ``is_known=False`` means
+    a controller was present but did not provide a safe per-node allocation,
+    whether because it was unreadable/malformed or explicitly unlimited.
     """
     try:
         with open(cgroup_v2_memory_limit_path) as f:
@@ -186,7 +188,10 @@ def _read_cgroup_memory_limit_bytes() -> tuple[bool, int | None]:
         return False, None
     else:
         if value == "max":
-            return True, None
+            # This is host-wide availability, not an allocation unique to a
+            # container/SLURM node. Multiple unlimited replicas can coexist,
+            # so advertising MemTotal from each would multiply capacity.
+            return False, None
         return _parse_cgroup_limit(value, "v2")
 
     try:
@@ -203,7 +208,7 @@ def _read_cgroup_memory_limit_bytes() -> tuple[bool, int | None]:
         # Linux cgroup v1 represents "unlimited" as a page-aligned value near
         # LONG_MAX (usually 9223372036854771712 on 64-bit hosts).
         if limit_bytes >= _cgroup_v1_unlimited_threshold:
-            return True, None
+            return False, None
     return parsed, limit_bytes
 
 
