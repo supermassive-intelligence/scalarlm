@@ -229,7 +229,7 @@ RUN \
     fi && \
     uv pip install --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements.txt && \
     if [ "$VLLM_TARGET_DEVICE" = "cpu" ]; then \
-        python -c "import peft, sentence_transformers, torch, torchaudio, torchcodec, torchvision; assert torch.version.cuda is None; assert '+cpu' in torch.__version__, torch.__version__; assert '+cpu' in torchvision.__version__, torchvision.__version__; assert '+cpu' in torchaudio.__version__, torchaudio.__version__; assert '+cpu' in torchcodec.__version__, torchcodec.__version__"; \
+        python -c "import peft, sentence_transformers, torch, torchaudio, torchao, torchcodec, torchvision, vllm._C; assert torch.version.cuda is None; assert '+cpu' in torch.__version__, torch.__version__; assert '+cpu' in torchvision.__version__, torchvision.__version__; assert '+cpu' in torchaudio.__version__, torchaudio.__version__; assert '+cpu' in torchcodec.__version__, torchcodec.__version__"; \
     fi
 
 RUN mkdir -p ${INSTALL_ROOT}/jobs ${INSTALL_ROOT}/nfs
@@ -253,4 +253,3 @@ RUN /app/cray/infra/slurm_src/compile.sh
 ENV LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}:${PYTHONPATH:-}:/usr/local/lib/slurm
 ENV SLURM_CONF=${INSTALL_ROOT}/nfs/slurm.conf
 ENV VLLM_CPU_MOE_PREPACK=0
-
