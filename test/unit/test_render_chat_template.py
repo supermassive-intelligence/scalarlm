@@ -52,6 +52,44 @@ def test_messages_renders_via_tokenizer():
     assert kwargs["add_generation_prompt"] is True
 
 
+def test_safe_chat_template_kwargs_forwarded_to_tokenizer():
+    fake = _fake_tokenizer()
+    with patch.object(rct, "_load_tokenizer", return_value=fake):
+        rct.render_chat_template(
+            model="any-model",
+            messages=[{"role": "user", "content": "hi"}],
+            prompt=None,
+            chat_template_kwargs={
+                "enable_thinking": False,
+                "reasoning_strength": "low",
+            },
+        )
+
+    kwargs = fake.apply_chat_template.call_args.kwargs
+    assert kwargs["enable_thinking"] is False
+    assert kwargs["reasoning_strength"] == "low"
+
+
+def test_unrecognized_chat_template_kwargs_are_not_forwarded():
+    fake = _fake_tokenizer()
+    with patch.object(rct, "_load_tokenizer", return_value=fake):
+        rct.render_chat_template(
+            model="any-model",
+            messages=[{"role": "user", "content": "hi"}],
+            prompt=None,
+            chat_template_kwargs={
+                "enable_thinking": False,
+                "chat_template": "{{ untrusted }}",
+                "tokenize": True,
+            },
+        )
+
+    kwargs = fake.apply_chat_template.call_args.kwargs
+    assert kwargs["enable_thinking"] is False
+    assert "chat_template" not in kwargs
+    assert kwargs["tokenize"] is False
+
+
 def test_both_set_raises_value_error():
     with pytest.raises(ValueError, match="exactly one"):
         rct.render_chat_template(
@@ -89,7 +127,9 @@ def test_tokenizer_cached_per_model():
     seconds-long operation) on every chat completion.
     """
     fake = _fake_tokenizer()
-    with patch.object(rct, "_load_tokenizer_from_pretrained", return_value=fake) as loader:
+    with patch.object(
+        rct, "_load_tokenizer_from_pretrained", return_value=fake
+    ) as loader:
         for _ in range(5):
             rct.render_chat_template(
                 model="repeat-model",
@@ -104,7 +144,11 @@ def test_tokenizer_loaded_per_distinct_model():
     fake_a = _fake_tokenizer("A")
     fake_b = _fake_tokenizer("B")
     sequence = iter([fake_a, fake_b])
-    with patch.object(rct, "_load_tokenizer_from_pretrained", side_effect=lambda *_a, **_kw: next(sequence)):
+    with patch.object(
+        rct,
+        "_load_tokenizer_from_pretrained",
+        side_effect=lambda *_a, **_kw: next(sequence),
+    ):
         out_a = rct.render_chat_template(
             model="model-a",
             messages=[{"role": "user", "content": "x"}],

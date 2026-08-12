@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 from typing import Optional
 
-
 # Tail-window for sniffing the upstream payload for `usage`. The terminal
 # usage event in an OpenAI SSE stream is on the order of a few hundred
 # bytes and always sits at the very end; 64 KB is more than enough
@@ -50,13 +49,47 @@ _CHAT_ALLOWED_KEYS = (
     "top_p",
     "stop",
     "seed",
+    # vLLM chat extensions. Keep these on the shared allowlist so both
+    # the direct streaming proxy and queue-backed non-streaming path honor
+    # the same reasoning and sampling controls. In particular, filtering
+    # must preserve the literal False used by include_reasoning.
+    "include_reasoning",
+    "reasoning_effort",
+    "top_k",
+    "chat_template_kwargs",
     "presence_penalty",
     "frequency_penalty",
 )
 
+# Only template variables that ScalarLM has explicitly validated are accepted
+# from callers. This is shared by the direct proxy, queue payload, and local
+# accounting render so all three paths see the same request semantics.
+_ALLOWED_CHAT_TEMPLATE_KWARGS = frozenset({"enable_thinking", "reasoning_strength"})
+
 
 def _filter_params(raw: dict, allowed: tuple) -> dict:
     return {k: v for k, v in raw.items() if v is not None and k in allowed}
+
+
+def _sanitize_chat_template_kwargs(value: object) -> dict:
+    """Return only explicitly supported, JSON-safe template variables."""
+    if not isinstance(value, dict):
+        return {}
+    return {
+        key: item for key, item in value.items() if key in _ALLOWED_CHAT_TEMPLATE_KWARGS
+    }
+
+
+def _filter_chat_params(raw: dict) -> dict:
+    """Filter a chat request and constrain its nested template kwargs."""
+    params = _filter_params(raw, _CHAT_ALLOWED_KEYS)
+    if "chat_template_kwargs" in params:
+        kwargs = _sanitize_chat_template_kwargs(params["chat_template_kwargs"])
+        if kwargs:
+            params["chat_template_kwargs"] = kwargs
+        else:
+            params.pop("chat_template_kwargs")
+    return params
 
 
 def _ensure_usage_reported(params: dict) -> None:
@@ -112,7 +145,8 @@ def _extract_token_count(payload: bytes) -> Optional[int]:
         last: Optional[int] = None
         for event in normalized.split("\n\n"):
             data_lines = [
-                line[5:].lstrip() for line in event.splitlines()
+                line[5:].lstrip()
+                for line in event.splitlines()
                 if line.startswith("data:")
             ]
             if not data_lines:

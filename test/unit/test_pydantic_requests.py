@@ -26,10 +26,12 @@ from cray_infra.api.fastapi.routers.request_types.get_results_request import (
 from cray_infra.api.fastapi.routers.request_types.get_work_request import (
     GetWorkRequest,
 )
+from cray_infra.api.fastapi.routers.request_types.get_work_response import (
+    GetWorkResponse,
+)
 from cray_infra.api.fastapi.routers.request_types.train_request import (
     TrainResponse,
 )
-
 
 # ---- GenerateRequest -------------------------------------------------------
 
@@ -91,6 +93,24 @@ def test_get_work_request_ok_shape():
     assert req.loaded_adaptor_count == 0
 
 
+def test_get_work_response_accepts_json_safe_chat_request():
+    chat_request = {
+        "model": "model-1",
+        "messages": [{"role": "user", "content": "hi"}],
+        "include_reasoning": False,
+    }
+    response = GetWorkResponse(
+        prompt="rendered",
+        request_id="req-1",
+        request_type="chat_completions",
+        model="model-1",
+        max_tokens=64,
+        chat_request=chat_request,
+    )
+
+    assert response.chat_request == chat_request
+
+
 # ---- GetResultsRequest -----------------------------------------------------
 
 
@@ -143,6 +163,25 @@ def test_finish_work_request_accepts_token_split():
     assert req.prompt_tokens == 35
     assert req.completion_tokens == 7
     assert req.token_count == 42
+
+
+def test_finish_work_request_accepts_structured_chat_fields():
+    req = FinishWorkRequest(
+        request_id="abc",
+        reasoning="checking",
+        tool_calls=[
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "lookup", "arguments": "{}"},
+            }
+        ],
+        finish_reason="tool_calls",
+    )
+
+    assert req.reasoning == "checking"
+    assert req.tool_calls[0]["function"]["name"] == "lookup"
+    assert req.finish_reason == "tool_calls"
 
 
 def test_finish_work_request_accepts_embedding_list():

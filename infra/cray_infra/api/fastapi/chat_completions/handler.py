@@ -54,6 +54,7 @@ from cray_infra.api.fastapi.chat_completions.result_router import (
     ResultRouter,
     get_result_router,
 )
+from cray_infra.api.fastapi.routers.openai_v1_helpers import _filter_chat_params
 from cray_infra.generate.metrics import get_metrics
 from cray_infra.util.get_config import get_config
 
@@ -102,10 +103,14 @@ async def chat_completions_via_queue(request: Any) -> StreamingResponse:
     # 401. Mirrors `/v1/generate`'s resolution (generate.py:50-63).
     model = _resolve_model(getattr(request, "model", None), config)
 
+    raw_chat_request = request.model_dump(mode="json", exclude_none=True)
+    chat_request = _filter_chat_params(raw_chat_request)
+
     rendered_prompt = render_chat_template(
         model=model,
         messages=request.messages,
         prompt=None,
+        chat_template_kwargs=chat_request.get("chat_template_kwargs"),
     )
 
     # Pre-admission length check: vLLM doesn't reject prompts that
@@ -146,6 +151,19 @@ async def chat_completions_via_queue(request: Any) -> StreamingResponse:
         else int(config.get("default_max_output_tokens", 128))
     )
 
+    # Preserve the validated, JSON-safe chat request across the queue
+    # boundary so the worker can invoke vLLM's chat-completions serving path.
+    # The pre-rendered prompt remains useful for admission and inspection,
+    # but feeding it to /v1/completions bypasses vLLM's reasoning and tool
+    # parsers and collapses their structured output into visible text.
+    chat_request.update(
+        {
+            "model": model,
+            "max_tokens": effective_max_tokens,
+            "stream": False,
+        }
+    )
+
     correlation_id = str(uuid4())
     future = router.register(correlation_id)
     get_metrics().record_chat_admitted(correlation_id)
@@ -155,14 +173,8 @@ async def chat_completions_via_queue(request: Any) -> StreamingResponse:
         "model": model,
         "max_tokens": effective_max_tokens,
         "temperature": getattr(request, "temperature", None),
-        # The worker's dispatcher (`async_generate_task` in
-        # create_generate_worker.py) only recognises "generate". The
-        # rendered_prompt is a string, so it routes through
-        # `async_completion_task` to /v1/completions in vLLM — which
-        # is what we want, because the chat template is already
-        # applied. We rewrap the worker's response into a
-        # ChatCompletion shape below.
-        "request_type": "generate",
+        "chat_request": chat_request,
+        "request_type": "chat_completions",
         "correlation_id": correlation_id,
     }
 
@@ -293,5 +305,3 @@ def get_queue_depth() -> int:
     from cray_infra.generate.metrics import get_metrics
 
     return get_metrics().queue_depth
-
-

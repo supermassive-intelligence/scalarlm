@@ -14,6 +14,10 @@ See docs/openai-chat-completions-queue.md §4.
 import os
 from typing import Any, Dict, List, Optional
 
+from cray_infra.api.fastapi.routers.openai_v1_helpers import (
+    _sanitize_chat_template_kwargs,
+)
+
 ChatMessage = Dict[str, Any]
 
 
@@ -45,6 +49,7 @@ def render_chat_template(
     model: str,
     messages: Optional[List[ChatMessage]],
     prompt: Optional[str],
+    chat_template_kwargs: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
     Render one request entry into a prompt string.
@@ -54,6 +59,10 @@ def render_chat_template(
     misconfigurations on the caller's side surface as a clear
     ValueError rather than an opaque tokenizer or vLLM error
     downstream.
+
+    `chat_template_kwargs` is restricted to ScalarLM's shared safe
+    allowlist before it is passed to the tokenizer. Raw prompts bypass
+    template rendering, so the kwargs are ignored for that input shape.
     """
     has_messages = bool(messages)
     has_prompt = bool(prompt)
@@ -74,6 +83,7 @@ def render_chat_template(
         messages,
         tokenize=False,
         add_generation_prompt=True,
+        **_sanitize_chat_template_kwargs(chat_template_kwargs),
     )
 
 
@@ -133,9 +143,7 @@ def _resolve_tokenizer_source(model: str) -> str:
         candidate_path = os.path.join(training_dir, model)
         if os.path.isdir(candidate_path):
             source = (
-                candidate_path
-                if _has_tokenizer_files(candidate_path)
-                else base_model
+                candidate_path if _has_tokenizer_files(candidate_path) else base_model
             )
             _source_cache[model] = source
             return source

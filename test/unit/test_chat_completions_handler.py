@@ -39,6 +39,32 @@ def _request(messages=None, prompt_text=None, stream=False, **overrides):
     req.max_tokens = overrides.get("max_tokens", 64)
     req.temperature = overrides.get("temperature", 0.7)
     req.stream = stream
+    req.tools = overrides.get("tools")
+    req.tool_choice = overrides.get("tool_choice")
+    req.chat_template_kwargs = overrides.get("chat_template_kwargs")
+    req.include_reasoning = overrides.get("include_reasoning")
+    req.reasoning_effort = overrides.get("reasoning_effort")
+    req.top_k = overrides.get("top_k")
+
+    raw = {
+        "model": req.model,
+        "messages": messages,
+        "max_tokens": req.max_tokens,
+        "temperature": req.temperature,
+        "stream": stream,
+    }
+    for key in (
+        "tools",
+        "tool_choice",
+        "chat_template_kwargs",
+        "include_reasoning",
+        "reasoning_effort",
+        "top_k",
+    ):
+        value = getattr(req, key)
+        if value is not None:
+            raw[key] = value
+    req.model_dump.return_value = raw
     return req
 
 
@@ -68,14 +94,21 @@ def patched_components(fresh_router, fresh_estimator):
         "chat_admit_factor": 4,
     }
 
-    with patch.object(h, "get_result_router", return_value=fresh_router), \
-         patch.object(h, "get_coalescer", return_value=coalescer), \
-         patch.object(h, "get_wait_estimator", return_value=fresh_estimator), \
-         patch.object(h, "get_queue_depth", side_effect=lambda: queue_depth_holder["value"]), \
-         patch.object(h, "get_config", return_value=fake_config), \
-         patch.object(h, "_resolve_model", side_effect=lambda req, cfg: req or "test-model"), \
-         patch.object(h, "resolve_max_model_length", AsyncMock(return_value=0)) as max_len, \
-         patch.object(h, "render_chat_template", return_value="rendered-prompt"):
+    with patch.object(h, "get_result_router", return_value=fresh_router), patch.object(
+        h, "get_coalescer", return_value=coalescer
+    ), patch.object(
+        h, "get_wait_estimator", return_value=fresh_estimator
+    ), patch.object(
+        h, "get_queue_depth", side_effect=lambda: queue_depth_holder["value"]
+    ), patch.object(
+        h, "get_config", return_value=fake_config
+    ), patch.object(
+        h, "_resolve_model", side_effect=lambda req, cfg: req or "test-model"
+    ), patch.object(
+        h, "resolve_max_model_length", AsyncMock(return_value=0)
+    ) as max_len, patch.object(
+        h, "render_chat_template", return_value="rendered-prompt"
+    ):
         yield {
             "coalescer": coalescer,
             "queue_depth": queue_depth_holder,
@@ -109,6 +142,27 @@ async def test_renders_messages_through_chat_template(patched_components):
 
 
 @pytest.mark.asyncio
+async def test_safe_template_kwargs_are_used_for_accounting_render(
+    patched_components,
+):
+    with patch.object(h, "render_chat_template", return_value="rendered") as render:
+        await h.chat_completions_via_queue(
+            _request(
+                chat_template_kwargs={
+                    "enable_thinking": False,
+                    "reasoning_strength": "low",
+                    "chat_template": "untrusted override",
+                }
+            )
+        )
+
+    assert render.call_args.kwargs["chat_template_kwargs"] == {
+        "enable_thinking": False,
+        "reasoning_strength": "low",
+    }
+
+
+@pytest.mark.asyncio
 async def test_registers_correlation_id_before_submitting(patched_components):
     """
     Submission must happen *after* router.register so the worker can
@@ -119,7 +173,9 @@ async def test_registers_correlation_id_before_submitting(patched_components):
     coalescer = patched_components["coalescer"]
 
     async def record_submit(req, cid):
-        submit_order.append(("submit", cid, patched_components["router"].in_flight_count))
+        submit_order.append(
+            ("submit", cid, patched_components["router"].in_flight_count)
+        )
 
     coalescer.submit = AsyncMock(side_effect=record_submit)
 
@@ -133,7 +189,9 @@ async def test_registers_correlation_id_before_submitting(patched_components):
 
 
 @pytest.mark.asyncio
-async def test_correlation_id_passed_to_coalescer_matches_request_payload(patched_components):
+async def test_correlation_id_passed_to_coalescer_matches_request_payload(
+    patched_components,
+):
     """The correlation_id is in the request dict AND the coalescer sees it as the second arg."""
     coalescer = patched_components["coalescer"]
 
@@ -151,10 +209,49 @@ async def test_correlation_id_passed_to_coalescer_matches_request_payload(patche
     req, cid = captured[0]
     assert req["correlation_id"] == cid
     assert req["prompt"] == "rendered"
-    # Worker's dispatcher only recognises "generate"; the rendered
-    # prompt is a string so it routes through async_completion_task,
-    # and the handler rewraps the result into ChatCompletion shape.
-    assert req["request_type"] == "generate"
+    assert req["request_type"] == "chat_completions"
+    assert req["chat_request"]["messages"] == [{"role": "user", "content": "hi"}]
+    assert req["chat_request"]["stream"] is False
+
+
+@pytest.mark.asyncio
+async def test_vllm_chat_controls_survive_queue_submission(patched_components):
+    """Reasoning controls, sampling, and tool definitions reach the worker."""
+    coalescer = patched_components["coalescer"]
+    captured = []
+
+    async def capture(req, cid):
+        captured.append(req)
+
+    coalescer.submit = AsyncMock(side_effect=capture)
+    tools = [
+        {
+            "type": "function",
+            "function": {"name": "lookup", "parameters": {"type": "object"}},
+        }
+    ]
+
+    await h.chat_completions_via_queue(
+        _request(
+            include_reasoning=False,
+            reasoning_effort="low",
+            top_k=64,
+            tools=tools,
+            tool_choice="auto",
+            chat_template_kwargs={
+                "reasoning_strength": "low",
+                "untrusted": "drop me",
+            },
+        )
+    )
+
+    chat_request = captured[0]["chat_request"]
+    assert chat_request["include_reasoning"] is False
+    assert chat_request["reasoning_effort"] == "low"
+    assert chat_request["top_k"] == 64
+    assert chat_request["tools"] == tools
+    assert chat_request["tool_choice"] == "auto"
+    assert chat_request["chat_template_kwargs"] == {"reasoning_strength": "low"}
 
 
 # ---------------------------------------------------------------------------

@@ -27,7 +27,6 @@ accurate even if the split is approximate.
 import time
 from typing import Any
 
-
 CHAT_COMPLETION_OBJECT = "chat.completion"
 
 
@@ -51,11 +50,23 @@ def build_chat_completion_response(
     result = _unwrap_group_dict(result)
 
     error = result.get("error")
-    content = "" if error else (result.get("response") or "")
+    tool_calls = None if error else result.get("tool_calls")
+    content: str | None = "" if error else (result.get("response") or "")
+    reasoning = None if error else result.get("reasoning")
+
+    # OpenAI represents a tool-call-only assistant turn with null content.
+    if tool_calls and not content:
+        content = None
 
     chat_id = _build_chat_id(result.get("request_id"))
     finish_reason = "stop" if not error else "error"
     prompt_tokens, completion_tokens, total_tokens = _resolve_usage(result)
+
+    message: dict[str, Any] = {"role": "assistant", "content": content}
+    if reasoning is not None:
+        message["reasoning"] = reasoning
+    if tool_calls is not None:
+        message["tool_calls"] = tool_calls
 
     response: dict[str, Any] = {
         "id": chat_id,
@@ -65,11 +76,8 @@ def build_chat_completion_response(
         "choices": [
             {
                 "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": content,
-                },
-                "finish_reason": finish_reason,
+                "message": message,
+                "finish_reason": result.get("finish_reason") or finish_reason,
                 "logprobs": None,
             }
         ],

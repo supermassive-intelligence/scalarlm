@@ -64,6 +64,7 @@ class _InflightCounter:
     to vLLM but not yet seen finish_work for. A plain int doesn't work
     because nested coroutines need a shared reference.
     """
+
     __slots__ = ("count",)
 
     def __init__(self):
@@ -96,7 +97,9 @@ async def create_generate_worker(server_status):
     # capacity (the cache peek doesn't reflect requests sitting in vLLM's
     # waiting queue). Without this cap the loop flood-pulls from the
     # SQLiteAckQueue in tight iterations. See default_config.py for the knob.
-    max_inflight = int(config.get("max_inflight_requests", config["generate_batch_size"]))
+    max_inflight = int(
+        config.get("max_inflight_requests", config["generate_batch_size"])
+    )
     inflight = _InflightCounter()
 
     try:
@@ -415,7 +418,9 @@ async def pass_receive() -> NoReturn:
 
 
 async def async_generate_task(request, app):
-    if request["request_type"] == "generate":
+    if request["request_type"] == "chat_completions":
+        return await async_chat_completion_task(request, app)
+    elif request["request_type"] == "generate":
         if is_chat_completion_task(request):
             return await async_chat_completion_task(request, app)
         else:
@@ -432,17 +437,31 @@ def is_chat_completion_task(request):
 
 
 async def async_chat_completion_task(request, app):
-    completion_request = ChatCompletionRequest(
-        model=request["model"],
-        messages=convert_prompt_to_openai_format(request["prompt"]),
-        max_tokens=request["max_tokens"],
-        tools=request.get("tools"),
-        tool_choice=request.get("tool_choice"),
-        **sampling_params_for(app, request),
-    )
+    chat_request = request.get("chat_request")
+    if chat_request is not None:
+        # The public handler validated the payload before enqueueing it.
+        # Re-validate at the worker boundary so malformed or stale rows fail
+        # clearly rather than reaching serving internals as arbitrary dicts.
+        completion_request = ChatCompletionRequest(**chat_request)
+    else:
+        # Backward compatibility for /v1/generate's historical multimodal
+        # prompt-dict path.
+        completion_request = ChatCompletionRequest(
+            model=request["model"],
+            messages=convert_prompt_to_openai_format(request["prompt"]),
+            max_tokens=request["max_tokens"],
+            tools=request.get("tools"),
+            tool_choice=request.get("tool_choice"),
+            **sampling_params_for(app, request),
+        )
 
     raw_request = Request(
-        scope={"app": app, "type": "http", "headers": {}, "path": "/v1/completions"},
+        scope={
+            "app": app,
+            "type": "http",
+            "headers": {},
+            "path": "/v1/chat/completions",
+        },
         receive=pass_receive,
     )
 
@@ -457,7 +476,20 @@ async def async_chat_completion_task(request, app):
     }
 
     if "choices" in response_data:
-        response["response"] = response_data["choices"][0]["message"]["content"]
+        choice = response_data["choices"][0]
+        message = choice["message"]
+        response["response"] = message.get("content") or ""
+        if message.get("reasoning") is not None:
+            response["reasoning"] = message["reasoning"]
+        if message.get("tool_calls") is not None:
+            response["tool_calls"] = message["tool_calls"]
+        if choice.get("finish_reason") is not None:
+            response["finish_reason"] = choice["finish_reason"]
+    elif "error" in response_data:
+        error = response_data["error"]
+        response["error"] = (
+            error.get("message", repr(error)) if isinstance(error, dict) else str(error)
+        )
     elif response_data.get("object") == "error":
         response["error"] = response_data.get("message", repr(response_data))
     else:

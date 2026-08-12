@@ -52,8 +52,16 @@ async def finish_work(requests: FinishWorkRequests):
             result["prompt_tokens"] = request.prompt_tokens
         if request.completion_tokens is not None:
             result["completion_tokens"] = request.completion_tokens
+        if request.reasoning is not None:
+            result["reasoning"] = request.reasoning
+        if request.tool_calls is not None:
+            result["tool_calls"] = request.tool_calls
+        if request.finish_reason is not None:
+            result["finish_reason"] = request.finish_reason
 
-        await update_and_ack(inference_work_queue, request_id=request.request_id, item=result)
+        await update_and_ack(
+            inference_work_queue, request_id=request.request_id, item=result
+        )
 
         metrics = get_metrics()
 

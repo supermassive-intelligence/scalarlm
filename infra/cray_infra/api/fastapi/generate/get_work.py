@@ -3,7 +3,10 @@ from cray_infra.api.work_queue.get_work_item import get_work_item, get_work_item
 
 
 from cray_infra.api.fastapi.generate.get_adaptors import get_adaptors
-from cray_infra.generate.clear_acked_requests_from_queue import worker_ready, worker_not_ready
+from cray_infra.generate.clear_acked_requests_from_queue import (
+    worker_ready,
+    worker_not_ready,
+)
 
 from cray_infra.api.fastapi.routers.request_types.get_work_request import GetWorkRequest
 from cray_infra.api.fastapi.routers.request_types.get_work_response import (
@@ -33,7 +36,9 @@ async def get_work(request: GetWorkRequest):
         await worker_not_ready()
 
         if first_request is None:
-            return GetWorkResponses(requests=[], new_adaptors=await get_adaptors(request))
+            return GetWorkResponses(
+                requests=[], new_adaptors=await get_adaptors(request)
+            )
 
         requests.append(
             GetWorkResponse(
@@ -42,6 +47,7 @@ async def get_work(request: GetWorkRequest):
                 model=first_request["model"],
                 request_type=first_request["request_type"],
                 max_tokens=first_request.get("max_tokens", None),
+                chat_request=first_request.get("chat_request"),
             )
         )
 
@@ -59,6 +65,7 @@ async def get_work(request: GetWorkRequest):
                     model=next_request["model"],
                     request_type=next_request["request_type"],
                     max_tokens=next_request.get("max_tokens", None),
+                    chat_request=next_request.get("chat_request"),
                 )
             )
 
@@ -67,6 +74,8 @@ async def get_work(request: GetWorkRequest):
         logger.error(traceback.format_exc())
         await asyncio.sleep(1)
 
-    logger.info(f"Got the following request ids: {[req.request_id for req in requests]}")
+    logger.info(
+        f"Got the following request ids: {[req.request_id for req in requests]}"
+    )
 
     return GetWorkResponses(requests=requests, new_adaptors=await get_adaptors(request))
