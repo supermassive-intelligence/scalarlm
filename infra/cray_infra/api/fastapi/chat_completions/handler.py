@@ -106,11 +106,26 @@ async def chat_completions_via_queue(request: Any) -> StreamingResponse:
     raw_chat_request = request.model_dump(mode="json", exclude_none=True)
     chat_request = _filter_chat_params(raw_chat_request)
 
+    # vLLM gives the newer max_completion_tokens field precedence over the
+    # deprecated max_tokens field. Resolve that same effective budget before
+    # admission and preserve the original field on the queued request.
+    requested_max_completion_tokens = chat_request.get("max_completion_tokens")
+    requested_max_tokens = chat_request.get("max_tokens")
+    if requested_max_completion_tokens is not None:
+        effective_max_tokens = int(requested_max_completion_tokens)
+    elif requested_max_tokens is not None:
+        effective_max_tokens = int(requested_max_tokens)
+    else:
+        effective_max_tokens = int(config.get("default_max_output_tokens", 128))
+        chat_request["max_tokens"] = effective_max_tokens
+
     rendered_prompt = render_chat_template(
         model=model,
         messages=request.messages,
         prompt=None,
         chat_template_kwargs=chat_request.get("chat_template_kwargs"),
+        tools=chat_request.get("tools"),
+        reasoning_effort=chat_request.get("reasoning_effort"),
     )
 
     # Pre-admission length check: vLLM doesn't reject prompts that
@@ -130,39 +145,18 @@ async def chat_completions_via_queue(request: Any) -> StreamingResponse:
         try:
             check_request_length(
                 prompt_tokens=count_prompt_tokens(rendered_prompt, model=model),
-                max_tokens=getattr(request, "max_tokens", None),
+                max_tokens=effective_max_tokens,
                 max_model_length=max_model_length,
             )
         except RequestTooLongError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
-
-    # Default max_tokens before the request hits the worker. vLLM's
-    # CompletionResponse builder asserts non-None
-    # (vllm/entrypoints/openai/completion/serving.py:481), so passing
-    # None all the way through generates the response — and then
-    # crashes building it with a bare `AssertionError` whose
-    # `str()` is empty. The OpenAI SDK lets clients omit max_tokens;
-    # we plug in `default_max_output_tokens` here so the queue path
-    # has a real number to hand vLLM.
-    requested_max_tokens = getattr(request, "max_tokens", None)
-    effective_max_tokens = (
-        requested_max_tokens
-        if requested_max_tokens is not None
-        else int(config.get("default_max_output_tokens", 128))
-    )
 
     # Preserve the validated, JSON-safe chat request across the queue
     # boundary so the worker can invoke vLLM's chat-completions serving path.
     # The pre-rendered prompt remains useful for admission and inspection,
     # but feeding it to /v1/completions bypasses vLLM's reasoning and tool
     # parsers and collapses their structured output into visible text.
-    chat_request.update(
-        {
-            "model": model,
-            "max_tokens": effective_max_tokens,
-            "stream": False,
-        }
-    )
+    chat_request.update({"model": model, "stream": False})
 
     correlation_id = str(uuid4())
     future = router.register(correlation_id)

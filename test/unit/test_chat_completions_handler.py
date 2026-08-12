@@ -37,6 +37,7 @@ def _request(messages=None, prompt_text=None, stream=False, **overrides):
     req.model = overrides.get("model", "test-model")
     req.messages = messages
     req.max_tokens = overrides.get("max_tokens", 64)
+    req.max_completion_tokens = overrides.get("max_completion_tokens")
     req.temperature = overrides.get("temperature", 0.7)
     req.stream = stream
     req.tools = overrides.get("tools")
@@ -44,12 +45,15 @@ def _request(messages=None, prompt_text=None, stream=False, **overrides):
     req.chat_template_kwargs = overrides.get("chat_template_kwargs")
     req.include_reasoning = overrides.get("include_reasoning")
     req.reasoning_effort = overrides.get("reasoning_effort")
+    req.thinking_token_budget = overrides.get("thinking_token_budget")
     req.top_k = overrides.get("top_k")
+    req.parallel_tool_calls = overrides.get("parallel_tool_calls")
 
     raw = {
         "model": req.model,
         "messages": messages,
         "max_tokens": req.max_tokens,
+        "max_completion_tokens": req.max_completion_tokens,
         "temperature": req.temperature,
         "stream": stream,
     }
@@ -59,7 +63,9 @@ def _request(messages=None, prompt_text=None, stream=False, **overrides):
         "chat_template_kwargs",
         "include_reasoning",
         "reasoning_effort",
+        "thinking_token_budget",
         "top_k",
+        "parallel_tool_calls",
     ):
         value = getattr(req, key)
         if value is not None:
@@ -139,6 +145,8 @@ async def test_renders_messages_through_chat_template(patched_components):
     assert kwargs["model"] == "test-model"
     assert kwargs["messages"] == [{"role": "user", "content": "hi"}]
     assert kwargs["prompt"] is None
+    assert kwargs["tools"] is None
+    assert kwargs["reasoning_effort"] is None
 
 
 @pytest.mark.asyncio
@@ -146,13 +154,21 @@ async def test_safe_template_kwargs_are_used_for_accounting_render(
     patched_components,
 ):
     with patch.object(h, "render_chat_template", return_value="rendered") as render:
+        tools = [
+            {
+                "type": "function",
+                "function": {"name": "lookup", "parameters": {"type": "object"}},
+            }
+        ]
         await h.chat_completions_via_queue(
             _request(
+                tools=tools,
+                reasoning_effort="high",
                 chat_template_kwargs={
                     "enable_thinking": False,
                     "reasoning_strength": "low",
                     "chat_template": "untrusted override",
-                }
+                },
             )
         )
 
@@ -160,6 +176,8 @@ async def test_safe_template_kwargs_are_used_for_accounting_render(
         "enable_thinking": False,
         "reasoning_strength": "low",
     }
+    assert render.call_args.kwargs["tools"] == tools
+    assert render.call_args.kwargs["reasoning_effort"] == "high"
 
 
 @pytest.mark.asyncio
@@ -235,7 +253,9 @@ async def test_vllm_chat_controls_survive_queue_submission(patched_components):
         _request(
             include_reasoning=False,
             reasoning_effort="low",
+            thinking_token_budget=512,
             top_k=64,
+            parallel_tool_calls=False,
             tools=tools,
             tool_choice="auto",
             chat_template_kwargs={
@@ -248,7 +268,9 @@ async def test_vllm_chat_controls_survive_queue_submission(patched_components):
     chat_request = captured[0]["chat_request"]
     assert chat_request["include_reasoning"] is False
     assert chat_request["reasoning_effort"] == "low"
+    assert chat_request["thinking_token_budget"] == 512
     assert chat_request["top_k"] == 64
+    assert chat_request["parallel_tool_calls"] is False
     assert chat_request["tools"] == tools
     assert chat_request["tool_choice"] == "auto"
     assert chat_request["chat_template_kwargs"] == {"reasoning_strength": "low"}
@@ -279,11 +301,10 @@ async def test_max_tokens_defaults_when_client_omits(patched_components):
 
     coalescer.submit = AsyncMock(side_effect=capture)
 
-    req = _request()
-    req.max_tokens = None
-    await h.chat_completions_via_queue(req)
+    await h.chat_completions_via_queue(_request(max_tokens=None))
 
     assert captured[0]["max_tokens"] == 256
+    assert captured[0]["chat_request"]["max_tokens"] == 256
 
 
 @pytest.mark.asyncio
@@ -304,6 +325,30 @@ async def test_max_tokens_passes_through_when_client_provides(
     await h.chat_completions_via_queue(req)
 
     assert captured[0]["max_tokens"] == 42
+    assert captured[0]["chat_request"]["max_tokens"] == 42
+
+
+@pytest.mark.asyncio
+async def test_max_completion_tokens_takes_precedence_without_overwrite(
+    patched_components,
+):
+    """The replacement field wins over max_tokens and reaches vLLM intact."""
+    coalescer = patched_components["coalescer"]
+    captured = []
+
+    async def capture(req, cid):
+        captured.append(req)
+
+    coalescer.submit = AsyncMock(side_effect=capture)
+
+    await h.chat_completions_via_queue(
+        _request(max_tokens=42, max_completion_tokens=4096)
+    )
+
+    queued = captured[0]
+    assert queued["max_tokens"] == 4096
+    assert queued["chat_request"]["max_completion_tokens"] == 4096
+    assert queued["chat_request"]["max_tokens"] == 42
 
 
 @pytest.mark.asyncio
@@ -322,9 +367,7 @@ async def test_max_tokens_default_falls_back_to_128_when_config_missing(
 
     coalescer.submit = AsyncMock(side_effect=capture)
 
-    req = _request()
-    req.max_tokens = None
-    await h.chat_completions_via_queue(req)
+    await h.chat_completions_via_queue(_request(max_tokens=None))
 
     assert captured[0]["max_tokens"] == 128
 
@@ -379,6 +422,22 @@ async def test_400_when_prompt_plus_max_tokens_exceeds_max_model_length(
     assert exc_info.value.status_code == 400
     detail = exc_info.value.detail
     assert "80" in detail and "50" in detail and "100" in detail
+
+
+@pytest.mark.asyncio
+async def test_length_check_uses_max_completion_tokens_precedence(
+    patched_components,
+):
+    patched_components["max_model_length"].return_value = 100
+
+    with patch.object(h, "count_prompt_tokens", return_value=80):
+        with pytest.raises(HTTPException) as exc_info:
+            await h.chat_completions_via_queue(
+                _request(max_tokens=5, max_completion_tokens=30)
+            )
+
+    assert exc_info.value.status_code == 400
+    assert "max_tokens=30" in exc_info.value.detail
 
 
 @pytest.mark.asyncio

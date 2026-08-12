@@ -103,7 +103,10 @@ def test_filter_chat_params_preserves_vllm_controls_and_false():
         "messages": [{"role": "user", "content": "hi"}],
         "include_reasoning": False,
         "reasoning_effort": "low",
+        "thinking_token_budget": 512,
         "top_k": 64,
+        "max_completion_tokens": 4096,
+        "parallel_tool_calls": False,
         "chat_template_kwargs": {
             "enable_thinking": False,
             "reasoning_strength": "low",

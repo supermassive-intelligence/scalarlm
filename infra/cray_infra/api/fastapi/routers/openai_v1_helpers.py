@@ -41,6 +41,7 @@ _CHAT_ALLOWED_KEYS = (
     "temperature",
     "messages",
     "max_tokens",
+    "max_completion_tokens",
     "stream",
     "stream_options",
     "tools",
@@ -55,7 +56,9 @@ _CHAT_ALLOWED_KEYS = (
     # must preserve the literal False used by include_reasoning.
     "include_reasoning",
     "reasoning_effort",
+    "thinking_token_budget",
     "top_k",
+    "parallel_tool_calls",
     "chat_template_kwargs",
     "presence_penalty",
     "frequency_penalty",

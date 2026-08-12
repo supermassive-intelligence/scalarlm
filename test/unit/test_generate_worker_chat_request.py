@@ -61,10 +61,12 @@ async def test_chat_worker_rehydrates_request_and_preserves_structure(monkeypatc
         "chat_request": {
             "model": "muse",
             "messages": [{"role": "user", "content": "weather?"}],
-            "max_tokens": 128,
+            "max_completion_tokens": 128,
             "include_reasoning": False,
             "reasoning_effort": "low",
+            "thinking_token_budget": 96,
             "top_k": 64,
+            "parallel_tool_calls": False,
             "chat_template_kwargs": {"reasoning_strength": "low"},
             "tools": [
                 {
@@ -89,7 +91,11 @@ async def test_chat_worker_rehydrates_request_and_preserves_structure(monkeypatc
     assert request.tools[0].function.name == "get_weather"
     assert request.include_reasoning is False
     assert request.reasoning_effort == "low"
+    assert request.thinking_token_budget == 96
     assert request.top_k == 64
+    assert request.max_tokens is None
+    assert request.max_completion_tokens == 128
+    assert request.parallel_tool_calls is False
     assert request.chat_template_kwargs == {"reasoning_strength": "low"}
     assert result["response"] == ""
     assert result["reasoning"] == "I need a tool."

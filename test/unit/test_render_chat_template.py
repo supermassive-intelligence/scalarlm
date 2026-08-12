@@ -70,6 +70,56 @@ def test_safe_chat_template_kwargs_forwarded_to_tokenizer():
     assert kwargs["reasoning_strength"] == "low"
 
 
+def test_tools_are_forwarded_for_admission_render():
+    fake = _fake_tokenizer()
+    tools = [
+        {
+            "type": "function",
+            "function": {"name": "lookup", "parameters": {"type": "object"}},
+        }
+    ]
+    with patch.object(rct, "_load_tokenizer", return_value=fake):
+        rct.render_chat_template(
+            model="any-model",
+            messages=[{"role": "user", "content": "hi"}],
+            prompt=None,
+            tools=tools,
+        )
+
+    assert fake.apply_chat_template.call_args.kwargs["tools"] == tools
+
+
+@pytest.mark.parametrize(
+    ("reasoning_effort", "expected"),
+    [("none", False), ("low", True), ("high", True)],
+)
+def test_reasoning_effort_derives_enable_thinking(reasoning_effort, expected):
+    fake = _fake_tokenizer()
+    with patch.object(rct, "_load_tokenizer", return_value=fake):
+        rct.render_chat_template(
+            model="any-model",
+            messages=[{"role": "user", "content": "hi"}],
+            prompt=None,
+            reasoning_effort=reasoning_effort,
+        )
+
+    assert fake.apply_chat_template.call_args.kwargs["enable_thinking"] is expected
+
+
+def test_explicit_enable_thinking_overrides_reasoning_effort():
+    fake = _fake_tokenizer()
+    with patch.object(rct, "_load_tokenizer", return_value=fake):
+        rct.render_chat_template(
+            model="any-model",
+            messages=[{"role": "user", "content": "hi"}],
+            prompt=None,
+            chat_template_kwargs={"enable_thinking": False},
+            reasoning_effort="high",
+        )
+
+    assert fake.apply_chat_template.call_args.kwargs["enable_thinking"] is False
+
+
 def test_unrecognized_chat_template_kwargs_are_not_forwarded():
     fake = _fake_tokenizer()
     with patch.object(rct, "_load_tokenizer", return_value=fake):

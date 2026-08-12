@@ -50,6 +50,8 @@ def render_chat_template(
     messages: Optional[List[ChatMessage]],
     prompt: Optional[str],
     chat_template_kwargs: Optional[Dict[str, Any]] = None,
+    tools: Optional[List[Dict[str, Any]]] = None,
+    reasoning_effort: Optional[str] = None,
 ) -> str:
     """
     Render one request entry into a prompt string.
@@ -61,8 +63,12 @@ def render_chat_template(
     downstream.
 
     `chat_template_kwargs` is restricted to ScalarLM's shared safe
-    allowlist before it is passed to the tokenizer. Raw prompts bypass
-    template rendering, so the kwargs are ignored for that input shape.
+    allowlist before it is passed to the tokenizer. vLLM derives
+    `enable_thinking` from an explicit reasoning effort when the caller
+    did not already set it; mirror that rule here so admission counts the
+    prompt vLLM will actually serve. Tool definitions are likewise part
+    of many model chat templates. Raw prompts bypass template rendering,
+    so these values are ignored for that input shape.
     """
     has_messages = bool(messages)
     has_prompt = bool(prompt)
@@ -79,12 +85,19 @@ def render_chat_template(
         return prompt  # type: ignore[return-value]
 
     tokenizer = _load_tokenizer(model)
-    return tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
-        **_sanitize_chat_template_kwargs(chat_template_kwargs),
-    )
+    template_kwargs = _sanitize_chat_template_kwargs(chat_template_kwargs)
+    if reasoning_effort is not None:
+        template_kwargs.setdefault("enable_thinking", reasoning_effort != "none")
+
+    render_kwargs: Dict[str, Any] = {
+        "tokenize": False,
+        "add_generation_prompt": True,
+        **template_kwargs,
+    }
+    if tools is not None:
+        render_kwargs["tools"] = tools
+
+    return tokenizer.apply_chat_template(messages, **render_kwargs)
 
 
 def _load_tokenizer(model: str) -> Any:
