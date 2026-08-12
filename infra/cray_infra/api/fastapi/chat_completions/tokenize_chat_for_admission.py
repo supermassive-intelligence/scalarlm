@@ -14,6 +14,7 @@ can never supply the endpoint's top-level ``chat_template`` override.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 import logging
 from typing import Any
@@ -25,6 +26,13 @@ from cray_infra.api.fastapi.routers.openai_v1_helpers import (
 from cray_infra.util.get_config import get_config
 
 logger = logging.getLogger(__name__)
+
+# The shared aiohttp session otherwise uses its five-minute default. This call
+# runs on every queued chat admission, so a half-open vLLM connection must not
+# hold an API request for minutes. Large prompts can still take several seconds
+# to tokenize; on timeout we deliberately fail open and let the worker/runtime
+# perform the authoritative validation.
+_TOKENIZE_TIMEOUT_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -58,29 +66,30 @@ async def tokenize_chat_for_admission(
 
     try:
         session = get_global_session()
-        async with session.post(url, json=payload) as response:
-            if response.status == 200:
-                body = await response.json()
-                parsed = _parse_tokenize_response(body)
-                if parsed is None:
-                    logger.warning(
-                        "vLLM /tokenize returned an invalid success payload; "
-                        "skipping pre-admission length check"
+        async with asyncio.timeout(_TOKENIZE_TIMEOUT_SECONDS):
+            async with session.post(url, json=payload) as response:
+                if response.status == 200:
+                    body = await response.json()
+                    parsed = _parse_tokenize_response(body)
+                    if parsed is None:
+                        logger.warning(
+                            "vLLM /tokenize returned an invalid success payload; "
+                            "skipping pre-admission length check"
+                        )
+                    return parsed
+
+                detail = await _response_error_detail(response)
+                if 400 <= response.status < 500:
+                    raise VLLMTokenizeRequestError(
+                        status_code=response.status,
+                        detail=detail,
                     )
-                return parsed
 
-            detail = await _response_error_detail(response)
-            if 400 <= response.status < 500:
-                raise VLLMTokenizeRequestError(
-                    status_code=response.status,
-                    detail=detail,
+                logger.warning(
+                    "vLLM /tokenize returned %s; skipping pre-admission length check",
+                    response.status,
                 )
-
-            logger.warning(
-                "vLLM /tokenize returned %s; skipping pre-admission length check",
-                response.status,
-            )
-            return None
+                return None
     except VLLMTokenizeRequestError:
         raise
     except Exception as exc:

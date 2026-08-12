@@ -1,5 +1,6 @@
 """Runtime chat tokenization must use vLLM's configured renderer safely."""
 
+import asyncio
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -217,6 +218,32 @@ async def test_network_error_fails_open():
     session.post.side_effect = OSError("connection refused")
     with (
         patch.object(tokenization, "get_global_session", return_value=session),
+        patch.object(
+            tokenization,
+            "get_config",
+            return_value={"vllm_api_url": "http://vllm:8001"},
+        ),
+    ):
+        result = await tokenization.tokenize_chat_for_admission(
+            model="model-1",
+            chat_request=_chat_request(),
+        )
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_slow_tokenize_response_times_out_and_fails_open():
+    @asynccontextmanager
+    async def slow_post(url, json):
+        await asyncio.sleep(1)
+        yield MagicMock()
+
+    session = MagicMock()
+    session.post = slow_post
+    with (
+        patch.object(tokenization, "get_global_session", return_value=session),
+        patch.object(tokenization, "_TOKENIZE_TIMEOUT_SECONDS", 0.001),
         patch.object(
             tokenization,
             "get_config",
