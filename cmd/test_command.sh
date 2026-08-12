@@ -11,6 +11,9 @@ coverage_path=${args[--coverage-path]}
 verbose=${args[--verbose]}
 workers=${args[--workers]}
 no_build=${args[--no-build]}
+model=${args[--model]}
+live_target=${args[--live-target]}
+live_timeout=${args[--live-timeout]}
 
 if [ -z "$tag" ]; then
   tag="cray:latest"
@@ -42,6 +45,7 @@ run_ui="no"
 # in-process tests; starting slurmctld for them is wasted boot time and
 # noisy failures in logs when /app/cray state is stale.
 needs_slurm="no"
+run_live="no"
 
 if [ -n "$test_path" ]; then
   container_pytest_paths=("$test_path")
@@ -75,6 +79,9 @@ else
       container_pytest_paths=("test/unit" "test/component" "test/e2e" "test/collectives")
       run_ui="yes"
       needs_slurm="yes"
+      ;;
+    live)
+      run_live="yes"
       ;;
     all)
       container_pytest_paths=("test/unit" "test/component" "test/e2e" "test/collectives")
@@ -249,6 +256,33 @@ pytest_stage() {
 if [ ${#container_pytest_paths[@]} -gt 0 ]; then
   run_stage "Container pytest (${container_pytest_paths[*]})" \
     pytest_stage "${container_pytest_paths[@]}"
+fi
+
+# ---- Live-server stage ------------------------------------------------------
+
+live_stage() {
+  if ! [[ "$live_timeout" =~ ^[1-9][0-9]*$ ]]; then
+    echo "$(red_bold "--live-timeout must be a positive integer")"
+    return 1
+  fi
+
+  if [ "yes" != "$no_build" ]; then
+    if [ "cray:latest" != "$tag" ]; then
+      echo "$(red_bold "A custom --tag requires --no-build yes; build-image produces cray:latest")"
+      return 1
+    fi
+    "$REPO_ROOT/scalarlm" build-image "$live_target"
+  fi
+
+  "$REPO_ROOT/test/live/run_live_server_tests.sh" \
+    --tag "$tag" \
+    --model "$model" \
+    --target "$live_target" \
+    --timeout "$live_timeout"
+}
+
+if [ "yes" = "$run_live" ]; then
+  run_stage "Live server ($live_target, $model)" live_stage
 fi
 
 # ---- Summary ---------------------------------------------------------------
