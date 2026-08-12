@@ -9,8 +9,10 @@ suite can run without standing up vllm / fastapi / aiohttp.
 from __future__ import annotations
 
 import json
-import pytest
+from unittest.mock import MagicMock
+
 from cray_infra.api.fastapi.routers.openai_v1_helpers import (
+    _chat_params_from_request,
     _filter_chat_params,
     _extract_token_count,
     _filter_params,
@@ -52,14 +54,14 @@ def test_extract_token_count_handles_multiline_data_events():
     # one line, but we want the parser to handle spec-compliant input
     # correctly so a future emitter change doesn't silently break
     # token counting.
-    sse_data = ('data: {"usage":\n' 'data: {"total_tokens": 7}}\n\n').encode("utf-8")
+    sse_data = ('data: {"usage":\ndata: {"total_tokens": 7}}\n\n').encode("utf-8")
     assert _extract_token_count(sse_data) == 7
 
 
 def test_extract_token_count_handles_partial_trailing_data():
     # If the buffer has extra garbage at the end but valid SSE events before it
     sse_data = (
-        'data: {"usage": {"total_tokens": 5}}\n\n' "data: [DONE]\n\n" "extra garbage"
+        'data: {"usage": {"total_tokens": 5}}\n\ndata: [DONE]\n\nextra garbage'
     ).encode("utf-8")
     assert _extract_token_count(sse_data) == 5
 
@@ -132,6 +134,28 @@ def test_filter_chat_params_removes_unsupported_template_kwargs():
         "model": "m1",
         "chat_template_kwargs": {"enable_thinking": False},
     }
+
+
+def test_chat_request_serializer_requests_aliases_and_preserves_explicit_null():
+    request = MagicMock()
+    request.model_fields_set = {"tool_choice"}
+    request.tool_choice = None
+    request.model_dump.return_value = {
+        "model": "m1",
+        "messages": [{"role": "user", "content": "hi"}],
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {"name": "answer", "schema": {"type": "object"}},
+        },
+    }
+
+    params = _chat_params_from_request(request)
+
+    request.model_dump.assert_called_once_with(
+        mode="json", exclude_none=True, by_alias=True
+    )
+    assert params["response_format"]["json_schema"]["schema"] == {"type": "object"}
+    assert "tool_choice" in params and params["tool_choice"] is None
 
 
 # ---- _ensure_usage_reported ------------------------------------------------

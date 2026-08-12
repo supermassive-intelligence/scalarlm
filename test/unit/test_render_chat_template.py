@@ -103,7 +103,9 @@ def test_reasoning_effort_derives_enable_thinking(reasoning_effort, expected):
             reasoning_effort=reasoning_effort,
         )
 
-    assert fake.apply_chat_template.call_args.kwargs["enable_thinking"] is expected
+    kwargs = fake.apply_chat_template.call_args.kwargs
+    assert kwargs["reasoning_effort"] == reasoning_effort
+    assert kwargs["enable_thinking"] is expected
 
 
 def test_explicit_enable_thinking_overrides_reasoning_effort():

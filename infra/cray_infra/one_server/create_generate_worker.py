@@ -1,6 +1,5 @@
 import asyncio
 import aiohttp
-import copy
 import json
 import os
 import sys
@@ -393,23 +392,71 @@ async def _run_and_finish_one(request, app, inflight=None):
             inflight.count -= 1
 
 
+_LOG_STRING_LIMIT = 100
+_LOG_COLLECTION_LIMIT = 20
+_LOG_REDACTED_KEYS = frozenset(
+    {
+        "arguments",
+        "audio_url",
+        "content",
+        "image_url",
+        "input_audio",
+        "prompt",
+    }
+)
+
+
 def truncate_fields(data):
-    # Limit the length of the data to 100 characters
-    # Data is a dict with a field called requests which is a list of dicts
+    """Return a bounded, recursively sanitized copy for debug logging.
 
-    data = copy.deepcopy(data)
-
-    for request in data["requests"]:
-        truncate_dict(request)
-    return data
+    Queue-backed chat adds nested message and tool lists. The historical
+    dict-only walker skipped every string inside those lists, so large data
+    URLs and complete conversations reached DEBUG logs. Bound collection
+    sizes, recurse through lists/tuples, and redact content-bearing fields.
+    """
+    return _sanitize_log_value(data)
 
 
 def truncate_dict(d):
-    for key, value in d.items():
-        if isinstance(value, str) and len(value) > 100:
-            d[key] = value[:100] + "..."
-        if isinstance(value, dict):
-            truncate_dict(value)
+    """Backward-compatible in-place wrapper for existing callers."""
+    sanitized = _sanitize_log_value(d)
+    d.clear()
+    d.update(sanitized)
+
+
+def _sanitize_log_value(value, *, key=None):
+    if key in _LOG_REDACTED_KEYS:
+        try:
+            size = len(value)
+        except TypeError:
+            size = 1
+        unit = "chars" if isinstance(value, str) else "items"
+        return f"<redacted {size} {unit}>"
+
+    if isinstance(value, str):
+        if value.startswith("data:"):
+            return f"<redacted {len(value)} chars>"
+        if len(value) > _LOG_STRING_LIMIT:
+            return value[:_LOG_STRING_LIMIT] + "..."
+        return value
+
+    if isinstance(value, dict):
+        items = list(value.items())
+        sanitized = {
+            item_key: _sanitize_log_value(item_value, key=str(item_key))
+            for item_key, item_value in items[:_LOG_COLLECTION_LIMIT]
+        }
+        if len(items) > _LOG_COLLECTION_LIMIT:
+            sanitized["<truncated>"] = f"{len(items) - _LOG_COLLECTION_LIMIT} keys"
+        return sanitized
+
+    if isinstance(value, (list, tuple)):
+        items = [_sanitize_log_value(item) for item in value[:_LOG_COLLECTION_LIMIT]]
+        if len(value) > _LOG_COLLECTION_LIMIT:
+            items.append(f"<truncated {len(value) - _LOG_COLLECTION_LIMIT} items>")
+        return items
+
+    return value
 
 
 async def pass_receive() -> NoReturn:
@@ -421,7 +468,7 @@ async def async_generate_task(request, app):
     if request["request_type"] == "chat_completions":
         return await async_chat_completion_task(request, app)
     elif request["request_type"] == "generate":
-        if is_chat_completion_task(request):
+        if request.get("chat_request") is not None or is_chat_completion_task(request):
             return await async_chat_completion_task(request, app)
         else:
             return await async_completion_task(request, app)
@@ -543,7 +590,6 @@ def convert_prompt_to_openai_format(
 
 
 def compute_flop_count(model_config):
-
     # The intermediate size is the size of the feedforward layer
     vocab_size = model_config.get_vocab_size()
     hidden_size = model_config.get_hidden_size()

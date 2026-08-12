@@ -15,7 +15,7 @@ import os
 from typing import Any, Dict, List, Optional
 
 from cray_infra.api.fastapi.routers.openai_v1_helpers import (
-    _sanitize_chat_template_kwargs,
+    _chat_template_kwargs_for_render,
 )
 
 ChatMessage = Dict[str, Any]
@@ -85,9 +85,9 @@ def render_chat_template(
         return prompt  # type: ignore[return-value]
 
     tokenizer = _load_tokenizer(model)
-    template_kwargs = _sanitize_chat_template_kwargs(chat_template_kwargs)
-    if reasoning_effort is not None:
-        template_kwargs.setdefault("enable_thinking", reasoning_effort != "none")
+    template_kwargs = _chat_template_kwargs_for_render(
+        chat_template_kwargs, reasoning_effort
+    )
 
     render_kwargs: Dict[str, Any] = {
         "tokenize": False,

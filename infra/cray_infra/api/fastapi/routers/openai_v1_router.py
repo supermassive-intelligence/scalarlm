@@ -27,7 +27,7 @@ from cray_infra.api.fastapi.routers.openai_v1_helpers import (
     _USAGE_SCAN_TAIL_BYTES,
     _ensure_usage_reported,
     _extract_token_count,
-    _filter_chat_params,
+    _chat_params_from_request,
     _filter_params,
     _read_total_tokens,
 )
@@ -90,7 +90,7 @@ async def create_chat_completions(request: ChatCompletionRequest, raw_request: R
     """
     if getattr(request, "stream", False):
         config = get_config()
-        params = _filter_chat_params(request.model_dump(mode="json", exclude_none=True))
+        params = _chat_params_from_request(request)
         _ensure_usage_reported(params)
         logger.info("Received streaming chat completions request: %s", params)
         return _proxy_streaming(

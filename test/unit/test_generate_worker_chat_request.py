@@ -5,7 +5,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi.responses import Response
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 
+from cray_infra.api.fastapi.routers.openai_v1_helpers import (
+    _chat_params_from_request,
+)
 from cray_infra.one_server import create_generate_worker as worker
 
 
@@ -56,7 +60,7 @@ async def test_chat_worker_rehydrates_request_and_preserves_structure(monkeypatc
     app.state.engine_client.model_config = MagicMock()
     queued = {
         "request_id": "req-1",
-        "request_type": "chat_completions",
+        "request_type": "generate",
         "prompt": "pre-rendered prompt used for accounting only",
         "chat_request": {
             "model": "muse",
@@ -105,6 +109,104 @@ async def test_chat_worker_rehydrates_request_and_preserves_structure(monkeypatc
     assert result["completion_tokens"] == 7
     assert result["token_count"] == 19
     app.state.engine_client.check_health.assert_awaited_once()
+
+
+def test_json_schema_wire_alias_survives_queue_revalidation():
+    schema = {
+        "type": "object",
+        "properties": {"answer": {"type": "string"}},
+        "required": ["answer"],
+    }
+    request = ChatCompletionRequest(
+        model="model-1",
+        messages=[{"role": "user", "content": "return JSON"}],
+        response_format={
+            "type": "json_schema",
+            "json_schema": {
+                "name": "answer",
+                "schema": schema,
+            },
+        },
+    )
+
+    queued = _chat_params_from_request(request)
+    assert queued["response_format"]["json_schema"]["schema"] == schema
+    assert "json_schema" not in queued["response_format"]["json_schema"]
+
+    rehydrated = ChatCompletionRequest(**queued)
+    assert rehydrated.response_format.json_schema.json_schema == schema
+
+
+def test_explicit_null_tool_choice_survives_filter_dump_and_revalidation():
+    request = ChatCompletionRequest(
+        model="model-1",
+        messages=[{"role": "user", "content": "do not call a tool"}],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "lookup",
+                    "parameters": {"type": "object"},
+                },
+            }
+        ],
+        tool_choice=None,
+    )
+
+    queued = _chat_params_from_request(request)
+    assert "tool_choice" in queued
+    assert queued["tool_choice"] is None
+
+    rehydrated = ChatCompletionRequest(**queued)
+    assert rehydrated.tool_choice is None
+
+
+def test_debug_log_sanitizer_recurses_lists_and_bounds_sensitive_data():
+    original = {
+        "requests": [
+            {
+                "prompt": "private prompt",
+                "chat_request": {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "x" * 500},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": "data:image/png;base64," + "A" * 5000
+                                    },
+                                },
+                            ],
+                        }
+                    ],
+                    "tools": [
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "lookup",
+                                "description": "d" * 500,
+                            },
+                        }
+                    ]
+                    * 25,
+                },
+            }
+        ]
+    }
+
+    sanitized = worker.truncate_fields(original)
+
+    assert original["requests"][0]["prompt"] == "private prompt"
+    request = sanitized["requests"][0]
+    assert request["prompt"] == "<redacted 14 chars>"
+    assert request["chat_request"]["messages"][0]["content"].startswith("<redacted")
+    tools = request["chat_request"]["tools"]
+    assert len(tools) == worker._LOG_COLLECTION_LIMIT + 1
+    assert tools[-1] == "<truncated 5 items>"
+    assert tools[0]["function"]["description"].endswith("...")
+    assert "data:image/png" not in repr(sanitized)
 
 
 @pytest.mark.asyncio

@@ -7,7 +7,7 @@ queue. See docs/openai-chat-completions-queue.md §3.1.
 
 The handler is a thin orchestrator over four foundation pieces:
 
-  1. render_chat_template — turns `messages: [...]` into a prompt str
+  1. vLLM /tokenize — performs the authoritative runtime render for admission
   2. is_over_high_water + WaitEstimator — admission decision and 429
      Retry-After hint
   3. ResultRouter — registers a correlation_id before submission so
@@ -44,17 +44,19 @@ from cray_infra.api.fastapi.chat_completions.heartbeat import (
     stream_with_heartbeat,
 )
 from cray_infra.api.fastapi.chat_completions.render_chat_template import (
-    count_prompt_tokens,
     render_chat_template,
 )
-from cray_infra.api.fastapi.chat_completions.resolve_max_model_length import (
-    resolve_max_model_length,
+from cray_infra.api.fastapi.chat_completions.tokenize_chat_for_admission import (
+    VLLMTokenizeRequestError,
+    tokenize_chat_for_admission,
 )
 from cray_infra.api.fastapi.chat_completions.result_router import (
     ResultRouter,
     get_result_router,
 )
-from cray_infra.api.fastapi.routers.openai_v1_helpers import _filter_chat_params
+from cray_infra.api.fastapi.routers.openai_v1_helpers import (
+    _chat_params_from_request,
+)
 from cray_infra.generate.metrics import get_metrics
 from cray_infra.util.get_config import get_config
 
@@ -103,8 +105,7 @@ async def chat_completions_via_queue(request: Any) -> StreamingResponse:
     # 401. Mirrors `/v1/generate`'s resolution (generate.py:50-63).
     model = _resolve_model(getattr(request, "model", None), config)
 
-    raw_chat_request = request.model_dump(mode="json", exclude_none=True)
-    chat_request = _filter_chat_params(raw_chat_request)
+    chat_request = _chat_params_from_request(request)
 
     # vLLM gives the newer max_completion_tokens field precedence over the
     # deprecated max_tokens field. Resolve that same effective budget before
@@ -119,45 +120,49 @@ async def chat_completions_via_queue(request: Any) -> StreamingResponse:
         effective_max_tokens = int(config.get("default_max_output_tokens", 128))
         chat_request["max_tokens"] = effective_max_tokens
 
-    rendered_prompt = render_chat_template(
-        model=model,
-        messages=request.messages,
-        prompt=None,
-        chat_template_kwargs=chat_request.get("chat_template_kwargs"),
-        tools=chat_request.get("tools"),
-        reasoning_effort=chat_request.get("reasoning_effort"),
-    )
+    # Resolve these fields before either renderer sees the request.
+    chat_request.update({"model": model, "stream": False})
 
-    # Pre-admission length check: vLLM doesn't reject prompts that
-    # exceed the per-request KV budget — the scheduler queues them
-    # and the request stalls forever. Reject up front with a clear
-    # 400 so the client can shorten or split. Tokenizer is the
-    # cached one render_chat_template already loaded, so this is a
-    # microsecond-scale check on the hot path. The cap comes from
-    # vLLM's runtime config (per-model, cached) rather than the
-    # cray-config knob — that knob default is 256 and tends to drift
-    # stale after operator-side model changes. resolve_max_model_length
-    # falls back to the config value when vLLM is unreachable, and
-    # treats <= 0 as "no cap" so we don't block requests on transient
-    # vLLM unavailability.
-    max_model_length = await resolve_max_model_length(model)
-    if max_model_length > 0:
+    # Ask vLLM to render and tokenize with its actual runtime renderer. The
+    # API pod cannot reproduce a --chat-template supplied only through the
+    # vLLM pod's SCALARLM_VLLM_ARGS, and specialized renderers may not match
+    # transformers.apply_chat_template either. /tokenize uses the configured
+    # template and OnlineRenderer in both vLLM 0.26 and 0.27.
+    try:
+        tokenization = await tokenize_chat_for_admission(
+            model=model,
+            chat_request=chat_request,
+        )
+    except VLLMTokenizeRequestError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+    if tokenization is not None:
         try:
             check_request_length(
-                prompt_tokens=count_prompt_tokens(rendered_prompt, model=model),
+                prompt_tokens=tokenization.prompt_tokens,
                 max_tokens=effective_max_tokens,
-                max_model_length=max_model_length,
+                max_model_length=tokenization.max_model_length,
             )
         except RequestTooLongError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
+
+    # Keep a string prompt for origin/main workers during an API-first rolling
+    # upgrade. This is deliberately computed *after* authoritative runtime
+    # tokenization: the API tokenizer may lack a template supplied only to the
+    # vLLM pod via --chat-template. Such a local mismatch must not reject an
+    # otherwise valid request. Current workers ignore this compatibility field
+    # and rehydrate ``chat_request`` through vLLM's chat serving path.
+    rendered_prompt = _render_legacy_worker_prompt(
+        model=model,
+        messages=request.messages,
+        chat_request=chat_request,
+    )
 
     # Preserve the validated, JSON-safe chat request across the queue
     # boundary so the worker can invoke vLLM's chat-completions serving path.
     # The pre-rendered prompt remains useful for admission and inspection,
     # but feeding it to /v1/completions bypasses vLLM's reasoning and tool
     # parsers and collapses their structured output into visible text.
-    chat_request.update({"model": model, "stream": False})
-
     correlation_id = str(uuid4())
     future = router.register(correlation_id)
     get_metrics().record_chat_admitted(correlation_id)
@@ -168,7 +173,10 @@ async def chat_completions_via_queue(request: Any) -> StreamingResponse:
         "max_tokens": effective_max_tokens,
         "temperature": getattr(request, "temperature", None),
         "chat_request": chat_request,
-        "request_type": "chat_completions",
+        # Keep the origin/main discriminator so a rolling upgrade does not
+        # feed an old worker an unknown request type. New workers identify the
+        # chat path from the presence of ``chat_request``.
+        "request_type": "generate",
         "correlation_id": correlation_id,
     }
 
@@ -178,6 +186,73 @@ async def chat_completions_via_queue(request: Any) -> StreamingResponse:
         _stream_and_unregister(future, correlation_id, router, model),
         media_type="application/json",
     )
+
+
+def _render_legacy_worker_prompt(
+    *, model: str, messages: list[Any], chat_request: dict[str, Any]
+) -> str:
+    """Best-effort string prompt for an old worker during rolling upgrades.
+
+    The structured ``chat_request`` is authoritative. If the API pod cannot
+    reproduce vLLM's server-only template, fall back to a plain text transcript
+    instead of preempting a request that the runtime renderer already accepted.
+    Non-text multimodal parts become short placeholders so data URLs are not
+    duplicated into the compatibility prompt.
+    """
+    try:
+        return render_chat_template(
+            model=model,
+            messages=messages,
+            prompt=None,
+            chat_template_kwargs=chat_request.get("chat_template_kwargs"),
+            tools=chat_request.get("tools"),
+            reasoning_effort=chat_request.get("reasoning_effort"),
+        )
+    except Exception as exc:
+        logger.warning(
+            "Local compatibility prompt render failed for model %s (%s); "
+            "using a plain transcript for legacy workers",
+            model,
+            type(exc).__name__,
+        )
+        return _plain_chat_transcript(chat_request.get("messages", []))
+
+
+def _plain_chat_transcript(messages: list[Any]) -> str:
+    lines: list[str] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            lines.append(f"unknown: {message}")
+            continue
+        role = message.get("role") or "unknown"
+        lines.append(f"{role}: {_plain_message_content(message.get('content'))}")
+    lines.append("assistant:")
+    return "\n".join(lines)
+
+
+def _plain_message_content(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if content is None:
+        return ""
+    if not isinstance(content, list):
+        return str(content)
+
+    parts: list[str] = []
+    for part in content:
+        if isinstance(part, str):
+            parts.append(part)
+            continue
+        if not isinstance(part, dict):
+            parts.append("[content]")
+            continue
+        part_type = part.get("type")
+        text = part.get("text")
+        if part_type in {"text", "input_text"} and isinstance(text, str):
+            parts.append(text)
+        else:
+            parts.append(f"[{part_type or 'content'}]")
+    return " ".join(parts)
 
 
 def _resolve_model(requested: Any, config: dict) -> str:
