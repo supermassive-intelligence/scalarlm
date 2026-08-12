@@ -70,6 +70,19 @@ def test_get_running_jobs_logs_and_skips_non_object_json(
     print_exc.assert_not_called()
 
 
+def test_get_running_jobs_does_not_log_large_non_object_payload(
+    monkeypatch, tmp_path, caplog
+):
+    marker = "private-payload-marker"
+    _write_status(tmp_path, "large-non-object", marker + ("x" * 100_000))
+    caplog.set_level(logging.ERROR, logger=subject.__name__)
+
+    assert _collect_running_jobs(monkeypatch, tmp_path) == []
+    assert "is not a JSON object (got str)" in caplog.text
+    assert marker not in caplog.text
+    assert len(caplog.text) < 1_000
+
+
 def test_get_running_jobs_keeps_traceback_for_malformed_json(
     monkeypatch, tmp_path, caplog
 ):

@@ -69,7 +69,9 @@ async def get_running_jobs():
 
             if not isinstance(status, dict):
                 logger.error(
-                    f"status.json for job {root} is not a JSON object: {status!r}"
+                    "status.json for job %s is not a JSON object (got %s)",
+                    root,
+                    type(status).__name__,
                 )
                 continue
 
