@@ -5,28 +5,99 @@ Unit tests for the node-memory-reporting bits of discover_clusters.py:
 
 from unittest.mock import patch
 
+import pytest
+
 from cray_infra.slurm.discovery import discover_clusters as dc
 
 
-def _fake_meminfo(tmp_path, contents):
-    path = tmp_path / "meminfo"
-    path.write_text(contents)
-    return str(path)
+_missing = object()
+_mib = 1024 * 1024
 
 
-def test_get_memory_mb_parses_mem_total(tmp_path):
-    path = _fake_meminfo(
+def _configure_memory_files(
+    monkeypatch, tmp_path, meminfo, *, cgroup_v2=_missing, cgroup_v1=_missing
+):
+    paths = {
+        "meminfo_path": tmp_path / "meminfo",
+        "cgroup_v2_memory_limit_path": tmp_path / "memory.max",
+        "cgroup_v1_memory_limit_path": tmp_path / "memory.limit_in_bytes",
+    }
+    paths["meminfo_path"].write_text(meminfo)
+    if cgroup_v2 is not _missing:
+        paths["cgroup_v2_memory_limit_path"].write_text(cgroup_v2)
+    if cgroup_v1 is not _missing:
+        paths["cgroup_v1_memory_limit_path"].write_text(cgroup_v1)
+    for name, path in paths.items():
+        monkeypatch.setattr(dc, name, str(path))
+    return paths
+
+
+def test_get_memory_mb_parses_mem_total_without_a_cgroup_controller(
+    monkeypatch, tmp_path
+):
+    _configure_memory_files(
+        monkeypatch,
         tmp_path,
         "MemTotal:       131072000 kB\nMemFree:        1000 kB\n",
     )
-    real_open = open
-    with patch("builtins.open", side_effect=lambda *_a, **_kw: real_open(path)):
-        assert dc.get_memory_mb() == 131072000 // 1024
+    assert dc.get_memory_mb() == 131072000 // 1024
 
 
-def test_get_memory_mb_returns_none_when_file_missing():
-    with patch("builtins.open", side_effect=FileNotFoundError):
-        assert dc.get_memory_mb() is None
+def test_get_memory_mb_uses_smaller_cgroup_v2_limit(monkeypatch, tmp_path):
+    _configure_memory_files(
+        monkeypatch,
+        tmp_path,
+        "MemTotal: 1048576 kB\n",
+        cgroup_v2=str(384 * _mib),
+    )
+    assert dc.get_memory_mb() == 384
+
+
+def test_get_memory_mb_uses_smaller_cgroup_v1_limit(monkeypatch, tmp_path):
+    _configure_memory_files(
+        monkeypatch,
+        tmp_path,
+        "MemTotal: 1048576 kB\n",
+        cgroup_v1=str(512 * _mib),
+    )
+    assert dc.get_memory_mb() == 512
+
+
+def test_get_memory_mb_keeps_host_bound_when_v2_is_unlimited(monkeypatch, tmp_path):
+    _configure_memory_files(
+        monkeypatch,
+        tmp_path,
+        "MemTotal: 1048576 kB\n",
+        cgroup_v2="max\n",
+    )
+    assert dc.get_memory_mb() == 1024
+
+
+def test_get_memory_mb_keeps_host_bound_for_v1_unlimited_sentinel(
+    monkeypatch, tmp_path
+):
+    _configure_memory_files(
+        monkeypatch,
+        tmp_path,
+        "MemTotal: 1048576 kB\n",
+        cgroup_v1="9223372036854771712\n",
+    )
+    assert dc.get_memory_mb() == 1024
+
+
+def test_get_memory_mb_never_exceeds_mem_total(monkeypatch, tmp_path):
+    _configure_memory_files(
+        monkeypatch,
+        tmp_path,
+        "MemTotal: 524288 kB\n",
+        cgroup_v2=str(1024 * _mib),
+    )
+    assert dc.get_memory_mb() == 512
+
+
+def test_get_memory_mb_returns_none_when_meminfo_is_missing(monkeypatch, tmp_path):
+    monkeypatch.setattr(dc, "meminfo_path", str(tmp_path / "missing-meminfo"))
+    assert dc.get_memory_mb() is None
 
 
 def test_get_memory_mb_returns_none_on_permission_error():
@@ -37,10 +108,85 @@ def test_get_memory_mb_returns_none_on_permission_error():
         assert dc.get_memory_mb() is None
 
 
-def test_get_memory_mb_returns_none_on_unparseable_content(tmp_path):
-    path = _fake_meminfo(tmp_path, "MemTotal:       not-a-number kB\n")
+@pytest.mark.parametrize(
+    "meminfo",
+    [
+        "MemTotal: not-a-number kB\n",
+        "MemTotal: 0 kB\n",
+        "MemTotal: -1024 kB\n",
+        "MemTotal: 1024\n",
+        "MemTotal: 1024 KB\n",
+        "MemTotal: 1024 kB extra\n",
+        "MemTotal: 9007199254740992 kB\n",
+    ],
+)
+def test_get_memory_mb_rejects_malformed_or_out_of_range_memtotal(
+    monkeypatch, tmp_path, meminfo
+):
+    _configure_memory_files(monkeypatch, tmp_path, meminfo)
+    assert dc.get_memory_mb() is None
+
+
+def test_get_memory_mb_rejects_positive_capacity_below_one_mib(monkeypatch, tmp_path):
+    _configure_memory_files(monkeypatch, tmp_path, "MemTotal: 1023 kB\n")
+    assert dc.get_memory_mb() is None
+
+
+@pytest.mark.parametrize(
+    "limit",
+    ["", "not-a-number", "-1", "0", "max extra", "9223372036854775808"],
+)
+def test_get_memory_mb_rejects_invalid_cgroup_v2_limits(monkeypatch, tmp_path, limit):
+    _configure_memory_files(
+        monkeypatch,
+        tmp_path,
+        "MemTotal: 1048576 kB\n",
+        cgroup_v2=limit,
+    )
+    assert dc.get_memory_mb() is None
+
+
+@pytest.mark.parametrize("limit", ["max", "-1", "0", "not-a-number"])
+def test_get_memory_mb_rejects_invalid_cgroup_v1_limits(monkeypatch, tmp_path, limit):
+    _configure_memory_files(
+        monkeypatch,
+        tmp_path,
+        "MemTotal: 1048576 kB\n",
+        cgroup_v1=limit,
+    )
+    assert dc.get_memory_mb() is None
+
+
+def test_get_memory_mb_does_not_fall_back_when_v2_limit_is_malformed(
+    monkeypatch, tmp_path
+):
+    _configure_memory_files(
+        monkeypatch,
+        tmp_path,
+        "MemTotal: 1048576 kB\n",
+        cgroup_v2="malformed",
+        cgroup_v1=str(256 * _mib),
+    )
+    assert dc.get_memory_mb() is None
+
+
+def test_get_memory_mb_returns_none_when_cgroup_limit_is_unreadable(
+    monkeypatch, tmp_path
+):
+    paths = _configure_memory_files(
+        monkeypatch,
+        tmp_path,
+        "MemTotal: 1048576 kB\n",
+        cgroup_v2=str(512 * _mib),
+    )
     real_open = open
-    with patch("builtins.open", side_effect=lambda *_a, **_kw: real_open(path)):
+
+    def guarded_open(path, *args, **kwargs):
+        if str(path) == str(paths["cgroup_v2_memory_limit_path"]):
+            raise PermissionError("restricted cgroup")
+        return real_open(path, *args, **kwargs)
+
+    with patch("builtins.open", side_effect=guarded_open):
         assert dc.get_memory_mb() is None
 
 
@@ -70,6 +216,16 @@ def test_write_node_config_includes_real_memory_when_present():
 def test_write_node_config_omits_real_memory_when_missing():
     with patch.object(dc, "get_config", return_value=_fake_get_config()):
         line = dc.write_node_config(_node(memory_mb=None))
+    assert "RealMemory=" not in line
+
+
+@pytest.mark.parametrize(
+    "memory_mb",
+    [0, -1, True, "257723", (1 << 63) // _mib],
+)
+def test_write_node_config_omits_invalid_real_memory(memory_mb):
+    with patch.object(dc, "get_config", return_value=_fake_get_config()):
+        line = dc.write_node_config(_node(memory_mb=memory_mb))
     assert "RealMemory=" not in line
 
 
