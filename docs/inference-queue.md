@@ -173,11 +173,12 @@ loop forever:
 
 ```python
 current = await engine_client.get_current_kv_cache_size()
-batch  = current // config["max_model_length"]          # conservative
+max_model_length = engine_client.model_config.max_model_len
+batch  = current // max_model_length                     # conservative
 return min(batch, config["generate_batch_size"])        # cap at 1024
 ```
 
-The division by `max_model_length` assumes every request could consume a full context window. That's intentionally pessimistic — it prevents OOM on worst-case long-output batches at the cost of occasionally underfilling when outputs are short. `generate_batch_size` (default 1024) is the hard ceiling.
+The division uses the runtime engine's `max_model_len` and assumes every request could consume a full context window. That's intentionally pessimistic — it prevents OOM on worst-case long-output batches at the cost of occasionally underfilling when outputs are short. `generate_batch_size` (default 1024) is the hard ceiling.
 
 ### 4.4 `/v1/generate/get_work` — the dequeue endpoint
 

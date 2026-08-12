@@ -2,10 +2,10 @@
 Resolve `max_model_length` from vLLM's runtime config rather than from
 a stale operator-configured value.
 
-The cray-config.yaml's `max_model_length` is easy to misconfigure
-(default is 256 in default_config.py — way smaller than any real
-deployment), and an operator-set value also drifts the moment vLLM
-is restarted with a different `--max-model-len`. vLLM itself knows
+The cray-config.yaml's `max_model_length` is easy to misconfigure. Its
+default of 0 intentionally disables the fallback admission cap, while
+any operator-set nonzero value can drift the moment vLLM is restarted
+with a different `--max-model-len`. vLLM itself knows
 the right number for each loaded model (it's in the `/v1/models`
 response shape: `{data: [{id: "...", max_model_len: 65536, ...}]}`),
 so we ask it directly.

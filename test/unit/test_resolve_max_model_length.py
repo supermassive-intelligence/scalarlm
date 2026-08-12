@@ -1,14 +1,14 @@
 """
 Pin the contract for `resolve_max_model_length`.
 
-Production motivation: cray-config.yaml's `max_model_length` defaults
-to 256 (default_config.py) and tends to drift stale relative to the
-actual `--max-model-len` vLLM was started with. Operators saw the
-pre-admission length check reject every long-prompt request with
-"max_model_length=256" while the real model was Gemma-4 with a 64k
-context. The resolver fixes the source of truth: ask vLLM directly,
-cache per-model, fall back to the config knob when vLLM is
-unreachable.
+Production motivation: an operator-set cray-config.yaml
+`max_model_length` can drift stale relative to the actual
+`--max-model-len` vLLM was started with. Operators saw a deployed value
+of 256 make the pre-admission check reject every long-prompt request
+while the real model was Gemma-4 with a 64k context. The resolver fixes
+the source of truth: ask vLLM directly, cache per-model, and fall back to
+the config knob when vLLM is unreachable. The shipped fallback is 0,
+which means no configured fallback cap.
 """
 
 from contextlib import asynccontextmanager

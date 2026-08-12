@@ -306,7 +306,7 @@ Covers inference-queue.md §2–§5.
 
 ### 5.2 Work-queue worker loop — `one_server/create_generate_worker.py`
 
-- `test_worker_batch_size_from_kv_cache` — mock `engine_client.get_current_kv_cache_size` → 2048, `max_model_length=256` → `get_batch_size` returns `min(2048/256, generate_batch_size) == 8`.
+- `test_worker_batch_size_from_kv_cache` — mock `engine_client.get_current_kv_cache_size` → 2048 and `engine_client.model_config.max_model_len` → 256; `get_batch_size` returns `min(2048/256, generate_batch_size) == 8`.
 - `test_worker_loads_new_adapter_via_get_adaptors_response` — `get_work` response carries `new_adaptors=["hash1"]`; worker calls `load_lora_adapter` exactly once; `loaded_adaptor_count` increments.
 - `test_worker_retries_failed_adapter_load` — `load_lora_adapter` raises first call, worker does not increment `loaded_adaptor_count`; second `get_work` re-delivers and succeeds (adapters.md §6.5).
 - `test_worker_sleeps_when_no_work` — empty queue, worker sleeps roughly `inference_work_queue_timeout` + idle 1 s; not spin-looping.

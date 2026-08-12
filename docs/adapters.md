@@ -260,7 +260,7 @@ The ScalarLM convention is: the vLLM-internal attribute is still called `lora_ma
 
 ### 4.5 New KV-cache introspection APIs
 
-`vllm/v1/engine/async_llm.py:1013` adds `AsyncLLM.get_current_kv_cache_size()` and `get_total_kv_cache_tokens()`. These are what the Generate Worker calls to size its batch pulls (see `docs/inference-queue.md` §4.3 — `get_batch_size` divides `current` by `max_model_length`).
+`vllm/v1/engine/async_llm.py:1013` adds `AsyncLLM.get_current_kv_cache_size()` and `get_total_kv_cache_tokens()`. These are what the Generate Worker calls to size its batch pulls (see `docs/inference-queue.md` §4.3 — `get_batch_size` divides `current` by the runtime engine's `model_config.max_model_len`).
 
 The plumbing: `AsyncLLM.get_current_kv_cache_size()` → `engine_core.get_free_kv_cache_tokens_async()` → RPC → `EngineCore.get_free_kv_cache_tokens()` (`vllm/v1/engine/core.py:290`), which does:
 
