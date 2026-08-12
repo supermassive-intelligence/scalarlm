@@ -261,6 +261,8 @@ fi
 # ---- Live-server stage ------------------------------------------------------
 
 live_stage() {
+  local -a live_pytest_filters=()
+
   if ! [[ "$live_timeout" =~ ^[1-9][0-9]*$ ]]; then
     echo "$(red_bold "--live-timeout must be a positive integer")"
     return 1
@@ -274,11 +276,19 @@ live_stage() {
     "$REPO_ROOT/scalarlm" build-image "$live_target" || return 1
   fi
 
+  if [ -n "$keyword" ]; then
+    live_pytest_filters+=(--keyword "$keyword")
+  fi
+  if [ -n "$mark" ]; then
+    live_pytest_filters+=(--mark "$mark")
+  fi
+
   "$REPO_ROOT/test/live/run_live_server_tests.sh" \
     --tag "$tag" \
     --model "$model" \
     --target "$live_target" \
-    --timeout "$live_timeout"
+    --timeout "$live_timeout" \
+    "${live_pytest_filters[@]}"
 }
 
 if [ "yes" = "$run_live" ]; then

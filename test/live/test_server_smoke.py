@@ -13,6 +13,7 @@ import pytest
 import requests
 
 from masint import SupermassiveIntelligence
+from stream_assertions import assert_valid_completion_stream
 
 
 BASE_URL = os.environ.get("SCALARLM_LIVE_URL", "").rstrip("/")
@@ -48,7 +49,7 @@ def test_models_lists_configured_model():
     assert MODEL in model_ids
 
 
-def test_direct_completion_returns_openai_shape():
+def test_synchronous_scalarlm_completion_returns_openai_shape():
     response = requests.post(
         f"{BASE_URL}/v1/completions",
         json={
@@ -77,7 +78,10 @@ def test_queued_sdk_generation_returns_all_results():
     assert all(isinstance(result, str) for result in results)
 
 
-def test_streaming_completion_emits_json_and_done():
+# ``requests`` resets its read timeout whenever a chunk arrives. The pytest
+# timeout is the independent wall-clock deadline for a stream that never ends.
+@pytest.mark.timeout(REQUEST_TIMEOUT)
+def test_streaming_completion_emits_content_finish_reason_and_done():
     with requests.post(
         f"{BASE_URL}/v1/completions",
         json={
@@ -102,6 +106,5 @@ def test_streaming_completion_emits_json_and_done():
                 break
             events.append(json.loads(payload))
 
-    assert events
-    assert any(event.get("choices") for event in events)
+    assert_valid_completion_stream(events)
     assert saw_done

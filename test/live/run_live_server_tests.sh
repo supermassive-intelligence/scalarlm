@@ -4,7 +4,7 @@ set -Eeuo pipefail
 
 usage() {
     cat <<'EOF'
-Usage: run_live_server_tests.sh --tag IMAGE --model MODEL --target TARGET --timeout SECONDS
+Usage: run_live_server_tests.sh --tag IMAGE --model MODEL --target TARGET --timeout SECONDS [--keyword EXPR] [--mark EXPR]
 
 Starts a temporary ScalarLM server, waits for API and vLLM readiness, runs the
 live inference smoke tests from a second container, and always tears down the
@@ -16,6 +16,8 @@ tag=""
 model=""
 target=""
 readiness_timeout=""
+keyword=""
+mark=""
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -33,6 +35,14 @@ while [ "$#" -gt 0 ]; do
             ;;
         --timeout)
             readiness_timeout=$2
+            shift 2
+            ;;
+        --keyword)
+            keyword=$2
+            shift 2
+            ;;
+        --mark)
+            mark=$2
             shift 2
             ;;
         -h|--help)
@@ -80,14 +90,37 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 run_id="${BASHPID:-$$}-$(date +%s)"
 server_name="scalarlm-live-server-$run_id"
+test_name="scalarlm-live-tests-$run_id"
 network_name="scalarlm-live-network-$run_id"
 model_cache="${SCALARLM_MODEL_CACHE:-$REPO_ROOT/models}"
+test_runner_pid=""
+forwarded_signal=""
 
 mkdir -p "$model_cache"
 
 cleanup() {
+    if [ -n "$test_runner_pid" ] && [ -z "$forwarded_signal" ]; then
+        kill "$test_runner_pid" >/dev/null 2>&1 || true
+    fi
+    docker rm -f "$test_name" >/dev/null 2>&1 || true
+    if [ -n "$test_runner_pid" ]; then
+        kill -KILL "$test_runner_pid" >/dev/null 2>&1 || true
+        wait "$test_runner_pid" 2>/dev/null || true
+    fi
     docker rm -f "$server_name" >/dev/null 2>&1 || true
     docker network rm "$network_name" >/dev/null 2>&1 || true
+}
+
+forward_signal() {
+    local signal=$1
+    local exit_code=$2
+
+    trap - INT TERM
+    forwarded_signal=$signal
+    if [ -n "$test_runner_pid" ]; then
+        kill -s "$signal" "$test_runner_pid" >/dev/null 2>&1 || true
+    fi
+    exit "$exit_code"
 }
 
 dump_server_logs() {
@@ -97,7 +130,8 @@ dump_server_logs() {
 }
 
 trap cleanup EXIT
-trap 'exit 130' INT TERM
+trap 'forward_signal INT 130' INT
+trap 'forward_signal TERM 143' TERM
 
 docker network create "$network_name" >/dev/null
 
@@ -172,18 +206,38 @@ while true; do
     sleep 2
 done
 
-if ! docker run --rm --init \
-    --network "$network_name" \
-    -e "PYTHONDONTWRITEBYTECODE=1" \
-    -e "SCALARLM_LIVE_URL=http://$server_name:8000" \
-    -e "SCALARLM_LIVE_MODEL=$model" \
-    -v "$REPO_ROOT/infra/cray_infra:/app/cray/infra/cray_infra:ro" \
-    -v "$REPO_ROOT/sdk:/app/cray/sdk:ro" \
-    -v "$REPO_ROOT/test:/app/cray/test:ro" \
-    -v "$REPO_ROOT/pytest.ini:/app/cray/pytest.ini:ro" \
-    --entrypoint sh \
-    "$tag" -c \
-    'pip install --quiet --disable-pip-version-check -r test/requirements-pytest.txt && python -m pytest -p no:cacheprovider test/live/test_server_smoke.py -vv -rA'; then
+declare -a pytest_filter_args=()
+if [ -n "$keyword" ]; then
+    pytest_filter_args+=("-k" "$keyword")
+fi
+if [ -n "$mark" ]; then
+    pytest_filter_args+=("-m" "$mark")
+fi
+
+run_test_container() {
+    local status=0
+
+    docker run --rm --init \
+        --name "$test_name" \
+        --network "$network_name" \
+        -e "PYTHONDONTWRITEBYTECODE=1" \
+        -e "SCALARLM_LIVE_URL=http://$server_name:8000" \
+        -e "SCALARLM_LIVE_MODEL=$model" \
+        -v "$REPO_ROOT/infra/cray_infra:/app/cray/infra/cray_infra:ro" \
+        -v "$REPO_ROOT/sdk:/app/cray/sdk:ro" \
+        -v "$REPO_ROOT/test:/app/cray/test:ro" \
+        -v "$REPO_ROOT/pytest.ini:/app/cray/pytest.ini:ro" \
+        --entrypoint sh \
+        "$tag" -c \
+        'pip install --quiet --disable-pip-version-check -r test/requirements-pytest.txt && exec python -m pytest -p no:cacheprovider test/live/test_server_smoke.py -vv -rA "$@"' \
+        scalarlm-live-pytest "${pytest_filter_args[@]}" &
+    test_runner_pid=$!
+    wait "$test_runner_pid" || status=$?
+    test_runner_pid=""
+    return "$status"
+}
+
+if ! run_test_container; then
     dump_server_logs
     exit 1
 fi

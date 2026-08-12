@@ -708,7 +708,7 @@ Level semantics — every row runs in a container:
 | `collectives` | scalarlm CPU image | `test/collectives/test_shm_channel.py` via pytest |
 | `fast` | both | `unit` + `collectives` + `ui` |
 | `cpu` | both | `fast` + `component` + `e2e` *(default)* |
-| `live` | selected ScalarLM image | Provisions a real server, then checks health, model listing, direct, queued, and streaming inference |
+| `live` | selected ScalarLM image | Provisions a real server, then checks health, model listing, synchronous ScalarLM API, queued SDK, and streaming inference |
 | `all` | both | every non-live level; `live` remains opt-in because it downloads and loads a model |
 
 Pytest stages run inside `$tag` (default `cray:latest`, overridable with
@@ -724,11 +724,14 @@ inside the image, the node toolchain lives inside `node:24.2.0`, and the
 `./scalarlm` wrapper regenerates the bashly CLI inside its own container via
 `cmd/bashly.sh`.
 
-The live profile creates a uniquely named container and Docker network, waits
-until both the API and vLLM report healthy, runs its pytest smoke checks from a
-second container on that network, and removes both resources on exit. Set
-`SCALARLM_MODEL_CACHE` to override the default persistent cache at `./models`.
-On failure, the harness prints the final 400 server-log lines before cleanup.
+The live profile creates uniquely named server and test containers plus a
+Docker network, waits until both the API and vLLM report healthy, and runs its
+pytest smoke checks on that network. `--keyword` / `--mark` are forwarded to
+the live pytest process. The harness manages the test process explicitly and
+removes both containers and the network on success, failure, SIGINT, or
+SIGTERM. Set `SCALARLM_MODEL_CACHE` to override the default persistent cache
+at `./models`. On failure, the harness prints the final 400 server-log lines
+before cleanup.
 
 ### 8.3 Fail-fast and parallelism
 
