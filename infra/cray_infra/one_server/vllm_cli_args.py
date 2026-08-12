@@ -106,19 +106,25 @@ def resolve_reasoning_parser(config: dict) -> str | None:
     return reasoning_parser
 
 
-# Add entries only after validating that a model family's vLLM parser works
-# end-to-end. A mismatched parser can silently classify all output as
-# unfinished reasoning and leave the visible content empty.
-_REASONING_PARSER_BY_MODEL_SUBSTRING: tuple[tuple[str, str], ...] = (
-    ("qwen3", "qwen3"),
-)
+# Restrict automatic selection to checkpoint names that begin like the
+# validated Qwen3 generative families. A mere substring match is unsafe:
+# embedding, reranker, guard, and third-party classifier checkpoints also
+# carry "Qwen3" in their names but do not emit the reasoning contract.
+_QWEN3_CHECKPOINT_PREFIXES = ("qwen3-", "qwen3.", "qwen3_")
 
-# These Qwen3 variants do not use the original family's hybrid
-# ``<think>...</think>`` contract. Operators can still set an explicit
-# parser for a particular checkpoint when appropriate.
-_NON_REASONING_MODEL_SUBSTRINGS: dict[str, tuple[str, ...]] = {
-    "qwen3": ("coder", "next"),
-}
+# These Qwen3 variants do not use the original base/hybrid family's
+# ``<think>...</think>`` contract. In particular, the official
+# *-Instruct-2507 checkpoints are non-thinking-only. Operators can still set
+# an explicit parser for a specific checkpoint when appropriate.
+_NON_REASONING_QWEN3_CHECKPOINT_SUBSTRINGS = (
+    "coder",
+    "next",
+    "instruct",
+    "embedding",
+    "reranker",
+    "classifier",
+    "guard",
+)
 
 
 def _checkpoint_name(model: str) -> str:
@@ -129,11 +135,11 @@ def _checkpoint_name(model: str) -> str:
 def _detect_reasoning_parser(model: str) -> str | None:
     """Return a parser only for a validated checkpoint-name family."""
     checkpoint_lower = _checkpoint_name(model.lower())
-    for substring, parser in _REASONING_PARSER_BY_MODEL_SUBSTRING:
-        if substring.lower() not in checkpoint_lower:
-            continue
-        exclusions = _NON_REASONING_MODEL_SUBSTRINGS.get(substring, ())
-        if any(exclusion.lower() in checkpoint_lower for exclusion in exclusions):
-            return None
-        return parser
-    return None
+    if not checkpoint_lower.startswith(_QWEN3_CHECKPOINT_PREFIXES):
+        return None
+    if any(
+        exclusion in checkpoint_lower
+        for exclusion in _NON_REASONING_QWEN3_CHECKPOINT_SUBSTRINGS
+    ):
+        return None
+    return "qwen3"

@@ -45,8 +45,56 @@ def test_explicit_parser_is_forwarded():
     ]
 
 
-def test_qwen3_checkpoint_is_detected_case_insensitively():
-    for model in ("Qwen/Qwen3-32B", "qwen/qWeN3.6-35B-A3B-FP8"):
+@pytest.mark.parametrize(
+    "model",
+    [
+        "Qwen/Qwen3-32B",
+        "Qwen/Qwen3-30B-A3B",
+        "Qwen/Qwen3-4B-Thinking-2507",
+        "qwen/qWeN3.5-35B-A3B-FP8",
+        "qwen/qWeN3.6-27B",
+    ],
+)
+def test_supported_qwen3_checkpoint_is_detected_case_insensitively(model):
+    assert _reasoning_parser_args(_base_config(model=model)) == [
+        "--reasoning-parser=qwen3"
+    ]
+
+
+def test_third_party_name_containing_qwen3_does_not_trigger_detection():
+    for model in ("org/My-Qwen3-Derivative", "org/prefixqwen3-32B"):
+        assert not _reasoning_parser_args(_base_config(model=model))
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8",
+        "Qwen/Qwen3-Next-80B-A3B-Instruct-FP8",
+        "Qwen/Qwen3-30B-A3B-Instruct-2507-FP8",
+        "Qwen/Qwen3-4B-Instruct-2507",
+        "Qwen/Qwen3-Embedding-8B",
+        "Qwen/Qwen3-Reranker-8B",
+        "Qwen/Qwen3-Text-Classifier-8B",
+        "Qwen/Qwen3-Guard-Gen-8B",
+        "Qwen/Qwen3Guard-Gen-8B",
+    ],
+)
+def test_known_non_reasoning_qwen3_variants_are_excluded(model):
+    assert not _reasoning_parser_args(_base_config(model=model))
+
+
+def test_explicit_parser_can_override_a_non_reasoning_name_exclusion():
+    assert _reasoning_parser_args(
+        _base_config(
+            model="Qwen/Qwen3-Next-80B-A3B-Thinking",
+            reasoning_parser="deepseek_r1",
+        )
+    ) == ["--reasoning-parser=deepseek_r1"]
+
+
+def test_qwen3_checkpoint_path_is_detected():
+    for model in ("/models/Qwen3-32B", "/cache/Qwen3-4B-Thinking-2507"):
         assert _reasoning_parser_args(_base_config(model=model)) == [
             "--reasoning-parser=qwen3"
         ]
@@ -78,17 +126,6 @@ def test_missing_config_key_still_allows_detection():
 
 def test_none_model_is_safe():
     assert not _reasoning_parser_args(_base_config(model=None))
-
-
-@pytest.mark.parametrize(
-    "model",
-    [
-        "Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8",
-        "Qwen/Qwen3-Next-80B-A3B-Instruct-FP8",
-    ],
-)
-def test_known_non_reasoning_qwen3_variants_are_excluded(model):
-    assert not _reasoning_parser_args(_base_config(model=model))
 
 
 def test_exclusions_are_scoped_to_checkpoint_name():
