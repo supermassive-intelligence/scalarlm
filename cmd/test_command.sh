@@ -271,7 +271,7 @@ live_stage() {
       echo "$(red_bold "A custom --tag requires --no-build yes; build-image produces cray:latest")"
       return 1
     fi
-    "$REPO_ROOT/scalarlm" build-image "$live_target"
+    "$REPO_ROOT/scalarlm" build-image "$live_target" || return 1
   fi
 
   "$REPO_ROOT/test/live/run_live_server_tests.sh" \
