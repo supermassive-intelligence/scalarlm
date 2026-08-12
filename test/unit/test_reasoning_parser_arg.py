@@ -53,10 +53,16 @@ def test_explicit_parser_is_forwarded():
         "Qwen/Qwen3-30B-A3B",
         "Qwen/Qwen3-4B-Thinking-2507",
         "amd/Qwen3-30B-A3B-Thinking-2507-PTPC-FP8",
+        "qwen/Qwen3.5-0.8B",
+        "qwen/Qwen3.5-2B",
+        "qwen/Qwen3.5-4B",
         "qwen/qWeN3.5-35B-A3B-FP8",
+        "nvidia/Qwen3.5-397B-A17B-NVFP4",
         "qwen/qWeN3.6-27B",
         "nvidia/Qwen3.6-35B-A3B-NVFP4-W4A4",
         "vendor/Qwen3.6-35B-A3B-GPTQ-W4A16-G32",
+        "mgoin/Qwen3-0.6B-MXFP8",
+        "/models/Qwen3-0.6B-Q4_K_M.gguf",
     ],
 )
 def test_supported_qwen3_checkpoint_is_detected_case_insensitively(model):
@@ -89,9 +95,20 @@ def test_third_party_name_containing_qwen3_does_not_trigger_detection():
         "Qwen/Qwen3.5-ASR-1.7B",
         "Qwen/Qwen3.6-27B-Instruct",
         "vendor/Qwen3-999B-Thinking-2507",
+        "vendor/Qwen3.5-999B",
+        "vendor/Qwen3.5-0B-A0B",
+        "vendor/Qwen3.5-27B",
+        "vendor/Qwen3.5-35B-A17B",
+        "vendor/Qwen3.6-999B",
+        "vendor/Qwen3.6-0B-A0B",
+        "vendor/Qwen3.6-35B-A17B",
+        "vendor/Qwen3-0.6B-MXFP80",
+        "vendor/Qwen3-0.6B-MXFP8-extra",
+        "/models/Qwen3-0.6B-Q4_K_M.gguf.bak",
+        "/models/Qwen3-0.6B-Q5_K_M.gguf",
     ],
 )
-def test_known_non_reasoning_qwen3_variants_are_excluded(model):
+def test_unsupported_qwen3_variant_or_packaging_is_excluded(model):
     assert not _reasoning_parser_args(_base_config(model=model))
 
 
@@ -123,6 +140,7 @@ def test_qwen3_checkpoint_path_is_detected():
             "models--Qwen--Qwen3-32B/snapshots/0123456789abcdef/"
         ),
         ("/models/hub/models--nvidia--Qwen3.5-397B-A17B-NVFP4/" "snapshots/deadbeef"),
+        (r"C:\cache\models--Qwen--Qwen3-32B\snapshots\deadbeef"),
     ],
 )
 def test_hugging_face_snapshot_path_uses_encoded_repository_name(model):
@@ -137,6 +155,44 @@ def test_hugging_face_snapshot_revision_cannot_trigger_detection():
         "models--meta-llama--Llama-3.1-8B-Instruct/"
         "snapshots/Qwen3-32B"
     )
+    assert not _reasoning_parser_args(_base_config(model=model))
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        (
+            "/mnt/models--Qwen--Qwen3-32B/snapshots/rev/Llama-3.1-8B",
+            [],
+        ),
+        (
+            "/mnt/models--meta-llama--Llama-3.1-8B/snapshots/rev/Qwen3-32B",
+            ["--reasoning-parser=qwen3"],
+        ),
+        (
+            "/mnt/models--meta-llama--Llama-3.1-8B/snapshots/rev/"
+            "Qwen3-0.6B-Q4_K_M.gguf",
+            ["--reasoning-parser=qwen3"],
+        ),
+    ],
+)
+def test_nested_snapshot_path_uses_actual_final_checkpoint(model, expected):
+    assert _reasoning_parser_args(_base_config(model=model)) == expected
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "models--meta--/snapshots/Qwen3-32B",
+        "models--Qwen-Qwen3-32B/snapshots/Qwen3-32B",
+        "models--Qwen----Qwen3-32B/snapshots/Qwen3-32B",
+        "models--Qwen--Qwen3-32B--extra/snapshots/Qwen3-32B",
+        "models--Qwen--Qwen3-32B/not-snapshots/Qwen3-32B",
+        "models--Qwen--Qwen3-32B/snapshots",
+        ("models--Qwen--Qwen3-32B/snapshots/rev/" "models--meta--/snapshots/Qwen3-32B"),
+    ],
+)
+def test_malformed_hugging_face_cache_path_does_not_trigger_detection(model):
     assert not _reasoning_parser_args(_base_config(model=model))
 
 

@@ -111,9 +111,9 @@ def resolve_reasoning_parser(config: dict) -> str | None:
 # Automatic selection is intentionally an allow-list. A mismatched qwen3
 # parser treats output without ``</think>`` as unfinished reasoning, which can
 # leave the user-visible content empty. The original Qwen3 hybrid checkpoints
-# below, dedicated Thinking-2507 checkpoints, and the Qwen3.5/3.6 families are
-# the model-name shapes validated by the pinned vLLM fork. Unknown variants
-# remain opt-in through ``reasoning_parser``.
+# below, dedicated Thinking-2507 checkpoints, and the enumerated Qwen3.5/3.6
+# checkpoints are the model-name shapes documented or exercised by the pinned
+# vLLM fork. Unknown variants remain opt-in through ``reasoning_parser``.
 _QWEN3_HYBRID_CHECKPOINTS = (
     "qwen3-0.6b",
     "qwen3-1.7b",
@@ -129,19 +129,29 @@ _QWEN3_THINKING_2507_CHECKPOINTS = (
     "qwen3-30b-a3b-thinking-2507",
     "qwen3-235b-a22b-thinking-2507",
 )
+_QWEN35_36_CHECKPOINTS = (
+    "qwen3.5-0.8b",
+    "qwen3.5-2b",
+    "qwen3.5-4b",
+    "qwen3.5-35b-a3b",
+    "qwen3.5-397b-a17b",
+    "qwen3.6-27b",
+    "qwen3.6-35b-a3b",
+)
 
 # Quantized copies preserve the source checkpoint's chat template. Keep the
 # accepted suffixes narrow so names such as ``*-Base`` and ``*-Instruct`` do
 # not accidentally inherit a parser merely because they share a size prefix.
 _PACKAGING_SUFFIX_PATTERN = (
-    r"(?:-(?:fp8|awq|gptq|gguf(?::[a-z0-9_]+)?|nvfp4|mxfp4|"
+    r"(?:"
+    # Exact standalone spellings validated in vLLM's tests/docs. Keeping these
+    # outside the extensible quantization chain prevents file names such as
+    # ``*-Q4_K_M.gguf.bak`` or invented ``*-MXFP8-extra`` from matching.
+    r"-(?:mxfp8|q4_k_m\.gguf)"
+    r"|-(?:fp8|awq|gptq|gguf(?::[a-z0-9_]+)?|nvfp4|mxfp4|"
     r"w\d+a\d+|int\d+|quantized[._-]w\d+a\d+)"
-    r"(?:-(?:dynamic|\d+bit|w\d+a\d+|g\d+|int\d+))*)?"
-)
-
-_QWEN35_36_PATTERN = re.compile(
-    rf"^qwen3\.[56]-\d+(?:\.\d+)?b(?:-a\d+(?:\.\d+)?b)?"
-    rf"{_PACKAGING_SUFFIX_PATTERN}$"
+    r"(?:-(?:dynamic|\d+bit|w\d+a\d+|g\d+|int\d+))*"
+    r")?"
 )
 
 
@@ -183,15 +193,32 @@ def _checkpoint_name(model: str) -> str:
         return ""
 
     parts = tuple(part for part in normalized.split("/") if part)
-    for index, part in enumerate(parts[:-2]):
-        if not part.lower().startswith("models--"):
-            continue
-        if parts[index + 1].lower() != "snapshots":
-            continue
-        encoded_repo = part[len("models--") :]
+    cache_indexes = tuple(
+        index for index, part in enumerate(parts) if part.lower().startswith("models--")
+    )
+    if cache_indexes:
+        # A standard cache path contains one exact
+        # ``models--ORG--REPO/snapshots/REVISION`` segment. Decode the encoded
+        # repository only when REVISION is terminal. A valid nested path below
+        # the revision is an ordinary local checkpoint path, so use its actual
+        # final component instead. Any malformed cache-shaped path is unsafe to
+        # infer from because its final component may merely be a spoofed
+        # revision name.
+        if len(cache_indexes) != 1:
+            return ""
+        index = cache_indexes[0]
+        encoded_repo = parts[index][len("models--") :]
         repo_parts = encoded_repo.split("--")
-        if len(repo_parts) >= 2 and all(repo_parts):
+        if (
+            len(repo_parts) != 2
+            or not all(repo_parts)
+            or index + 2 >= len(parts)
+            or parts[index + 1].lower() != "snapshots"
+        ):
+            return ""
+        if index + 2 == len(parts) - 1:
             return repo_parts[-1]
+        return parts[-1]
     return parts[-1] if parts else ""
 
 
@@ -205,6 +232,9 @@ def _detect_reasoning_parser(model: str) -> str | None:
         return "qwen3"
     if _is_supported_thinking_2507_checkpoint(checkpoint_lower):
         return "qwen3"
-    if _QWEN35_36_PATTERN.fullmatch(checkpoint_lower):
+    if any(
+        _has_supported_packaging_suffix(checkpoint_lower, base)
+        for base in _QWEN35_36_CHECKPOINTS
+    ):
         return "qwen3"
     return None
