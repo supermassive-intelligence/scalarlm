@@ -7,6 +7,8 @@ from unit tests without pulling in the full training/inference stack.
 from __future__ import annotations
 
 import os
+import posixpath
+import re
 
 
 def build_vllm_cli_args(config: dict) -> list[str]:
@@ -106,40 +108,103 @@ def resolve_reasoning_parser(config: dict) -> str | None:
     return reasoning_parser
 
 
-# Restrict automatic selection to checkpoint names that begin like the
-# validated Qwen3 generative families. A mere substring match is unsafe:
-# embedding, reranker, guard, and third-party classifier checkpoints also
-# carry "Qwen3" in their names but do not emit the reasoning contract.
-_QWEN3_CHECKPOINT_PREFIXES = ("qwen3-", "qwen3.", "qwen3_")
+# Automatic selection is intentionally an allow-list. A mismatched qwen3
+# parser treats output without ``</think>`` as unfinished reasoning, which can
+# leave the user-visible content empty. The original Qwen3 hybrid checkpoints
+# below, dedicated Thinking-2507 checkpoints, and the Qwen3.5/3.6 families are
+# the model-name shapes validated by the pinned vLLM fork. Unknown variants
+# remain opt-in through ``reasoning_parser``.
+_QWEN3_HYBRID_CHECKPOINTS = (
+    "qwen3-0.6b",
+    "qwen3-1.7b",
+    "qwen3-4b",
+    "qwen3-8b",
+    "qwen3-14b",
+    "qwen3-32b",
+    "qwen3-30b-a3b",
+    "qwen3-235b-a22b",
+)
+_QWEN3_THINKING_2507_CHECKPOINTS = (
+    "qwen3-4b-thinking-2507",
+    "qwen3-30b-a3b-thinking-2507",
+    "qwen3-235b-a22b-thinking-2507",
+)
 
-# These Qwen3 variants do not use the original base/hybrid family's
-# ``<think>...</think>`` contract. In particular, the official
-# *-Instruct-2507 checkpoints are non-thinking-only. Operators can still set
-# an explicit parser for a specific checkpoint when appropriate.
-_NON_REASONING_QWEN3_CHECKPOINT_SUBSTRINGS = (
-    "coder",
-    "next",
-    "instruct",
-    "embedding",
-    "reranker",
-    "classifier",
-    "guard",
+# Quantized copies preserve the source checkpoint's chat template. Keep the
+# accepted suffixes narrow so names such as ``*-Base`` and ``*-Instruct`` do
+# not accidentally inherit a parser merely because they share a size prefix.
+_PACKAGING_SUFFIX_PATTERN = (
+    r"(?:-(?:fp8|awq|gptq|gguf(?::[a-z0-9_]+)?|nvfp4|mxfp4|"
+    r"w\d+a\d+|int\d+|quantized[._-]w\d+a\d+)"
+    r"(?:-(?:dynamic|\d+bit|w\d+a\d+|g\d+|int\d+))*)?"
+)
+
+_QWEN35_36_PATTERN = re.compile(
+    rf"^qwen3\.[56]-\d+(?:\.\d+)?b(?:-a\d+(?:\.\d+)?b)?"
+    rf"{_PACKAGING_SUFFIX_PATTERN}$"
 )
 
 
+def _has_supported_packaging_suffix(checkpoint: str, base: str) -> bool:
+    """Return whether ``checkpoint`` is ``base`` or a known packaged copy."""
+    if checkpoint == base:
+        return True
+    if not checkpoint.startswith(base):
+        return False
+    suffix = checkpoint.removeprefix(base)
+    return bool(re.fullmatch(_PACKAGING_SUFFIX_PATTERN, suffix))
+
+
+def _is_supported_thinking_2507_checkpoint(checkpoint: str) -> bool:
+    """Match a known Thinking-2507 checkpoint and its PTPC/quantized copies."""
+    for base in _QWEN3_THINKING_2507_CHECKPOINTS:
+        if checkpoint == base:
+            return True
+        if not checkpoint.startswith(base):
+            continue
+        suffix = checkpoint.removeprefix(base)
+        if suffix.startswith("-ptpc"):
+            suffix = suffix.removeprefix("-ptpc")
+        if re.fullmatch(_PACKAGING_SUFFIX_PATTERN, suffix):
+            return True
+    return False
+
+
 def _checkpoint_name(model: str) -> str:
-    """Return the final component of a Hugging Face model id or path."""
-    return model.rsplit("/", 1)[-1]
+    """Return the checkpoint component of a model id or local path.
+
+    Trailing separators are ignored. For a standard Hugging Face cache path,
+    the final component is a revision hash, so decode the repository name from
+    ``models--ORG--REPO/snapshots/REVISION`` instead. This is a purely local
+    path operation and never performs a Hub lookup.
+    """
+    normalized = posixpath.normpath(model.strip().replace("\\", "/"))
+    if normalized in ("", "."):
+        return ""
+
+    parts = tuple(part for part in normalized.split("/") if part)
+    for index, part in enumerate(parts[:-2]):
+        if not part.lower().startswith("models--"):
+            continue
+        if parts[index + 1].lower() != "snapshots":
+            continue
+        encoded_repo = part[len("models--") :]
+        repo_parts = encoded_repo.split("--")
+        if len(repo_parts) >= 2 and all(repo_parts):
+            return repo_parts[-1]
+    return parts[-1] if parts else ""
 
 
 def _detect_reasoning_parser(model: str) -> str | None:
     """Return a parser only for a validated checkpoint-name family."""
     checkpoint_lower = _checkpoint_name(model.lower())
-    if not checkpoint_lower.startswith(_QWEN3_CHECKPOINT_PREFIXES):
-        return None
     if any(
-        exclusion in checkpoint_lower
-        for exclusion in _NON_REASONING_QWEN3_CHECKPOINT_SUBSTRINGS
+        _has_supported_packaging_suffix(checkpoint_lower, base)
+        for base in _QWEN3_HYBRID_CHECKPOINTS
     ):
-        return None
-    return "qwen3"
+        return "qwen3"
+    if _is_supported_thinking_2507_checkpoint(checkpoint_lower):
+        return "qwen3"
+    if _QWEN35_36_PATTERN.fullmatch(checkpoint_lower):
+        return "qwen3"
+    return None

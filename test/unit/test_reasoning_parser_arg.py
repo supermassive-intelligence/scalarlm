@@ -48,11 +48,15 @@ def test_explicit_parser_is_forwarded():
 @pytest.mark.parametrize(
     "model",
     [
+        "Qwen/Qwen3-0.6B",
         "Qwen/Qwen3-32B",
         "Qwen/Qwen3-30B-A3B",
         "Qwen/Qwen3-4B-Thinking-2507",
+        "amd/Qwen3-30B-A3B-Thinking-2507-PTPC-FP8",
         "qwen/qWeN3.5-35B-A3B-FP8",
         "qwen/qWeN3.6-27B",
+        "nvidia/Qwen3.6-35B-A3B-NVFP4-W4A4",
+        "vendor/Qwen3.6-35B-A3B-GPTQ-W4A16-G32",
     ],
 )
 def test_supported_qwen3_checkpoint_is_detected_case_insensitively(model):
@@ -73,11 +77,18 @@ def test_third_party_name_containing_qwen3_does_not_trigger_detection():
         "Qwen/Qwen3-Next-80B-A3B-Instruct-FP8",
         "Qwen/Qwen3-30B-A3B-Instruct-2507-FP8",
         "Qwen/Qwen3-4B-Instruct-2507",
+        "Qwen/Qwen3-1.7B-Base",
+        "Qwen/Qwen3-ASR-1.7B",
+        "Qwen/Qwen3-Omni-30B-A3B-Thinking",
         "Qwen/Qwen3-Embedding-8B",
         "Qwen/Qwen3-Reranker-8B",
         "Qwen/Qwen3-Text-Classifier-8B",
         "Qwen/Qwen3-Guard-Gen-8B",
         "Qwen/Qwen3Guard-Gen-8B",
+        "Qwen/Qwen3.5-0.8B-Base",
+        "Qwen/Qwen3.5-ASR-1.7B",
+        "Qwen/Qwen3.6-27B-Instruct",
+        "vendor/Qwen3-999B-Thinking-2507",
     ],
 )
 def test_known_non_reasoning_qwen3_variants_are_excluded(model):
@@ -94,10 +105,39 @@ def test_explicit_parser_can_override_a_non_reasoning_name_exclusion():
 
 
 def test_qwen3_checkpoint_path_is_detected():
-    for model in ("/models/Qwen3-32B", "/cache/Qwen3-4B-Thinking-2507"):
+    for model in (
+        "/models/Qwen3-32B",
+        "/models/Qwen3-32B/",
+        "/cache/Qwen3-4B-Thinking-2507///",
+    ):
         assert _reasoning_parser_args(_base_config(model=model)) == [
             "--reasoning-parser=qwen3"
         ]
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        (
+            "/home/user/.cache/huggingface/hub/"
+            "models--Qwen--Qwen3-32B/snapshots/0123456789abcdef/"
+        ),
+        ("/models/hub/models--nvidia--Qwen3.5-397B-A17B-NVFP4/" "snapshots/deadbeef"),
+    ],
+)
+def test_hugging_face_snapshot_path_uses_encoded_repository_name(model):
+    assert _reasoning_parser_args(_base_config(model=model)) == [
+        "--reasoning-parser=qwen3"
+    ]
+
+
+def test_hugging_face_snapshot_revision_cannot_trigger_detection():
+    model = (
+        "/home/user/.cache/huggingface/hub/"
+        "models--meta-llama--Llama-3.1-8B-Instruct/"
+        "snapshots/Qwen3-32B"
+    )
+    assert not _reasoning_parser_args(_base_config(model=model))
 
 
 def test_unrecognized_checkpoint_does_not_guess_parser():
