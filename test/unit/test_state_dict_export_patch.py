@@ -65,7 +65,7 @@ def _build(state_dict, layers, export_enabled=True):
     )
     harness = (
         "class Base:\n"
-        "    def state_dict(self, destination=None, prefix='', keep_vars=False):\n"
+        "    def state_dict(self, *, destination=None, prefix='', keep_vars=False):\n"
         "        return dict(SOURCE)\n"
         "\n"
         "class Model(Base):\n"

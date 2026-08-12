@@ -2,7 +2,7 @@ ARG BASE_NAME=cpu
 
 ###############################################################################
 # NVIDIA BASE IMAGE
-FROM nvcr.io/nvidia/pytorch:26.05-py3 AS nvidia
+FROM nvcr.io/nvidia/pytorch:26.07-py3 AS nvidia
 
 RUN apt-get update -y && apt-get install -y python3-venv slurm-wlm libslurm-dev
 
@@ -16,7 +16,7 @@ ENV PATH=$PATH:/opt/hpcx/ompi/bin
 ARG LD_LIBRARY_PATH=""
 ENV LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}:/opt/hpcx/ompi/lib:/usr/local/lib/python3.12/dist-packages/torch/lib
 
-ARG TORCH_VERSION="2.9.1"
+ARG TORCH_VERSION="2.13.0"
 ARG TORCH_CUDA_ARCH_LIST="7.5"
 
 RUN pip install uv && \
@@ -36,7 +36,7 @@ ENV TORCH_COMPILE_DISABLE=1
 
 ###############################################################################
 # NVIDIA DGX SPARK BASE IMAGE
-# aarch64 Grace CPU + Blackwell GPU (SM 12.0). The NGC PyTorch image is
+# aarch64 Grace CPU + Blackwell GPU (SM 12.1). The NGC PyTorch image is
 # multi-arch, so pulling this tag on linux/arm64 yields the aarch64 variant.
 FROM nvidia AS spark
 
@@ -57,8 +57,8 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 RUN python3 -m venv $VIRTUAL_ENV && \
     . $VIRTUAL_ENV/bin/activate
 
-ARG TORCH_VERSION="2.11.0"
-ARG TORCHVISION_VERSION="0.26.0"
+ARG TORCH_VERSION="2.13.0"
+ARG TORCHVISION_VERSION="0.28.0"
 ARG TORCHAUDIO_VERSION="2.11.0"
 ARG TORCHCODEC_VERSION="0.14.0"
 
@@ -253,4 +253,3 @@ RUN /app/cray/infra/slurm_src/compile.sh
 ENV LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}:${PYTHONPATH:-}:/usr/local/lib/slurm
 ENV SLURM_CONF=${INSTALL_ROOT}/nfs/slurm.conf
 ENV VLLM_CPU_MOE_PREPACK=0
-
