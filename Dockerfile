@@ -57,10 +57,18 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 RUN python3 -m venv $VIRTUAL_ENV && \
     . $VIRTUAL_ENV/bin/activate
 
-ARG TORCH_VERSION="2.10.0"
+ARG TORCH_VERSION="2.11.0"
+ARG TORCHVISION_VERSION="0.26.0"
+ARG TORCHAUDIO_VERSION="2.11.0"
+ARG TORCHCODEC_VERSION="0.14.0"
 
 RUN pip install uv && \
-    uv pip install torch==${TORCH_VERSION}+cpu --index-url https://download.pytorch.org/whl/cpu && \
+    uv pip install \
+        torch==${TORCH_VERSION}+cpu \
+        torchvision==${TORCHVISION_VERSION}+cpu \
+        torchaudio==${TORCHAUDIO_VERSION}+cpu \
+        torchcodec==${TORCHCODEC_VERSION}+cpu \
+        --index-url https://download.pytorch.org/whl/cpu && \
     uv pip install ninja
 
 # Put torch on the LD_LIBRARY_PATH
@@ -219,7 +227,10 @@ RUN \
     if [ "$VLLM_TARGET_DEVICE" != "cuda" ]; then \
         uv pip install --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements-megatron-cpu.txt; \
     fi && \
-    uv pip install --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements.txt
+    uv pip install --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements.txt && \
+    if [ "$VLLM_TARGET_DEVICE" = "cpu" ]; then \
+        python -c "import peft, sentence_transformers, torch, torchaudio, torchcodec, torchvision; assert torch.version.cuda is None; assert '+cpu' in torch.__version__, torch.__version__; assert '+cpu' in torchvision.__version__, torchvision.__version__; assert '+cpu' in torchaudio.__version__, torchaudio.__version__; assert '+cpu' in torchcodec.__version__, torchcodec.__version__"; \
+    fi
 
 RUN mkdir -p ${INSTALL_ROOT}/jobs ${INSTALL_ROOT}/nfs
 
@@ -242,5 +253,4 @@ RUN /app/cray/infra/slurm_src/compile.sh
 ENV LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}:${PYTHONPATH:-}:/usr/local/lib/slurm
 ENV SLURM_CONF=${INSTALL_ROOT}/nfs/slurm.conf
 ENV VLLM_CPU_MOE_PREPACK=0
-
 
