@@ -36,7 +36,7 @@ ENV TORCH_COMPILE_DISABLE=1
 
 ###############################################################################
 # NVIDIA DGX SPARK BASE IMAGE
-# aarch64 Grace CPU + Blackwell GPU (SM 12.1). The NGC PyTorch image is
+# aarch64 Grace CPU + Blackwell GPU (SM 12.0). The NGC PyTorch image is
 # multi-arch, so pulling this tag on linux/arm64 yields the aarch64 variant.
 FROM nvidia AS spark
 
