@@ -43,8 +43,10 @@ def temp_adapter_path():
 
         # Create a mock adapter file
         mock_weights = {
-            "tokenformer.weight": torch.rand(10, 10),
-            "lm_head.weight": torch.rand(10),
+            "model_state_dict": {
+                "tokenformer.weight": torch.rand(10, 10),
+                "lm_head.weight": torch.rand(10),
+            },
         }
         torch.save(mock_weights, adapter_dir / "model.pt")
 
@@ -77,13 +79,17 @@ class TestCPUTokenformerIntegration:
         from vllm.tokenformer.tokenformer_model_manager import TokenformerModel
 
         # Test loading a tokenformer model from checkpoint
-        try:
-            tokenformer = TokenformerModel.from_local_checkpoint(temp_adapter_path)
-            assert tokenformer is not None
-            assert hasattr(tokenformer, "adapter_data")
-            print("✓ TokenformerModel loaded successfully")
-        except Exception as e:
-            pytest.skip(f"TokenformerModel loading not fully implemented: {e}")
+        tokenformer = TokenformerModel.from_local_checkpoint(
+            temp_adapter_path, torch.device("cpu")
+        )
+
+        assert set(tokenformer.tokenformers) == {
+            "tokenformer.weight",
+            "lm_head.weight",
+        }
+        assert all(
+            tensor.device.type == "cpu" for tensor in tokenformer.tokenformers.values()
+        )
 
     def test_tokenformer_integration_with_runner_mixin(self):
         """Test LoRAModelRunnerMixin integration with tokenformer"""

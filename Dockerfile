@@ -224,7 +224,8 @@ RUN \
         # (those were only for flash-attn, which is no longer installed).
         uv pip install --no-deps --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements-megatron.txt; \
     fi && \
-    if [ "$VLLM_TARGET_DEVICE" != "cuda" ]; then \
+    # CPU-only dependencies must not replace the ROCm base's binary packages.
+    if [ "$VLLM_TARGET_DEVICE" = "cpu" ]; then \
         uv pip install --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements-megatron-cpu.txt; \
     fi && \
     uv pip install --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements.txt && \
