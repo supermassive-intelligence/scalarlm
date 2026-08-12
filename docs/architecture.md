@@ -254,7 +254,7 @@ Key fields (from `default_config.py`):
 | `max_train_time` | 86400 (24 h) | SLURM walltime |
 | `extra_training_seconds` | 300 | Graceful-exit buffer before SLURM kills |
 | `gpu_memory_utilization` | 0.40 | vLLM KV cache fraction |
-| `max_model_length` | 256 | vLLM max context (override per model) |
+| `max_model_length` | 0 (auto) | Fallback admission cap; the live vLLM context limit is selected and queried at runtime |
 | `generate_batch_size` | 1024 | Worker-side batch size |
 | `response_timeout` | 60 | Per-request cap on synchronous SDK calls |
 | `tokenformer_r`, `tokenformer_num_heads` | 32, 4 | Tokenformer adapter shape |

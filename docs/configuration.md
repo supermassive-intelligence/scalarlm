@@ -96,7 +96,7 @@ From `infra/cray_infra/util/default_config.py:5`. Every field is a Pydantic mode
 | Field | Default | Purpose |
 |---|---|---|
 | `model` | `tiny-random/gemma-4-dense` | HF Hub ID of the base model loaded at startup. vLLM serves this; training jobs default to it for `llm_name`. |
-| `max_model_length` | 256 | Max context window. vLLM uses it to size KV cache; the Generate Worker divides free KV cache by this to compute pull batch size. Override per model. |
+| `max_model_length` | 0 (auto) | Fallback admission cap when vLLM runtime introspection is unavailable; `0` means no configured fallback cap. vLLM selects its model limit automatically, and the Generate Worker uses that runtime value for KV-cache batching. |
 | `dtype` | `auto` | vLLM dtype. `auto` → bf16 on GPUs with SM ≥ 8, float32 on CPU. Forced to `float32` on sm<8 (flashmla backend). |
 | `gpu_memory_utilization` | 0.40 | Fraction of GPU memory vLLM reserves for KV cache + activations. Raise for dedicated inference pods; lower when training and inference share GPUs. |
 | `tensor_parallel_size` | 1 | vLLM `--tensor-parallel-size`. Number of GPUs to shard the model across. |
