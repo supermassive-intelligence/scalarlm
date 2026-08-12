@@ -97,7 +97,14 @@ The map in `extra` is merged over `.Values.extraConfig` last.
 {{- $lines = append $lines (printf "api_url: \"http://%s:%v\"" (include "scalarlm.fullname" $root) $root.Values.service.api_port) -}}
 {{- end -}}
 {{- range $k, $v := $root.Values.extraConfig -}}
+{{- if and (kindIs "string" $v) (eq $v "") -}}
+{{/* Preserve explicit empty-string opt-outs such as reasoning_parser: "".
+     An unquoted empty YAML value would reload as null and re-enable
+     model-name detection. */}}
+{{- $lines = append $lines (printf "%s: \"\"" $k) -}}
+{{- else -}}
 {{- $lines = append $lines (printf "%s: %v" $k $v) -}}
+{{- end -}}
 {{- end -}}
 {{- range $k, $v := .extra -}}
 {{- $lines = append $lines (printf "%s: %v" $k $v) -}}
