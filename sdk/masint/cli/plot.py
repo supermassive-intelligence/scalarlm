@@ -24,7 +24,9 @@ def plot(models, smooth, y_limit=None):
     try:
         asyncio.run(plot_async(models=models, smooth=smooth, y_limit=y_limit))
     except Exception as e:
-        logger.error(f"Failed to plot model {model_name}")
+        # `model_name` is scoped to plot_async's loop, not this frame; naming it
+        # here raised NameError and masked the underlying failure.
+        logger.error(f"Failed to plot models {models}")
         logger.error(e)
         logger.error(traceback.format_exc())
 
@@ -59,7 +61,9 @@ def plot_loss(histories, model_names, smooth, y_limit):
 
     model_name = model_names[0]
 
-    plt.plot(steps, losses)
+    # The loop above already plotted every history with a label; re-plotting the
+    # last one here drew a duplicate, unlabeled line over it.
+    plt.legend()
     plt.xlabel("Step")
     plt.ylabel("Loss")
     plt.title("Training loss for model " + model_name)
