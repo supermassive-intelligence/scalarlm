@@ -34,6 +34,9 @@ services:
                 - VLLM_SOURCE=${VLLM_SOURCE:-remote}
                 - VLLM_BRANCH=${VLLM_BRANCH:-main}
                 - VLLM_REPO=${VLLM_REPO:-https://github.com/supermassive-intelligence/vllm-fork.git}
+                # Unset: use the Dockerfile's verified v0.27.1 pin. Setting
+                # VLLM_COMMIT (including explicitly empty) overrides it.
+                - VLLM_COMMIT
         ports:
             - "8000:8000"
             - "8001:8001"
@@ -96,4 +99,3 @@ services:
 networks:
   cray-network:
     name: cray_network
-

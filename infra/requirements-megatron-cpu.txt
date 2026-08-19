@@ -4,4 +4,6 @@ torchao>=0.16.1
 transformers>=5.5.0
 huggingface_hub>=0.37
 peft
-torchvision==0.25.0
+# Torch-family binary wheels are installed together from PyTorch's CPU wheel
+# index in the CPU base stage. Keeping any of them here would let PyPI replace
+# the CPU build with a CUDA-linked aarch64 wheel.

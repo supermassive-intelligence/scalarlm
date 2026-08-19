@@ -368,7 +368,11 @@ STATE_DICT_EXPORT_SRC = '''    def state_dict(self, destination=None, prefix="",
         # Scoped to `prefix` so recursion from the multimodal wrapper
         # (Gemma4ForConditionalGeneration) can't rewrite sibling modules'
         # keys in the shared destination dict.
-        state_dict = super().state_dict(destination, prefix, keep_vars)
+        state_dict = super().state_dict(
+            destination=destination,
+            prefix=prefix,
+            keep_vars=keep_vars,
+        )
         if not scalarlm_state_dict_export_enabled():
             return state_dict
 

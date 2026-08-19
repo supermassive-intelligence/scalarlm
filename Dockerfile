@@ -2,7 +2,7 @@ ARG BASE_NAME=cpu
 
 ###############################################################################
 # NVIDIA BASE IMAGE
-FROM nvcr.io/nvidia/pytorch:26.05-py3 AS nvidia
+FROM nvcr.io/nvidia/pytorch:26.07-py3 AS nvidia
 
 RUN apt-get update -y && apt-get install -y python3-venv slurm-wlm libslurm-dev
 
@@ -16,7 +16,7 @@ ENV PATH=$PATH:/opt/hpcx/ompi/bin
 ARG LD_LIBRARY_PATH=""
 ENV LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}:/opt/hpcx/ompi/lib:/usr/local/lib/python3.12/dist-packages/torch/lib
 
-ARG TORCH_VERSION="2.9.1"
+ARG TORCH_VERSION="2.13.0"
 ARG TORCH_CUDA_ARCH_LIST="7.5"
 
 RUN pip install uv && \
@@ -57,10 +57,18 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 RUN python3 -m venv $VIRTUAL_ENV && \
     . $VIRTUAL_ENV/bin/activate
 
-ARG TORCH_VERSION="2.10.0"
+ARG TORCH_VERSION="2.13.0"
+ARG TORCHVISION_VERSION="0.28.0"
+ARG TORCHAUDIO_VERSION="2.11.0"
+ARG TORCHCODEC_VERSION="0.14.0"
 
 RUN pip install uv && \
-    uv pip install torch==${TORCH_VERSION}+cpu --index-url https://download.pytorch.org/whl/cpu && \
+    uv pip install \
+        torch==${TORCH_VERSION}+cpu \
+        torchvision==${TORCHVISION_VERSION}+cpu \
+        torchaudio==${TORCHAUDIO_VERSION}+cpu \
+        torchcodec==${TORCHCODEC_VERSION}+cpu \
+        --index-url https://download.pytorch.org/whl/cpu && \
     uv pip install ninja
 
 # Put torch on the LD_LIBRARY_PATH
@@ -124,17 +132,12 @@ RUN pip install setuptools-scm
 
 # Configure vLLM source - can use either local directory or remote repo.
 #
-# VLLM_BRANCH defaults to `main` on vllm-fork. The fixes that previously
-# required pinning to scalarlm-on-v0.19.0 at a specific SHA (TorchAllocator
-# crash, Triton scratch-allocator memleak, torch 2.10 ABI) are now merged
-# into vllm-fork's main branch, so the branch tip is sufficient.
-#
-# VLLM_COMMIT remains available as an opt-in pin if a deployment needs
-# reproducibility across time or wants to roll back to a specific SHA;
-# leave it empty to use BRANCH tip (the default).
+# Pin the exact vllm-fork v0.27.1 revision validated with this PyTorch
+# generation. VLLM_BRANCH still selects the clone source, while an explicit
+# empty VLLM_COMMIT opts back into tracking that branch tip for development.
 ARG VLLM_SOURCE=remote
 ARG VLLM_BRANCH=main
-ARG VLLM_COMMIT=
+ARG VLLM_COMMIT=281955fc63c823e8a439db82bf02ad9fffb199e2
 ARG VLLM_REPO=https://github.com/supermassive-intelligence/vllm-fork.git
 
 # Handle vLLM source - support both local and remote modes.
@@ -216,10 +219,14 @@ RUN \
         # (those were only for flash-attn, which is no longer installed).
         uv pip install --no-deps --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements-megatron.txt; \
     fi && \
-    if [ "$VLLM_TARGET_DEVICE" != "cuda" ]; then \
+    # CPU-only dependencies must not replace the ROCm base's binary packages.
+    if [ "$VLLM_TARGET_DEVICE" = "cpu" ]; then \
         uv pip install --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements-megatron-cpu.txt; \
     fi && \
-    uv pip install --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements.txt
+    uv pip install --no-compile --no-cache-dir -r ${INSTALL_ROOT}/requirements.txt && \
+    if [ "$VLLM_TARGET_DEVICE" = "cpu" ]; then \
+        python -c "import peft, sentence_transformers, torch, torchaudio, torchao, torchcodec, torchvision, vllm._C; assert torch.version.cuda is None; assert '+cpu' in torch.__version__, torch.__version__; assert '+cpu' in torchvision.__version__, torchvision.__version__; assert '+cpu' in torchaudio.__version__, torchaudio.__version__; assert '+cpu' in torchcodec.__version__, torchcodec.__version__"; \
+    fi
 
 RUN mkdir -p ${INSTALL_ROOT}/jobs ${INSTALL_ROOT}/nfs
 
@@ -242,5 +249,3 @@ RUN /app/cray/infra/slurm_src/compile.sh
 ENV LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}:${PYTHONPATH:-}:/usr/local/lib/slurm
 ENV SLURM_CONF=${INSTALL_ROOT}/nfs/slurm.conf
 ENV VLLM_CPU_MOE_PREPACK=0
-
-

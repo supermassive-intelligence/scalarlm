@@ -1,6 +1,6 @@
 # These are infra dependencies
 # Don't put vLLM or Megatron dependencies in here because they will bloat the api
-numpy<2.0.0
+numpy>=2.0.0,<2.5.0
 jsonlines
 aiofiles
 persist-queue
@@ -14,4 +14,3 @@ atomicwrites
 cryptography==46.0.0
 sortedcontainers
 datasets
-
