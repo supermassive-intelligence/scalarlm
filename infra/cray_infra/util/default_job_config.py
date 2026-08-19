@@ -9,6 +9,7 @@ class LoraConfig(BaseModel):
     lora_dropout: float = 0.1
     target_modules: Union[str, list] = "all-linear"  # or list of module names
 
+
 class JobConfig(BaseModel):
 
     job_directory: str
@@ -79,4 +80,17 @@ class JobConfig(BaseModel):
     # fp32 paths run fine — operators can pass `dtype: float32` in
     # train_args without changing the running deployment's config.
     dtype: str = "auto"
+
+    # Opt-in per job: allow AutoConfig/AutoTokenizer to execute a repo's
+    # custom modeling code (HF `trust_remote_code`). Required to TRAIN
+    # models that ship custom code (InternVL3, Molmo, GLM-4/ChatGLM, ...);
+    # without it load_model raises "contains custom code which must be
+    # executed ... pass trust_remote_code=True" and TRAIN_FAILEDs. MUST be
+    # declared here: get_job_config() funnels the raw train_args through
+    # this model, and Pydantic DROPS any field not declared — so a
+    # `trust_remote_code: true` in train_args silently vanishes without
+    # this line. Defaults False so arbitrary remote code only runs when the
+    # job explicitly opts in. (vLLM serve passes trust_remote_code on its
+    # own, which is why such models serve but wouldn't train.)
+    trust_remote_code: bool = False
 
