@@ -1,5 +1,17 @@
 torchao>=0.16.1
 accelerate
-transformers>=5.5.0
+# Cap below 5.13: this layer installs with --no-deps (see Dockerfile), so it
+# will NOT pull safetensors up to satisfy a newer transformers. transformers
+# 5.13.0 hard-requires safetensors>=0.8.0, but the image ships safetensors 0.7.0
+# (from the NGC/vLLM stack, which pins transformers<5), so 5.13 makes the api
+# server crash-loop at startup ("safetensors>=0.8.0 is required ... found 0.7.0").
+# 5.12.x is the last line compatible with the shipped safetensors and is the
+# version every training/serving path here was validated against. Pinning it
+# makes that explicit instead of relying on a frozen Docker layer cache (a
+# requirements change elsewhere would otherwise silently upgrade to 5.13).
+transformers>=5.5.0,<5.13
 huggingface_hub>=0.37
 peft
+# InternVL (and other hub VLMs) ship custom modeling code whose vision tower
+# imports timm; without it AutoModel load raises "requires ... timm".
+timm
