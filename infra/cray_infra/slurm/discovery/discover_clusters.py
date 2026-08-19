@@ -9,6 +9,7 @@ import time
 import socket
 import os
 import json
+import re
 
 import logging
 
@@ -22,6 +23,16 @@ shared_slurm_config_path = "/app/cray/nfs/slurm.conf"
 shared_gres_config_path = "/app/cray/nfs/gres.conf"
 shared_cgroup_config_path = "/app/cray/nfs/cgroup.conf"
 shared_node_config_directory = "/app/cray/nfs/nodes"
+
+meminfo_path = "/proc/meminfo"
+cgroup_v2_memory_limit_path = "/sys/fs/cgroup/memory.max"
+cgroup_v1_memory_limit_path = "/sys/fs/cgroup/memory/memory.limit_in_bytes"
+
+_bytes_per_kib = 1024
+_bytes_per_mib = 1024 * 1024
+_max_memory_bytes = (1 << 63) - 1
+_cgroup_v1_unlimited_threshold = 1 << 60
+_memtotal_pattern = re.compile(r"MemTotal:[ \t]+([1-9][0-9]*)[ \t]+kB")
 
 
 def main():
@@ -69,7 +80,7 @@ def clean_old_node_info():
                 os.remove(file_path)
 
 
-def get_node_info():
+def get_node_info() -> dict:
     hostname = get_hostname()
     cpu_count = get_cpu_count()
     gpu_count = get_gpu_count()
@@ -79,6 +90,7 @@ def get_node_info():
         "machine_id": machine_id,
         "hostname": hostname,
         "cpu_count": cpu_count,
+        "memory_mb": get_memory_mb(),
         "gpu_count": gpu_count,
         "gpu_type": get_gpu_type(),
         "gpu_indexes": get_gpu_indexes(),
@@ -108,8 +120,108 @@ def get_hostname():
     return socket.gethostname()
 
 
-def get_cpu_count():
+def get_cpu_count() -> int | None:
     return os.cpu_count()
+
+
+def get_memory_mb() -> int | None:
+    """Return the effective memory capacity visible to this container, in MiB.
+
+    ``/proc/meminfo`` commonly reports host-wide memory in containers. Bound
+    it by the active cgroup v2 or v1 memory limit so each ScalarLM replica
+    does not register capacity that its container cannot use. Missing memory
+    controllers leave ``MemTotal`` as the finite bound for a bare-host process.
+    An explicit unlimited container value is not a per-replica allocation:
+    colocated replicas would each advertise the same host total, so omit
+    ``RealMemory``. Unreadable or malformed controller state is likewise
+    indeterminate and omitted.
+    """
+    total_bytes = _read_memtotal_bytes()
+    if total_bytes is None:
+        return None
+
+    limit_is_known, limit_bytes = _read_cgroup_memory_limit_bytes()
+    if not limit_is_known:
+        return None
+
+    effective_bytes = (
+        min(total_bytes, limit_bytes) if limit_bytes is not None else total_bytes
+    )
+    memory_mb = effective_bytes // _bytes_per_mib
+    return memory_mb if memory_mb > 0 else None
+
+
+def _read_memtotal_bytes() -> int | None:
+    try:
+        with open(meminfo_path) as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    match = _memtotal_pattern.fullmatch(line.rstrip("\r\n"))
+                    if match is None:
+                        logger.debug("Malformed MemTotal line in %s", meminfo_path)
+                        return None
+                    total_kib = int(match.group(1))
+                    if total_kib > _max_memory_bytes // _bytes_per_kib:
+                        logger.debug("MemTotal in %s is out of range", meminfo_path)
+                        return None
+                    return total_kib * _bytes_per_kib
+    except OSError as e:
+        logger.debug(f"Error reading total memory: {e}")
+    return None
+
+
+def _read_cgroup_memory_limit_bytes() -> tuple[bool, int | None]:
+    """Return ``(is_known, finite_limit)`` for the active memory controller.
+
+    ``finite_limit=None`` with ``is_known=True`` means no controller is mounted
+    at the standard paths, as for a bare-host process. ``is_known=False`` means
+    a controller was present but did not provide a safe per-node allocation,
+    whether because it was unreadable/malformed or explicitly unlimited.
+    """
+    try:
+        with open(cgroup_v2_memory_limit_path) as f:
+            value = f.read().strip()
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        logger.debug(f"Error reading cgroup v2 memory limit: {e}")
+        return False, None
+    else:
+        if value == "max":
+            # This is host-wide availability, not an allocation unique to a
+            # container/SLURM node. Multiple unlimited replicas can coexist,
+            # so advertising MemTotal from each would multiply capacity.
+            return False, None
+        return _parse_cgroup_limit(value, "v2")
+
+    try:
+        with open(cgroup_v1_memory_limit_path) as f:
+            value = f.read().strip()
+    except FileNotFoundError:
+        return True, None
+    except OSError as e:
+        logger.debug(f"Error reading cgroup v1 memory limit: {e}")
+        return False, None
+
+    parsed, limit_bytes = _parse_cgroup_limit(value, "v1")
+    if parsed and limit_bytes is not None:
+        # Linux cgroup v1 represents "unlimited" as a page-aligned value near
+        # LONG_MAX (usually 9223372036854771712 on 64-bit hosts).
+        if limit_bytes >= _cgroup_v1_unlimited_threshold:
+            return False, None
+    return parsed, limit_bytes
+
+
+def _parse_cgroup_limit(value: str, version: str) -> tuple[bool, int | None]:
+    if not value.isascii() or not value.isdecimal():
+        logger.debug("Malformed cgroup %s memory limit", version)
+        return False, None
+
+    limit_bytes = int(value)
+    if not 0 < limit_bytes <= _max_memory_bytes:
+        logger.debug("Cgroup %s memory limit is out of range", version)
+        return False, None
+    return True, limit_bytes
 
 
 def get_gpu_count():
@@ -276,9 +388,16 @@ def save_slurm_conf_values(slurm_conf_values):
     return config
 
 
-def write_node_config(node):
-    """
-    NodeName=hostname CPUs=64 Gres=gpu:6 State=UNKNOWN
+def write_node_config(node: dict) -> str:
+    """Render one ``NodeName=...`` line for ``slurm.conf``.
+
+    Example output::
+
+        NodeName=hostname CPUs=64 RealMemory=257723 Gres=gpu:6 State=UNKNOWN
+
+    ``RealMemory`` is omitted when ``node["memory_mb"]`` is missing or is
+    not a positive, in-range integer, matching how ``Gres`` is already
+    omitted for GPU-less nodes rather than writing a misleading value.
     """
     max_gpus_per_node = get_config()["max_gpus_per_node"]
     gres_string = (
@@ -286,7 +405,21 @@ def write_node_config(node):
         if node["gpu_count"] > 0
         else ""
     )
-    node_config = f"NodeName={node['hostname']} CPUs={node['cpu_count']} {gres_string} State=UNKNOWN"
+    memory_mb = node.get("memory_mb")
+    memory_is_valid = (
+        isinstance(memory_mb, int)
+        and not isinstance(memory_mb, bool)
+        and 0 < memory_mb <= _max_memory_bytes // _bytes_per_mib
+    )
+    memory_string = f"RealMemory={memory_mb}" if memory_is_valid else ""
+    fields = [
+        f"NodeName={node['hostname']}",
+        f"CPUs={node['cpu_count']}",
+        memory_string,
+        gres_string,
+        "State=UNKNOWN",
+    ]
+    node_config = " ".join(field for field in fields if field)
     return node_config + "\n"
 
 
