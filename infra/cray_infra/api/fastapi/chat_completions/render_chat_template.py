@@ -14,6 +14,10 @@ See docs/openai-chat-completions-queue.md §4.
 import os
 from typing import Any, Dict, List, Optional
 
+from cray_infra.api.fastapi.routers.openai_v1_helpers import (
+    _chat_template_kwargs_for_render,
+)
+
 ChatMessage = Dict[str, Any]
 
 
@@ -45,6 +49,9 @@ def render_chat_template(
     model: str,
     messages: Optional[List[ChatMessage]],
     prompt: Optional[str],
+    chat_template_kwargs: Optional[Dict[str, Any]] = None,
+    tools: Optional[List[Dict[str, Any]]] = None,
+    reasoning_effort: Optional[str] = None,
 ) -> str:
     """
     Render one request entry into a prompt string.
@@ -54,6 +61,14 @@ def render_chat_template(
     misconfigurations on the caller's side surface as a clear
     ValueError rather than an opaque tokenizer or vLLM error
     downstream.
+
+    `chat_template_kwargs` is restricted to ScalarLM's shared safe
+    allowlist before it is passed to the tokenizer. vLLM derives
+    `enable_thinking` from an explicit reasoning effort when the caller
+    did not already set it; mirror that rule here so admission counts the
+    prompt vLLM will actually serve. Tool definitions are likewise part
+    of many model chat templates. Raw prompts bypass template rendering,
+    so these values are ignored for that input shape.
     """
     has_messages = bool(messages)
     has_prompt = bool(prompt)
@@ -70,11 +85,19 @@ def render_chat_template(
         return prompt  # type: ignore[return-value]
 
     tokenizer = _load_tokenizer(model)
-    return tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
+    template_kwargs = _chat_template_kwargs_for_render(
+        chat_template_kwargs, reasoning_effort
     )
+
+    render_kwargs: Dict[str, Any] = {
+        "tokenize": False,
+        "add_generation_prompt": True,
+        **template_kwargs,
+    }
+    if tools is not None:
+        render_kwargs["tools"] = tools
+
+    return tokenizer.apply_chat_template(messages, **render_kwargs)
 
 
 def _load_tokenizer(model: str) -> Any:
@@ -133,9 +156,7 @@ def _resolve_tokenizer_source(model: str) -> str:
         candidate_path = os.path.join(training_dir, model)
         if os.path.isdir(candidate_path):
             source = (
-                candidate_path
-                if _has_tokenizer_files(candidate_path)
-                else base_model
+                candidate_path if _has_tokenizer_files(candidate_path) else base_model
             )
             _source_cache[model] = source
             return source

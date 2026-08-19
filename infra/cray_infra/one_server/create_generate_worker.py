@@ -1,6 +1,6 @@
 import asyncio
 import aiohttp
-import copy
+from itertools import islice
 import json
 import os
 import sys
@@ -64,6 +64,7 @@ class _InflightCounter:
     to vLLM but not yet seen finish_work for. A plain int doesn't work
     because nested coroutines need a shared reference.
     """
+
     __slots__ = ("count",)
 
     def __init__(self):
@@ -96,7 +97,9 @@ async def create_generate_worker(server_status):
     # capacity (the cache peek doesn't reflect requests sitting in vLLM's
     # waiting queue). Without this cap the loop flood-pulls from the
     # SQLiteAckQueue in tight iterations. See default_config.py for the knob.
-    max_inflight = int(config.get("max_inflight_requests", config["generate_batch_size"]))
+    max_inflight = int(
+        config.get("max_inflight_requests", config["generate_batch_size"])
+    )
     inflight = _InflightCounter()
 
     try:
@@ -327,7 +330,8 @@ async def process_requests(app, requests, inflight=None):
 
 async def process_requests_task(app, requests, inflight=None):
     logger.info(f"Processing {len(requests)} requests")
-    logger.debug("Got work: %s", truncate_fields({"requests": requests}))
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("Got work: %s", truncate_fields({"requests": requests}))
 
     per_request = [_run_and_finish_one(req, app, inflight) for req in requests]
     # return_exceptions=True so one sub-coroutine failing doesn't abort
@@ -390,23 +394,84 @@ async def _run_and_finish_one(request, app, inflight=None):
             inflight.count -= 1
 
 
+_LOG_STRING_LIMIT = 100
+_LOG_COLLECTION_LIMIT = 20
+_LOG_DEPTH_LIMIT = 12
+_LOG_REDACTED_KEYS = frozenset(
+    {
+        "arguments",
+        "audio_url",
+        "content",
+        "image_url",
+        "input_audio",
+        "prompt",
+    }
+)
+
+
 def truncate_fields(data):
-    # Limit the length of the data to 100 characters
-    # Data is a dict with a field called requests which is a list of dicts
+    """Return a bounded, recursively sanitized copy for debug logging.
 
-    data = copy.deepcopy(data)
-
-    for request in data["requests"]:
-        truncate_dict(request)
-    return data
+    Queue-backed chat adds nested message and tool lists. The historical
+    dict-only walker skipped every string inside those lists, so large data
+    URLs and complete conversations reached DEBUG logs. Bound collection
+    sizes, recurse through lists/tuples, and redact content-bearing fields.
+    """
+    return _sanitize_log_value(data)
 
 
 def truncate_dict(d):
-    for key, value in d.items():
-        if isinstance(value, str) and len(value) > 100:
-            d[key] = value[:100] + "..."
-        if isinstance(value, dict):
-            truncate_dict(value)
+    """Backward-compatible in-place wrapper for existing callers."""
+    sanitized = _sanitize_log_value(d)
+    d.clear()
+    d.update(sanitized)
+
+
+def _sanitize_log_value(value, *, key=None, depth=0):
+    if key in _LOG_REDACTED_KEYS:
+        try:
+            size = len(value)
+        except TypeError:
+            size = 1
+        unit = "chars" if isinstance(value, str) else "items"
+        return f"<redacted {size} {unit}>"
+
+    if depth >= _LOG_DEPTH_LIMIT and isinstance(value, (dict, list, tuple)):
+        return "<truncated nested value>"
+
+    if isinstance(value, str):
+        if value.startswith("data:"):
+            return f"<redacted {len(value)} chars>"
+        if len(value) > _LOG_STRING_LIMIT:
+            return value[:_LOG_STRING_LIMIT] + "..."
+        return value
+
+    if isinstance(value, dict):
+        sanitized = {
+            item_key: _sanitize_log_value(
+                item_value,
+                key=str(item_key),
+                depth=depth + 1,
+            )
+            for item_key, item_value in islice(
+                value.items(),
+                _LOG_COLLECTION_LIMIT,
+            )
+        }
+        if len(value) > _LOG_COLLECTION_LIMIT:
+            sanitized["<truncated>"] = f"{len(value) - _LOG_COLLECTION_LIMIT} keys"
+        return sanitized
+
+    if isinstance(value, (list, tuple)):
+        items = [
+            _sanitize_log_value(item, depth=depth + 1)
+            for item in value[:_LOG_COLLECTION_LIMIT]
+        ]
+        if len(value) > _LOG_COLLECTION_LIMIT:
+            items.append(f"<truncated {len(value) - _LOG_COLLECTION_LIMIT} items>")
+        return items
+
+    return value
 
 
 async def pass_receive() -> NoReturn:
@@ -415,8 +480,10 @@ async def pass_receive() -> NoReturn:
 
 
 async def async_generate_task(request, app):
-    if request["request_type"] == "generate":
-        if is_chat_completion_task(request):
+    if request["request_type"] == "chat_completions":
+        return await async_chat_completion_task(request, app)
+    elif request["request_type"] == "generate":
+        if request.get("chat_request") is not None or is_chat_completion_task(request):
             return await async_chat_completion_task(request, app)
         else:
             return await async_completion_task(request, app)
@@ -432,17 +499,31 @@ def is_chat_completion_task(request):
 
 
 async def async_chat_completion_task(request, app):
-    completion_request = ChatCompletionRequest(
-        model=request["model"],
-        messages=convert_prompt_to_openai_format(request["prompt"]),
-        max_tokens=request["max_tokens"],
-        tools=request.get("tools"),
-        tool_choice=request.get("tool_choice"),
-        **sampling_params_for(app, request),
-    )
+    chat_request = request.get("chat_request")
+    if chat_request is not None:
+        # The public handler validated the payload before enqueueing it.
+        # Re-validate at the worker boundary so malformed or stale rows fail
+        # clearly rather than reaching serving internals as arbitrary dicts.
+        completion_request = ChatCompletionRequest(**chat_request)
+    else:
+        # Backward compatibility for /v1/generate's historical multimodal
+        # prompt-dict path.
+        completion_request = ChatCompletionRequest(
+            model=request["model"],
+            messages=convert_prompt_to_openai_format(request["prompt"]),
+            max_tokens=request["max_tokens"],
+            tools=request.get("tools"),
+            tool_choice=request.get("tool_choice"),
+            **sampling_params_for(app, request),
+        )
 
     raw_request = Request(
-        scope={"app": app, "type": "http", "headers": {}, "path": "/v1/completions"},
+        scope={
+            "app": app,
+            "type": "http",
+            "headers": {},
+            "path": "/v1/chat/completions",
+        },
         receive=pass_receive,
     )
 
@@ -457,7 +538,20 @@ async def async_chat_completion_task(request, app):
     }
 
     if "choices" in response_data:
-        response["response"] = response_data["choices"][0]["message"]["content"]
+        choice = response_data["choices"][0]
+        message = choice["message"]
+        response["response"] = message.get("content") or ""
+        if message.get("reasoning") is not None:
+            response["reasoning"] = message["reasoning"]
+        if message.get("tool_calls") is not None:
+            response["tool_calls"] = message["tool_calls"]
+        if choice.get("finish_reason") is not None:
+            response["finish_reason"] = choice["finish_reason"]
+    elif "error" in response_data:
+        error = response_data["error"]
+        response["error"] = (
+            error.get("message", repr(error)) if isinstance(error, dict) else str(error)
+        )
     elif response_data.get("object") == "error":
         response["error"] = response_data.get("message", repr(response_data))
     else:
@@ -511,7 +605,6 @@ def convert_prompt_to_openai_format(
 
 
 def compute_flop_count(model_config):
-
     # The intermediate size is the size of the feedforward layer
     vocab_size = model_config.get_vocab_size()
     hidden_size = model_config.get_hidden_size()

@@ -9,8 +9,8 @@ followed by a timeout. This helper rejects them up front so the
 client gets HTTP 400 with a clear reason instead.
 
 The check is a pure threshold computation; the handler is responsible
-for getting `prompt_tokens` from a tokenizer it already loaded for
-chat-template rendering. Splitting concerns this way keeps the
+for getting both `prompt_tokens` and `max_model_length` from vLLM's
+authoritative runtime renderer. Splitting concerns this way keeps the
 threshold logic trivially unit-testable without a real tokenizer.
 """
 

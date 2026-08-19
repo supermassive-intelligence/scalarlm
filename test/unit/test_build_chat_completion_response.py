@@ -76,6 +76,50 @@ def test_missing_response_field_yields_empty_content_not_none():
     assert out["usage"]["total_tokens"] == 5
 
 
+def test_preserves_structured_reasoning_from_vllm_chat_worker():
+    result = {
+        "request_id": "reasoning-1",
+        "response": "OK",
+        "reasoning": "I should answer briefly.",
+        "finish_reason": "stop",
+    }
+
+    out = build_chat_completion_response(result=result, model="reasoning-model")
+
+    message = out["choices"][0]["message"]
+    assert message["content"] == "OK"
+    assert message["reasoning"] == "I should answer briefly."
+    assert out["choices"][0]["finish_reason"] == "stop"
+
+
+def test_preserves_structured_tool_calls_from_vllm_chat_worker():
+    tool_calls = [
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "arguments": '{"city":"Helsinki"}',
+            },
+        }
+    ]
+    result = {
+        "request_id": "tool-1",
+        "response": "",
+        "reasoning": "I need the weather tool.",
+        "tool_calls": tool_calls,
+        "finish_reason": "tool_calls",
+    }
+
+    out = build_chat_completion_response(result=result, model="tool-model")
+
+    choice = out["choices"][0]
+    assert choice["message"]["content"] is None
+    assert choice["message"]["reasoning"] == "I need the weather tool."
+    assert choice["message"]["tool_calls"] == tool_calls
+    assert choice["finish_reason"] == "tool_calls"
+
+
 def test_prompt_completion_split_preferred_over_token_count():
     """When the worker propagates the prompt/completion split (the
     normal post-fix path), surface it on `usage` and recompute

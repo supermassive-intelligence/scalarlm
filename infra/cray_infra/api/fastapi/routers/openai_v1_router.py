@@ -23,11 +23,11 @@ from cray_infra.api.fastapi.chat_completions.tee_streaming_to_disk import (
     write_response_artifact,
 )
 from cray_infra.api.fastapi.routers.openai_v1_helpers import (
-    _CHAT_ALLOWED_KEYS,
     _COMPLETION_ALLOWED_KEYS,
     _USAGE_SCAN_TAIL_BYTES,
     _ensure_usage_reported,
     _extract_token_count,
+    _chat_params_from_request,
     _filter_params,
     _read_total_tokens,
 )
@@ -64,7 +64,9 @@ async def list_models():
 async def create_completions(request: CompletionRequest, raw_request: Request):
     """Create completions - proxy to vLLM server."""
     config = get_config()
-    params = _filter_params(request.model_dump(mode="json", exclude_none=True), _COMPLETION_ALLOWED_KEYS)
+    params = _filter_params(
+        request.model_dump(mode="json", exclude_none=True), _COMPLETION_ALLOWED_KEYS
+    )
     _ensure_usage_reported(params)
     logger.info("Received completions request: %s", params)
     return _proxy_streaming(
@@ -88,7 +90,7 @@ async def create_chat_completions(request: ChatCompletionRequest, raw_request: R
     """
     if getattr(request, "stream", False):
         config = get_config()
-        params = _filter_params(request.model_dump(mode="json", exclude_none=True), _CHAT_ALLOWED_KEYS)
+        params = _chat_params_from_request(request)
         _ensure_usage_reported(params)
         logger.info("Received streaming chat completions request: %s", params)
         return _proxy_streaming(
@@ -127,7 +129,9 @@ def _proxy_streaming(
     # depend on disk.
     request_hash = compute_request_hash(params)
     write_request_artifacts(
-        request_hash=request_hash, params=params, endpoint_label=endpoint_label,
+        request_hash=request_hash,
+        params=params,
+        endpoint_label=endpoint_label,
     )
 
     async def upstream():
@@ -135,7 +139,10 @@ def _proxy_streaming(
             if resp.status != 200:
                 error_text = await resp.text()
                 logger.error(
-                    "vLLM %s error (%s): %s", endpoint_label, resp.status, error_text,
+                    "vLLM %s error (%s): %s",
+                    endpoint_label,
+                    resp.status,
+                    error_text,
                 )
                 yield (
                     f'data: {{"error": "Failed to create {endpoint_label}: {error_text}"}}\n\n'
@@ -203,5 +210,3 @@ async def _wrap_with_metrics(source, *, request_hash: Optional[str] = None):
                 request_hash=request_hash,
                 sse_text=bytes(full_capture).decode("utf-8", errors="replace"),
             )
-
-
