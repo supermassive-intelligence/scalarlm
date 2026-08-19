@@ -115,6 +115,11 @@ class Config(BaseModel):
     # enable_lora comment above for why that matters.
     enable_tokenformer: bool = True
 
+    # vLLM --reasoning-parser value. None enables conservative model-name
+    # detection; an explicit parser overrides detection, and an empty string
+    # disables it. Unrecognized models remain unchanged unless configured.
+    reasoning_parser: Optional[str] = None
+
     max_log_length: int = 100
 
     server_list: str = "all"
@@ -175,4 +180,3 @@ class Config(BaseModel):
     # buffering responses despite our heartbeats.
     chat_buffering_check_proxy_timeout_seconds: float = 60.0
     chat_buffering_match_threshold_seconds: float = 0.5
-
