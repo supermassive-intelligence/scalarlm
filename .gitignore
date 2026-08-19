@@ -37,3 +37,5 @@ Thumbs.db
 
 # Local vLLM clone for development
 vllm/***
+docker-compose.override.yaml
+docker-compose.override.yml
