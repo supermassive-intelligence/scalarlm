@@ -115,11 +115,11 @@ async def chat_completions_via_queue(request: Any) -> StreamingResponse:
     # cached one render_chat_template already loaded, so this is a
     # microsecond-scale check on the hot path. The cap comes from
     # vLLM's runtime config (per-model, cached) rather than the
-    # cray-config knob — that knob default is 256 and tends to drift
-    # stale after operator-side model changes. resolve_max_model_length
-    # falls back to the config value when vLLM is unreachable, and
-    # treats <= 0 as "no cap" so we don't block requests on transient
-    # vLLM unavailability.
+    # cray-config knob. That knob defaults to 0 (no fallback cap), and
+    # any operator-set nonzero value can drift stale after model changes.
+    # resolve_max_model_length falls back to the config value when vLLM
+    # is unreachable and treats <= 0 as "no cap" so we don't block
+    # requests on transient vLLM unavailability.
     max_model_length = await resolve_max_model_length(model)
     if max_model_length > 0:
         try:
@@ -293,5 +293,4 @@ def get_queue_depth() -> int:
     from cray_infra.generate.metrics import get_metrics
 
     return get_metrics().queue_depth
-
 

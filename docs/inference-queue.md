@@ -173,11 +173,12 @@ loop forever:
 
 ```python
 current = await engine_client.get_current_kv_cache_size()
-batch  = current // config["max_model_length"]          # conservative
+max_model_length = engine_client.model_config.max_model_len
+batch  = current // max_model_length                     # conservative
 return min(batch, config["generate_batch_size"])        # cap at 1024
 ```
 
-The division by `max_model_length` assumes every request could consume a full context window. That's intentionally pessimistic — it prevents OOM on worst-case long-output batches at the cost of occasionally underfilling when outputs are short. `generate_batch_size` (default 1024) is the hard ceiling.
+The division uses the runtime engine's `max_model_len` and assumes every request could consume a full context window. That's intentionally pessimistic — it prevents OOM on worst-case long-output batches at the cost of occasionally underfilling when outputs are short. `generate_batch_size` (default 1024) is the hard ceiling.
 
 ### 4.4 `/v1/generate/get_work` — the dequeue endpoint
 
@@ -347,7 +348,7 @@ Queue-relevant fields from `infra/cray_infra/util/default_config.py`:
 | `inference_work_queue_idle_time` | 5 (s) | Minimum idle-worker time before stuck-request recycling is allowed. |
 | `inference_work_queue_ack_timeout` | 300 (s) | Max age of an `unack` row before it's eligible for recycling. |
 | `generate_batch_size` | 1024 | Ceiling on per-pull batch size (worker side). |
-| `max_model_length` | 256 (per-model override) | Divisor in `batch_size = kv_free / max_model_length`. |
+| `max_model_length` | 0 (auto) | Fallback admission cap when vLLM runtime introspection is unavailable; `0` disables the fallback cap. Worker batching uses the runtime engine's `max_model_len`. |
 | `response_timeout` | 60 (s) | Max time `poll_for_responses` blocks in `/v1/generate` and `/v1/generate/get_results`. Timed-out prompts return `response=None`. |
 | `max_upload_file_size` | 10 GB | Upper bound on upload batch file size. |
 
