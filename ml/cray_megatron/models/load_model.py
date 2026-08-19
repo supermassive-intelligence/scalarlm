@@ -90,15 +90,30 @@ def materialize_model(model_info):
         attn_impl,
     )
 
+    # Load weights straight onto the target GPU (Big Model Inference) instead of
+    # onto CPU and then .to(device). On a unified-memory pool (the GB10/DGX Spark,
+    # 128GiB shared by CPU+GPU) the CPU-resident copy and the .to(device) GPU copy
+    # coexist transiently at ~2x the weights (~120GiB for a 30B bf16 MoE) and OOM
+    # before step 0 — even though the SAME model serves fine (vLLM loads it once).
+    # device_map={"": device} materializes shards directly on-device (~1x peak);
+    # low_cpu_mem_usage avoids the transient CPU copy. Both are GPU-only: the cpu
+    # target keeps the plain CPU load unchanged (it has no unified-memory peak to
+    # avoid, and low_cpu_mem_usage would needlessly alter its init path).
+    device = model_info["distribution_strategy"]["device"]
+    on_gpu = isinstance(device, int) or (
+        isinstance(device, torch.device) and device.type == "cuda"
+    )
+    load_kwargs = {"torch_dtype": "auto"}
+    if on_gpu:
+        load_kwargs["device_map"] = {"": device}
+        load_kwargs["low_cpu_mem_usage"] = True
+
     start_time = time.time()
     try:
         model_info["model"] = model_cls.from_pretrained(
             model_info["model_name"],
-            torch_dtype="auto",  # Use model's native dtype
             attn_implementation=attn_impl,
-            # device_map="auto",            # Enable Big Model Inference
-            # low_cpu_mem_usage=True,       # Reduce CPU memory usage
-            # _fast_init=True               # Skip weight initialization (default True)
+            **load_kwargs,  # torch_dtype="auto" + on-device load (see above)
         )
     except (ValueError, ImportError, RuntimeError) as e:
         # Some model configs (older architectures, custom attention heads)
@@ -115,8 +130,8 @@ def materialize_model(model_info):
             attn_impl = "eager"
             model_info["model"] = model_cls.from_pretrained(
                 model_info["model_name"],
-                torch_dtype="auto",
                 attn_implementation="eager",
+                **load_kwargs,
             )
         else:
             raise
@@ -184,10 +199,18 @@ def materialize_model(model_info):
     if is_main_rank():
         logger.info(f"Model: {model_info['model']}")
 
-    logger.info(
-        f"Moving model to device: {model_info['distribution_strategy']['device']}..."
-    )
-
-    model_info["model"].to(model_info["distribution_strategy"]["device"])
+    if on_gpu:
+        # Already materialized on-device by device_map at load; a subsequent
+        # .to(device) on a dispatched model is redundant (and reintroduces the
+        # CPU->GPU peak this fix avoids).
+        logger.info(
+            f"Model already on device via device_map: "
+            f"{model_info['distribution_strategy']['device']}"
+        )
+    else:
+        logger.info(
+            f"Moving model to device: {model_info['distribution_strategy']['device']}..."
+        )
+        model_info["model"].to(model_info["distribution_strategy"]["device"])
 
     return model_info
