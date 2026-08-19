@@ -61,15 +61,32 @@ async def get_running_jobs():
             try:
                 with open(os.path.join(root, "status.json")) as f:
                     status = json.load(f)
-                    if (
-                        status["status"] == TrainingJobStatus.TRAINING
-                        or status["status"] == TrainingJobStatus.QUEUED
-                    ):
-                        yield root
             except Exception as e:
                 logger.error(f"Error reading status.json for job {root}: {e}")
                 # print exception info
                 traceback.print_exc()
+                continue
+
+            if not isinstance(status, dict):
+                logger.error(
+                    "status.json for job %s is not a JSON object (got %s)",
+                    root,
+                    type(status).__name__,
+                )
+                continue
+
+            if "status" not in status:
+                logger.warning(
+                    f"status.json for job {root} has no 'status' key, skipping"
+                )
+                continue
+
+            job_status = status["status"]
+            if (
+                job_status == TrainingJobStatus.TRAINING
+                or job_status == TrainingJobStatus.QUEUED
+            ):
+                yield root
 
 
 async def get_slurm_jobs():
