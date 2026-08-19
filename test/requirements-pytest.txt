@@ -7,4 +7,5 @@ pytest-dotenv
 pytest-mock
 pytest-rerunfailures
 pytest-timeout
+requests
 codecov

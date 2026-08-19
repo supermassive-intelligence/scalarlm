@@ -676,7 +676,14 @@ Every stage runs inside Docker. There is no host-side Python or npm step.
 ./scalarlm test --level ui                           # npm lint + typecheck + test
 ./scalarlm test --level collectives                  # SHM channel tests
 ./scalarlm test --level fast                         # unit + ui + collectives (CI fast)
-./scalarlm test --level all                          # everything
+./scalarlm test --level all                          # every non-live level
+
+# Opt-in live inference smoke against an already-built hardware image:
+./scalarlm test --level live \
+  --live-target spark \
+  --model Qwen/Qwen3-0.6B \
+  --tag cray:latest \
+  --no-build yes
 
 # Filter within a level:
 ./scalarlm test --level component -k work_queue      # pytest -k pattern
@@ -701,7 +708,8 @@ Level semantics — every row runs in a container:
 | `collectives` | scalarlm CPU image | `test/collectives/test_shm_channel.py` via pytest |
 | `fast` | both | `unit` + `collectives` + `ui` |
 | `cpu` | both | `fast` + `component` + `e2e` *(default)* |
-| `all` | both | every level |
+| `live` | selected ScalarLM image | Provisions a real server, then checks health, model listing, synchronous ScalarLM API, queued SDK, and streaming inference |
+| `all` | both | every non-live level; `live` remains opt-in because it downloads and loads a model |
 
 Pytest stages run inside `$tag` (default `cray:latest`, overridable with
 `--tag`). The UI stage runs inside `node:24.2.0` with `ui/` bind-mounted, so
@@ -715,6 +723,15 @@ Minimum host toolchain: **Docker**. That's it — the Python interpreter lives
 inside the image, the node toolchain lives inside `node:24.2.0`, and the
 `./scalarlm` wrapper regenerates the bashly CLI inside its own container via
 `cmd/bashly.sh`.
+
+The live profile creates uniquely named server and test containers plus a
+Docker network, waits until both the API and vLLM report healthy, and runs its
+pytest smoke checks on that network. `--keyword` / `--mark` are forwarded to
+the live pytest process. The harness manages the test process explicitly and
+removes both containers and the network on success, failure, SIGINT, or
+SIGTERM. Set `SCALARLM_MODEL_CACHE` to override the default persistent cache
+at `./models`. On failure, the harness prints the final 400 server-log lines
+before cleanup.
 
 ### 8.3 Fail-fast and parallelism
 
