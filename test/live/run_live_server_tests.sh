@@ -93,10 +93,12 @@ server_name="scalarlm-live-server-$run_id"
 test_name="scalarlm-live-tests-$run_id"
 network_name="scalarlm-live-network-$run_id"
 model_cache="${SCALARLM_MODEL_CACHE:-$REPO_ROOT/models}"
+flashinfer_cache="${FLASHINFER_CACHE_DIR:-$HOME/.cache/flashinfer}"
+vllm_cache="${VLLM_CACHE_DIR:-$HOME/.cache/vllm}"
 test_runner_pid=""
 forwarded_signal=""
 
-mkdir -p "$model_cache"
+mkdir -p "$model_cache" "$flashinfer_cache" "$vllm_cache"
 
 cleanup() {
     if [ -n "$test_runner_pid" ] && [ -z "$forwarded_signal" ]; then
@@ -161,6 +163,8 @@ docker run --detach \
     -e "SCALARLM_ENABLE_TOKENFORMER=true" \
     -e "SCALARLM_MODEL=$model" \
     -v "$model_cache:/root/.cache/huggingface" \
+    -v "$flashinfer_cache:/root/.cache/flashinfer" \
+    -v "$vllm_cache:/root/.cache/vllm" \
     -v "$REPO_ROOT/infra/cray_infra:/app/cray/infra/cray_infra:ro" \
     -v "$REPO_ROOT/scripts:/app/cray/scripts:ro" \
     -v "$REPO_ROOT/ml:/app/cray/ml:ro" \
