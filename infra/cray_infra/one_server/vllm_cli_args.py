@@ -11,6 +11,42 @@ import posixpath
 import re
 
 
+# Highest gpu_memory_utilization considered safe on a unified-memory GPU.
+# Above this the host, which shares that memory, is left without working room.
+UMA_SAFE_GPU_MEMORY_UTILIZATION = 0.80
+
+
+def uma_memory_warning(
+    gpu_memory_utilization: float, is_integrated_gpu: bool
+) -> str | None:
+    """Warn when a gpu_memory_utilization is unsafe on a unified-memory GPU.
+
+    Integrated GPUs have no separate VRAM, so vLLM sizes the KV cache against
+    system RAM and claims it in one step. Measured on a 121 GiB GB10, 0.92
+    takes ~107 GiB and leaves the machine unresponsive; cgroup limits do not
+    contain it, because the allocation is not charged to the process.
+
+    Args:
+        gpu_memory_utilization: The configured fraction.
+        is_integrated_gpu: Whether the target GPU shares memory with the host.
+
+    Returns:
+        A warning message, or None when the value is safe or the GPU is
+        discrete.
+    """
+    if not is_integrated_gpu:
+        return None
+    if gpu_memory_utilization <= UMA_SAFE_GPU_MEMORY_UTILIZATION:
+        return None
+    return (
+        f"gpu_memory_utilization={gpu_memory_utilization} on a unified-memory "
+        "GPU: this is a fraction of all system RAM, not of separate VRAM. "
+        f"Above {UMA_SAFE_GPU_MEMORY_UTILIZATION} the host can be left without "
+        "working room and stop responding. Lower it in cray-config.yaml if the "
+        "server or the machine hangs on startup."
+    )
+
+
 def build_vllm_cli_args(config: dict) -> list[str]:
     """Build the base vLLM CLI arg list from a scalarlm config dict.
 

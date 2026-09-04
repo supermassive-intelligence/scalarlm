@@ -80,6 +80,14 @@ class Config(BaseModel):
     inference_work_queue_path: str = "/app/cray/inference_work_queue.sqlite"
     upload_base_path: str = "/app/cray/inference_requests"
 
+    # Fraction of device memory vLLM may claim, most of it for the KV cache.
+    #
+    # On unified-memory parts (GB10 / DGX Spark, GH200, Jetson) there is no
+    # separate VRAM, so this is a fraction of *all* system RAM: a high value
+    # starves the host instead of merely filling a card. Measured on a 121 GiB
+    # GB10, vLLM's own default of 0.92 claims ~107 GiB in a single step and
+    # leaves the machine unresponsive; 0.80 leaves ~20 GiB and is stable.
+    # create_vllm warns when this is raised past the safe band on such a host.
     gpu_memory_utilization: float = 0.40
     max_model_length: int = 0  # 0 = no cap; resolved dynamically from vLLM at runtime
     default_max_output_tokens: int = 128
