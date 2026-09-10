@@ -6,14 +6,31 @@ import torch
 from cray_infra.util.get_config import get_config
 from cray_infra.huggingface.get_hf_token import get_hf_token
 
-from vllm.entrypoints.openai.api_server import build_app, decorate_logs, \
-    init_app_state, setup_server, \
-    build_async_engine_client, get_uvicorn_log_config
+try:
+    from vllm.entrypoints.launchers.app import build_app
+    from vllm.entrypoints.launchers.cli_args import make_arg_parser
+    from vllm.entrypoints.launchers.api_server.app_state import init_app_state
+    from vllm.entrypoints.launchers.api_server.entry import build_async_engine_client
+    from vllm.entrypoints.launchers.launcher import setup_server, serve_http
+    from vllm.entrypoints.launchers.utils.server_utils import get_uvicorn_log_config
+except ModuleNotFoundError as exc:
+    # Keep the currently pinned v0.27.1 fork usable during the v0.29.0 rollout.
+    if exc.name != "vllm.entrypoints.launchers":
+        raise
+    from vllm.entrypoints.openai.api_server import (
+        build_app,
+        init_app_state,
+        setup_server,
+        build_async_engine_client,
+        get_uvicorn_log_config,
+    )
+    from vllm.entrypoints.launcher import serve_http
+    from vllm.entrypoints.openai.cli_args import make_arg_parser
+
+from vllm.utils.system_utils import decorate_logs
 
 from vllm.tool_parsers import ToolParserManager
-from vllm.entrypoints.launcher import serve_http
 
-from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 # NOTE: `log_non_default_args` used to be imported here from
