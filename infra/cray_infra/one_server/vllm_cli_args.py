@@ -11,28 +11,28 @@ import posixpath
 import re
 
 
-# Highest gpu_memory_utilization considered safe on a unified-memory GPU.
-# Above this the host, which shares that memory, is left without working room.
+# Warning threshold based on observations on a 121 GiB GB10. This is not a
+# universal safety limit: host headroom also depends on other memory users.
 UMA_SAFE_GPU_MEMORY_UTILIZATION = 0.80
 
 
 def uma_memory_warning(
     gpu_memory_utilization: float, is_integrated_gpu: bool
 ) -> str | None:
-    """Warn when a gpu_memory_utilization is unsafe on a unified-memory GPU.
+    """Warn above the configured memory threshold on an integrated GPU.
 
-    Integrated GPUs have no separate VRAM, so vLLM sizes the KV cache against
-    system RAM and claims it in one step. Measured on a 121 GiB GB10, 0.92
-    takes ~107 GiB and leaves the machine unresponsive; cgroup limits do not
-    contain it, because the allocation is not charged to the process.
+    Integrated GPUs share system RAM with the CPU. vLLM budgets a fraction
+    of device-visible memory for its model executor; KV-cache capacity is
+    the remainder after non-KV memory and applicable graph reservations.
+    A large budget can leave too little headroom for the host.
 
     Args:
         gpu_memory_utilization: The configured fraction.
         is_integrated_gpu: Whether the target GPU shares memory with the host.
 
     Returns:
-        A warning message, or None when the value is safe or the GPU is
-        discrete.
+        A warning message, or None at/below the threshold or on a discrete
+        GPU. Absence of a warning does not guarantee sufficient headroom.
     """
     if not is_integrated_gpu:
         return None

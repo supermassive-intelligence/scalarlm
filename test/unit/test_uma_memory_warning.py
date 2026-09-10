@@ -1,11 +1,9 @@
 """Unit tests for the unified-memory gpu_memory_utilization warning.
 
-Integrated GPUs (GB10 / DGX Spark, GH200, Jetson) have no separate VRAM, so
-vLLM sizes the KV cache against system RAM and claims it in one step. Measured
-on a 121 GiB GB10, 0.92 takes ~107 GiB and leaves the machine unresponsive,
-while cgroup limits do not contain it. The warning is the only signal an
-operator gets before the host stops responding, so it must fire on integrated
-GPUs and stay silent on discrete ones.
+Integrated GPUs such as GB10 / DGX Spark and Jetson share system RAM with
+the CPU. The warning must fire above the configured threshold on integrated
+GPUs and stay silent on discrete ones. The threshold is a heuristic, not a
+guarantee of sufficient host headroom.
 """
 
 from __future__ import annotations
