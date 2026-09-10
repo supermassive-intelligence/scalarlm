@@ -80,6 +80,14 @@ class Config(BaseModel):
     inference_work_queue_path: str = "/app/cray/inference_work_queue.sqlite"
     upload_base_path: str = "/app/cray/inference_requests"
 
+    # Fraction of device memory budgeted for the vLLM model executor.
+    # KV-cache capacity subtracts profiled non-KV memory and applicable
+    # CUDA-graph reservations from this budget.
+    #
+    # Integrated GPUs such as GB10 / DGX Spark and Jetson share system RAM
+    # with the CPU. Leave headroom for the OS and other processes; the budget
+    # is not a hard limit on total host memory use. create_vllm warns above
+    # 0.80 on integrated GPUs, but values below that are not guaranteed safe.
     gpu_memory_utilization: float = 0.40
     max_model_length: int = 0  # 0 = no cap; resolved dynamically from vLLM at runtime
     default_max_output_tokens: int = 128

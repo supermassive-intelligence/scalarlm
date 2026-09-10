@@ -33,7 +33,10 @@ logger = logging.getLogger(__name__)
 # Re-export so the arg-builder is reachable from its historical location
 # for any downstream importers, while the torch-free implementation lives
 # in vllm_cli_args for unit tests.
-from cray_infra.one_server.vllm_cli_args import build_vllm_cli_args  # noqa: E402
+from cray_infra.one_server.vllm_cli_args import (  # noqa: E402
+    build_vllm_cli_args,
+    uma_memory_warning,
+)
 
 async def create_vllm(server_status, port):
 
@@ -56,6 +59,17 @@ async def create_vllm(server_status, port):
             print(f"DEBUG: Setting VLLM_BACKEND=flashmla for sm_version {sm_version}")
         else:
             print(f"DEBUG: Using default VLLM_BACKEND for sm_version {sm_version}")
+
+        # Unified-memory parts share their memory with the host, so
+        # gpu_memory_utilization decides how much of the whole machine vLLM
+        # takes. Warn rather than clamp: an operator who raised it may have a
+        # reason, but should see why the box then stops responding.
+        warning = uma_memory_warning(
+            float(config["gpu_memory_utilization"]),
+            torch.cuda.get_device_properties(0).is_integrated,
+        )
+        if warning:
+            logger.warning(warning)
 
     if config['dtype'] == 'auto':
         # Set to float32 on the cpu

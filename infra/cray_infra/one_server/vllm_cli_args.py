@@ -11,6 +11,42 @@ import posixpath
 import re
 
 
+# Warning threshold based on observations on a 121 GiB GB10. This is not a
+# universal safety limit: host headroom also depends on other memory users.
+UMA_SAFE_GPU_MEMORY_UTILIZATION = 0.80
+
+
+def uma_memory_warning(
+    gpu_memory_utilization: float, is_integrated_gpu: bool
+) -> str | None:
+    """Warn above the configured memory threshold on an integrated GPU.
+
+    Integrated GPUs share system RAM with the CPU. vLLM budgets a fraction
+    of device-visible memory for its model executor; KV-cache capacity is
+    the remainder after non-KV memory and applicable graph reservations.
+    A large budget can leave too little headroom for the host.
+
+    Args:
+        gpu_memory_utilization: The configured fraction.
+        is_integrated_gpu: Whether the target GPU shares memory with the host.
+
+    Returns:
+        A warning message, or None at/below the threshold or on a discrete
+        GPU. Absence of a warning does not guarantee sufficient headroom.
+    """
+    if not is_integrated_gpu:
+        return None
+    if gpu_memory_utilization <= UMA_SAFE_GPU_MEMORY_UTILIZATION:
+        return None
+    return (
+        f"gpu_memory_utilization={gpu_memory_utilization} on a unified-memory "
+        "GPU: this is a fraction of all system RAM, not of separate VRAM. "
+        f"Above {UMA_SAFE_GPU_MEMORY_UTILIZATION} the host can be left without "
+        "working room and stop responding. Lower it in cray-config.yaml if the "
+        "server or the machine hangs on startup."
+    )
+
+
 def build_vllm_cli_args(config: dict) -> list[str]:
     """Build the base vLLM CLI arg list from a scalarlm config dict.
 
