@@ -186,6 +186,12 @@ WORKDIR ${INSTALL_ROOT}
 # MAIN IMAGE
 FROM vllm AS infra
 
+# Docker inherits INSTALL_ROOT from the vllm stage. Re-declare it explicitly
+# as a compatibility workaround for the observed Podman/Buildah build, where
+# it expanded to an empty string in this stage. That misplaced the MPI
+# sources and PYTHONPATH entries under / instead of /app/cray.
+ARG INSTALL_ROOT=/app/cray
+
 # Build GPU-aware MPI
 COPY ./infra/cray_infra/training/gpu_aware_mpi ${INSTALL_ROOT}/infra/cray_infra/training/gpu_aware_mpi
 RUN python3 ${INSTALL_ROOT}/infra/cray_infra/training/gpu_aware_mpi/setup.py bdist_wheel --dist-dir=dist && \
