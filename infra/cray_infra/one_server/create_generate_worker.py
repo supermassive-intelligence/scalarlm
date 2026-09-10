@@ -25,9 +25,15 @@ from vllm.entrypoints.openai.models.serving import (
     OpenAIServingModels,
 )
 
-from vllm.entrypoints.openai.engine.protocol import (
-    ErrorResponse,
-)
+try:
+    from vllm.entrypoints.serve.engine.protocol import ErrorResponse
+except ModuleNotFoundError as exc:
+    if exc.name not in {
+        "vllm.entrypoints.serve.engine",
+        "vllm.entrypoints.serve.engine.protocol",
+    }:
+        raise
+    from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
