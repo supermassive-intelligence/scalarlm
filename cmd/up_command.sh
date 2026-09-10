@@ -34,8 +34,10 @@ else
     docker_platform="linux/amd64"
     if [ "$sm_arch" == "auto" ]; then
         echo "Autodetect sm_arch"
-        # Auto-detect the architecture of the GPU using nvidia-smi
-        sm_arch=($(nvidia-smi --query-gpu=compute_cap --format=csv,noheader))
+        # Auto-detect the architecture of every GPU using nvidia-smi, deduped
+        # and space-joined into a single TORCH_CUDA_ARCH_LIST-compatible string.
+        # (A bash array here would silently collapse to element 0 below.)
+        sm_arch=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | sort -u | paste -sd' ')
     fi
 fi
 

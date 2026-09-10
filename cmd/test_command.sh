@@ -233,6 +233,7 @@ pytest_stage() {
   # source, not the (possibly stale) image-baked copy. pytest.ini is at the
   # repo root, so we bind it explicitly on top of $WORKDIR.
   local -a mounts=(
+    "-v" "$REPO_ROOT/cmd:/app/cray/cmd:ro"
     "-v" "$REPO_ROOT/infra/cray_infra:/app/cray/infra/cray_infra"
     "-v" "$REPO_ROOT/scripts:/app/cray/scripts"
     "-v" "$REPO_ROOT/ml:/app/cray/ml"
