@@ -730,6 +730,90 @@ def patch_gemma4_scalarlm_state_dict_export(vllm_root: Path) -> None:
     print(f"[vllm_patches] Applied gemma4 state_dict export to {target}")
 
 
+def patch_sm120_diffusion_attention_tiling(vllm_root: Path) -> None:
+    """Tile diffusion canvas attention for RTX PRO 6000 Blackwell (sm120).
+
+    `unified_attention` only retunes prefill-shaped calls -- DiffusionGemma's
+    256-query canvas passes -- for capability family 100 (B200) and head 256.
+    On sm120 every canvas pass falls back to the decode-oriented defaults
+    (BLOCK_M 16, TILE 32, 4 warps), which under-tile both the head-256
+    sliding layers and the head-512 full-attention layers.
+
+    BLOCK_M 64 / TILE_SIZE_PREFILL 64 / 8 warps / 1 stage fits sm120's
+    ~99 KiB shared memory per block (2 stages or a 128 tile do not). Measured
+    on nvidia/diffusiongemma-26B-A4B-it-NVFP4 with fp8 KV, replaying
+    production's own requests on one RTX PRO 6000 Max-Q:
+      head-512 layers 2.4-3.1x, head-256 layers 1.15-1.5x (nsys: full-attention
+      layers 8.66 -> 3.76 ms per pass at max-num-seqs 4);
+      end to end 328 -> 526 tok/s (1.60x) at production settings.
+    Outputs match the default tiling to ~1e-4 (tile sizes change only the
+    reduction order).
+
+    Belongs upstream in vllm-fork (and vllm-project, which has the same
+    gating); carried here so the image can ship it on the pinned commit.
+    """
+    target = vllm_root / "vllm" / "v1" / "attention" / "ops" / "triton_unified_attention.py"
+    if not target.exists():
+        print(f"[vllm_patches] {target} not found; skipping sm120 attention tiling patch")
+        return
+
+    src = target.read_text()
+    if "tuned_sm120" in src:
+        print("[vllm_patches] sm120 attention tiling already present; skipping")
+        return
+
+    anchor_launch = (
+        "        launch_num_warps = 8\n"
+        "        launch_num_stages = 2\n"
+        "\n"
+        "    # Ideally we would launch with kernel with:\n"
+    )
+    anchor_tile = (
+        "    if tuned_large_head:\n"
+        "        TILE_SIZE_PREFILL = 128\n"
+    )
+    for name, anchor in (("launch", anchor_launch), ("tile", anchor_tile)):
+        assert src.count(anchor) == 1, (
+            f"triton_unified_attention.py: expected exactly one {name} anchor. "
+            "Re-anchor this patch."
+        )
+
+    patched = src.replace(
+        anchor_launch,
+        "        launch_num_warps = 8\n"
+        "        launch_num_stages = 2\n"
+        "\n"
+        "    # ScalarLM patch: the same prefill-shaped canvas passes on RTX PRO 6000\n"
+        "    # Blackwell (sm120), head 256 and 512. 8 warps x 64 rows with a 64 KV\n"
+        "    # tile and one stage fits sm120's shared memory; 2.4-3.1x on head 512.\n"
+        "    tuned_sm120 = (\n"
+        "        head_size in (256, 512)\n"
+        "        and max_seqlen_q > 1\n"
+        "        and num_queries_per_kv <= 16\n"
+        "        and current_platform.is_device_capability_family(120)\n"
+        "    )\n"
+        "    if tuned_sm120:\n"
+        "        BLOCK_M = 64\n"
+        "        BLOCK_Q = BLOCK_M // num_queries_per_kv\n"
+        "        launch_num_warps = 8\n"
+        "        launch_num_stages = 1\n"
+        "\n"
+        "    # Ideally we would launch with kernel with:\n",
+        1,
+    )
+    patched = patched.replace(
+        anchor_tile,
+        anchor_tile + "    if tuned_sm120:\n        TILE_SIZE_PREFILL = 64\n",
+        1,
+    )
+
+    assert patched != src, "patch produced identical output — something's wrong"
+    compile(patched, str(target), "exec")
+
+    target.write_text(patched)
+    print(f"[vllm_patches] Applied sm120 diffusion attention tiling to {target}")
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print(f"usage: {sys.argv[0]} <vllm-root>", file=sys.stderr)
@@ -745,6 +829,7 @@ def main() -> int:
     patch_llama_scalarlm_state_dict_export(vllm_root)
     patch_latest_checkpoint_selection(vllm_root)
     patch_diffusion_gemma_sc_embeds_dtype(vllm_root)
+    patch_sm120_diffusion_attention_tiling(vllm_root)
     print("[vllm_patches] All patches applied.")
     return 0
 
