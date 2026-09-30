@@ -730,6 +730,431 @@ def patch_gemma4_scalarlm_state_dict_export(vllm_root: Path) -> None:
     print(f"[vllm_patches] Applied gemma4 state_dict export to {target}")
 
 
+FUSED_DIFFUSION_SAMPLER_SRC = '''# SPDX-License-Identifier: Apache-2.0
+"""Fused vocab-side sampling for DiffusionGemma (inference, no logprobs).
+
+`_compiled_sample_step` in diffusion_gemma.py works on the full fp32 ``[num_decode * CL,
+vocab]`` logits with several whole-tensor passes: temperature scaling, a Gumbel noise
+tensor the size of the logits, two argmaxes, log_softmax, exp, the entropy product and a
+bf16 cast of the probabilities for the self-conditioning matmul. At 32 decoding requests
+that is ~8.6 GB per fp32 pass, and in production profiles those passes cost about as much
+GPU time as the two vocab GEMMs.
+
+Here the same quantities come from two streaming kernels:
+
+  _row_stats   one read of each row: online max / sum-exp / sum(exp * s) (entropy),
+               argmax(s) and argmax(s + gumbel) with the noise generated in-kernel
+  _row_probs   one read of each row: p = exp(s - logZ), written in bf16 -- the dtype
+               the original casts probs to before the self-conditioning matmul
+
+then the matmul and the small per-canvas logic (entropy-bound mask, history,
+convergence), which is copied unchanged from `_compiled_sample_step`.
+
+Same math up to floating-point summation order; the Gumbel noise is a different random
+stream from the same distribution (u ~ U(0,1) clamped at 1e-20, g = -log(-log u)).
+Requests that ask for logprobs keep using the original path (it needs the scaled logits).
+"""
+import torch
+import triton
+import triton.language as tl
+from triton.language.extra import libdevice
+
+
+@triton.jit
+def _row_stats(
+    x_ptr, inv_t_ptr, seed,
+    m_ptr, l_ptr, a_ptr, am_ptr, gm_ptr,
+    V, stride_x, CL, cap,
+    BLOCK: tl.constexpr, SOFTCAP: tl.constexpr,
+):
+    row = tl.program_id(0)
+    inv_t = tl.load(inv_t_ptr + row // CL)
+    base = x_ptr + row.to(tl.int64) * stride_x
+    offs = tl.arange(0, BLOCK)
+    m = tl.full([BLOCK], float("-inf"), tl.float32)   # per-lane running max of s
+    l = tl.zeros([BLOCK], tl.float32)                 # sum exp(s - m)
+    a = tl.zeros([BLOCK], tl.float32)                 # sum exp(s - m) * (m - s) >= 0: entropy = log l + a / l
+    best = tl.full([BLOCK], float("-inf"), tl.float32)
+    best_i = tl.zeros([BLOCK], tl.int32)
+    gbest = tl.full([BLOCK], float("-inf"), tl.float32)
+    gbest_i = tl.zeros([BLOCK], tl.int32)
+    for start in range(0, V, BLOCK):
+        idx = start + offs
+        mask = idx < V
+        x = tl.load(base + idx, mask=mask, other=float("-inf")).to(tl.float32)
+        if SOFTCAP:   # raw LM-head logits: fp32 tanh softcap as compute_logits does, -inf kept
+            x = tl.where(x == float("-inf"), x, libdevice.tanh(x / cap) * cap)
+        s = x * inv_t
+        # argmax(s): strict > keeps the first index per lane; lanes are merged below
+        upd = s > best
+        best = tl.where(upd, s, best)
+        best_i = tl.where(upd, idx, best_i)
+        # Gumbel-max sample
+        u = tl.rand(seed, row.to(tl.int64) * V + idx)
+        u = tl.maximum(u, 1e-20)
+        g = s - tl.log(-tl.log(u))
+        gupd = g > gbest
+        gbest = tl.where(gupd, g, gbest)
+        gbest_i = tl.where(gupd, idx, gbest_i)
+        # online softmax statistics, per lane
+        # a is kept relative to the running max so every term is >= 0 (no cancellation
+        # near zero entropy, where the 0.005 confidence threshold sits):
+        #   sum_old e^(s-m')(m'-s) = alpha * (a + (m'-m) * l),  alpha = e^(m-m')
+        m_new = tl.maximum(m, s)
+        alpha = tl.where(m_new == float("-inf"), 0.0, tl.exp(m - m_new))
+        dm = tl.where(m == float("-inf"), 0.0, m_new - m)
+        e = tl.where(s == float("-inf"), 0.0, tl.exp(s - m_new))
+        es = tl.where(s == float("-inf"), 0.0, e * (m_new - s))
+        a = alpha * (a + dm * l) + es
+        l = l * alpha + e
+        m = m_new
+    # merge lanes
+    M = tl.max(m, 0)
+    scale = tl.where(m == float("-inf"), 0.0, tl.exp(m - M))
+    L = tl.sum(l * scale, 0)
+    A = tl.sum(scale * (a + tl.where(m == float("-inf"), 0.0, M - m) * l), 0)
+    bmax = tl.max(best, 0)
+    am = tl.min(tl.where(best == bmax, best_i, 2147483647), 0)     # first index of the max
+    gmax = tl.max(gbest, 0)
+    gm = tl.min(tl.where(gbest == gmax, gbest_i, 2147483647), 0)
+    tl.store(m_ptr + row, M)
+    tl.store(l_ptr + row, L)
+    tl.store(a_ptr + row, A)
+    tl.store(am_ptr + row, am)
+    tl.store(gm_ptr + row, gm)
+
+
+@triton.jit
+def _row_probs(
+    x_ptr, inv_t_ptr, logz_ptr, p_ptr,
+    V, stride_x, stride_p, CL, v_start, v_len, cap,
+    BLOCK: tl.constexpr, SOFTCAP: tl.constexpr,
+):
+    row = tl.program_id(0)
+    col0 = tl.program_id(1) * BLOCK
+    inv_t = tl.load(inv_t_ptr + row // CL)
+    logz = tl.load(logz_ptr + row)
+    idx = col0 + tl.arange(0, BLOCK)
+    mask = idx < v_len
+    x = tl.load(x_ptr + row.to(tl.int64) * stride_x + v_start + idx, mask=mask, other=float("-inf")).to(tl.float32)
+    if SOFTCAP:
+        x = tl.where(x == float("-inf"), x, libdevice.tanh(x / cap) * cap)
+    p = tl.exp(x * inv_t - logz)
+    tl.store(p_ptr + row.to(tl.int64) * stride_p + idx, p.to(tl.bfloat16), mask=mask)
+
+
+def vocab_stats_and_probs(logits, temp, CL, sc_vocab_start, sc_vocab_end, block=2048, softcap=0.0):
+    """logits [n*CL, V] (fp32 softcapped, or raw with softcap=cap to apply it in-kernel), temp [n] -> argmax, gumbel-argmax, entropy [n*CL],
+    probs bf16 [n*CL, sc_vocab_end - sc_vocab_start]."""
+    N, V = logits.shape
+    dev = logits.device
+    inv_t = (1.0 / temp.float().clamp(min=1e-10)).contiguous()
+    m = torch.empty(N, device=dev, dtype=torch.float32)
+    l = torch.empty_like(m)
+    a = torch.empty_like(m)
+    am = torch.empty(N, device=dev, dtype=torch.int32)
+    gm = torch.empty_like(am)
+    seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
+    _row_stats[(N,)](logits, inv_t, seed, m, l, a, am, gm, V, logits.stride(0), CL, float(softcap or 1.0),
+                     BLOCK=block, SOFTCAP=bool(softcap), num_warps=8)
+    logz = m + torch.log(l)
+    entropy = torch.log(l) + a / l
+    v_len = sc_vocab_end - sc_vocab_start
+    probs = torch.empty(N, v_len, device=dev, dtype=torch.bfloat16)
+    _row_probs[(N, triton.cdiv(v_len, block))](logits, inv_t, logz, probs, V, logits.stride(0),
+                                               probs.stride(0), CL, sc_vocab_start, v_len, float(softcap or 1.0),
+                                               BLOCK=block, SOFTCAP=bool(softcap), num_warps=8)
+    return am.long(), gm.long(), entropy, probs
+
+
+@torch.compile(dynamic=True)
+def _post_sample(
+    new_tokens, argmax_tokens, token_entropy, soft_embeds,
+    decode_slots, decode_idx, all_slots, valid_canvas_len,
+    canvas, argmax_canvas, step_tensor, is_encoder_phase, confident_tensor, sc_embeds,
+    history, history_len_tensor, sampled, num_sampled, draft_tokens,
+    max_denoising_steps: float, confidence_threshold: float, vocab_size: int,
+    CL: int, ST: int, entropy_bound: float,
+):
+    """Phases 3b-7 of `_compiled_sample_step`, unchanged, on the fused kernels' outputs."""
+    num_decode = decode_slots.shape[0]
+    device = decode_slots.device
+    new_tokens = new_tokens.view(num_decode, CL)
+    argmax_tokens = argmax_tokens.view(num_decode, CL)
+    token_entropy = token_entropy.view(num_decode, CL)
+
+    mean_entropy = token_entropy.mean(dim=-1)
+    confident_tensor[decode_slots] = mean_entropy < confidence_threshold
+
+    sorted_ent, sorted_idx = torch.sort(token_entropy, dim=-1)
+    cumsum_ent = torch.cumsum(sorted_ent, dim=-1)
+    cummax_ent = torch.cummax(sorted_ent, dim=-1).values
+    sorted_mask = (cumsum_ent - cummax_ent) <= entropy_bound
+    eb_mask = torch.zeros_like(sorted_mask)
+    eb_mask.scatter_(1, sorted_idx, sorted_mask)
+
+    is_commit = is_encoder_phase[decode_slots]
+    is_denoise = ~is_commit
+    cur_step = step_tensor[decode_slots].float()
+    new_step_val = torch.where(
+        is_denoise, (cur_step + 1).to(step_tensor.dtype), step_tensor.new_zeros(num_decode))
+    step_tensor[decode_slots] = new_step_val
+
+    random_tokens = torch.randint(0, vocab_size, (num_decode, CL), device=device, dtype=canvas.dtype)
+    denoise_canvas = torch.where(eb_mask, new_tokens.to(canvas.dtype), random_tokens)
+    canvas[decode_slots] = torch.where(is_commit.unsqueeze(1), random_tokens, denoise_canvas)
+
+    hist_len = history_len_tensor[decode_slots]
+    write_pos = hist_len % ST
+    for i in range(ST):
+        write_here = ((write_pos == i) & is_denoise).unsqueeze(1)
+        history[decode_slots, i] = torch.where(
+            write_here, argmax_tokens.to(history.dtype), history[decode_slots, i])
+
+    argmax_canvas[decode_slots] = torch.where(
+        is_denoise.unsqueeze(1), argmax_tokens.to(argmax_canvas.dtype), argmax_canvas[decode_slots])
+    new_hist_len = torch.where(is_denoise, hist_len + 1, hist_len.new_zeros(num_decode))
+    history_len_tensor[decode_slots] = new_hist_len
+
+    sampled[decode_idx] = argmax_canvas[decode_slots].to(sampled.dtype) * is_commit.unsqueeze(1).to(sampled.dtype)
+    num_sampled[decode_idx] = is_commit.to(num_sampled.dtype) * valid_canvas_len.to(num_sampled.dtype)
+
+    ref = history[decode_slots, 0]
+    mismatch = torch.zeros(num_decode, device=device, dtype=torch.int32)
+    for h in range(1, ST):
+        mismatch = mismatch + (ref != history[decode_slots, h]).sum(dim=-1).int()
+    stable = mismatch == 0
+    step_after = step_tensor[decode_slots]
+    converged = (stable & confident_tensor[decode_slots] & (new_hist_len >= ST)) | (
+        step_after >= max_denoising_steps)
+    is_encoder_phase[decode_slots] = torch.where(is_commit, is_commit.new_zeros(num_decode), converged)
+
+    sc_keep = (is_denoise & ~is_encoder_phase[decode_slots])[:, None, None]
+    sc_embeds[decode_slots] = (soft_embeds.view(num_decode, CL, -1) * sc_keep).to(sc_embeds.dtype)
+
+    newly_converged = (converged & is_denoise).unsqueeze(1)
+    canvas[decode_slots] = torch.where(newly_converged, argmax_canvas[decode_slots], canvas[decode_slots])
+    draft_tokens[all_slots, :CL] = canvas[all_slots]
+
+
+def fused_sample_step(
+    logits, decode_slots, decode_idx, all_slots, valid_canvas_len,
+    canvas, argmax_canvas, step_tensor, is_encoder_phase, confident_tensor, sc_embeds,
+    embed_weight, normalizer, history, history_len_tensor, sampled, num_sampled, draft_tokens,
+    max_denoising_steps, t_min, t_max, confidence_threshold, vocab_size, CL, ST, entropy_bound,
+    sc_vocab_start, sc_vocab_end, tp_size, tp_group_name, softcap=0.0,
+):
+    """Drop-in for `_compiled_sample_step` when no logprobs are needed (returns None).
+    softcap > 0: `logits` are the raw LM-head output and the softcap is applied in-kernel."""
+    steps_f = step_tensor[decode_slots].float()
+    remaining = (max_denoising_steps - steps_f).clamp(min=1.0)
+    temp = t_min + (t_max - t_min) * (remaining / max_denoising_steps)
+    argmax_tokens, new_tokens, token_entropy, probs = vocab_stats_and_probs(
+        logits, temp, CL, sc_vocab_start, sc_vocab_end, softcap=softcap)
+    if not bool((temp > 0).all()):          # temp == 0 means greedy in the original
+        greedy = (temp <= 0).repeat_interleave(CL)
+        new_tokens = torch.where(greedy, argmax_tokens, new_tokens)
+    soft_embeds = torch.matmul(probs, embed_weight[: sc_vocab_end - sc_vocab_start])
+    if tp_size > 1:
+        soft_embeds = torch.ops.vllm.all_reduce(soft_embeds, group_name=tp_group_name)
+    soft_embeds = soft_embeds * normalizer
+    _post_sample(
+        new_tokens, argmax_tokens, token_entropy, soft_embeds,
+        decode_slots, decode_idx, all_slots, valid_canvas_len,
+        canvas, argmax_canvas, step_tensor, is_encoder_phase, confident_tensor, sc_embeds,
+        history, history_len_tensor, sampled, num_sampled, draft_tokens,
+        max_denoising_steps, confidence_threshold, vocab_size, CL, ST, entropy_bound)
+    return None
+'''
+
+
+def patch_diffusion_gemma_fused_sampler(vllm_root: Path) -> None:
+    """Fused vocab-side sampling for DiffusionGemma's denoising steps.
+
+    `_compiled_sample_step` runs several whole-tensor passes over the fp32
+    ``[num_decode * CL, vocab]`` logits: temperature scaling, a Gumbel noise tensor
+    the size of the logits, two argmaxes, log_softmax, exp, the entropy product and a
+    bf16 cast of the probabilities. At 32 decoding requests one fp32 copy is ~8.6 GB,
+    and on RTX PRO 6000 those passes cost about as much GPU time as the two
+    vocab-sized GEMMs.
+
+    This patch adds `scalarlm_fused_sampler.py`, two streaming Triton kernels plus the
+    unchanged per-canvas logic, and routes decode steps through it when no logprobs
+    are requested. Requests that ask for logprobs keep the original path.
+
+    The final-logit softcap moves into the same kernels: the sampling path gets the
+    raw LM-head logits (tagged with the softcap value, see
+    `patch_model_runner_fused_softcap`) instead of a separate fp32 softcapped copy --
+    in eager mode that copy costs four more whole-tensor passes. Requests that ask for
+    logprobs get the softcap applied exactly as before and use the original path.
+
+    Results match the original: argmax and all per-request state are identical;
+    entropy agrees to ~1e-6 near zero; the Gumbel noise is a different random stream
+    from the same distribution. Sampler step 2.1-2.25x faster.
+
+    Measured on one RTX PRO 6000 Max-Q, production requests, 20 in flight, eager, with
+    cap 32 and the sm120 attention tiling: 510 -> 815 tok/s (production settings: 328).
+    Quality: 1,000 paired nano-rl tasks vs production settings, reward -0.004
+    (95% CI -0.027 .. +0.020).
+
+    Opt out with SCALARLM_FUSED_DIFFUSION_SAMPLER=0 (disables both patches' effect).
+    """
+    models = vllm_root / "vllm" / "model_executor" / "models"
+    target = models / "diffusion_gemma.py"
+    if not target.exists():
+        print(f"[vllm_patches] {target} not found; skipping fused diffusion sampler")
+        return
+
+    src = target.read_text()
+    if "scalarlm_fused_sampler" in src:
+        print("[vllm_patches] fused diffusion sampler already present; skipping")
+        return
+
+    anchor_budget = (
+        "        group = max(num_decode, 1)\n"
+        "        if num_decode > 0:\n"
+        "            free, _ = current_platform.mem_get_info()\n"
+        "            # ~10 transient fp32 copies of [group * CL, vocab] inside the step\n"
+        "            # (eager peaks at ~8; pad for allocator overhead and small tensors).\n"
+        "            bytes_per_req = CL * self.vocab_size * 4 * 10\n"
+    )
+    anchor_call = (
+        "            scaled = _compiled_sample_step(\n"
+        "                logits[start_req * CL : end_req * CL],\n"
+    )
+    anchor_logits = (
+        "    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:\n"
+    )
+    anchor_prefill = (
+        "        if input_batch.num_draft_tokens == 0:\n"
+        "            return self._handle_prefill(input_batch, device)\n"
+    )
+    anchor_call_end = (
+        "                tp_group_name=self.tp_group_name,\n"
+        "            )\n"
+    )
+    for name, anchor in (("budget", anchor_budget), ("call", anchor_call), ("logits", anchor_logits),
+                         ("prefill", anchor_prefill), ("call_end", anchor_call_end)):
+        assert src.count(anchor) == 1, (
+            f"diffusion_gemma.py: expected exactly one {name} anchor. Re-anchor this patch."
+        )
+
+    patched = src.replace(
+        anchor_budget,
+        "        # ScalarLM patch: fused vocab-side sampling (scalarlm_fused_sampler.py) when\n"
+        "        # no logprobs are needed. It keeps one bf16 [group * CL, vocab] probs buffer\n"
+        "        # instead of ~10 fp32 copies of the logits.\n"
+        "        import os as _os\n"
+        "        use_fused = (\n"
+        "            _os.environ.get(\"SCALARLM_FUSED_DIFFUSION_SAMPLER\", \"1\") != \"0\"\n"
+        "            and max_num_logprobs < 0\n"
+        "        )\n"
+        "        if use_fused:\n"
+        "            from vllm.model_executor.models.scalarlm_fused_sampler import (\n"
+        "                fused_sample_step,\n"
+        "            )\n"
+        "        elif raw_softcap:\n"
+        "            # raw logits but the original path: softcap exactly as compute_logits does\n"
+        "            logits = _softcap_logits(logits, raw_softcap)\n"
+        "            raw_softcap = 0.0\n"
+        "        step_kwargs = {\"softcap\": raw_softcap} if use_fused else {}\n"
+        "        group = max(num_decode, 1)\n"
+        "        if num_decode > 0:\n"
+        "            free, _ = current_platform.mem_get_info()\n"
+        "            # ~10 transient fp32 copies of [group * CL, vocab] inside the step\n"
+        "            # (eager peaks at ~8; pad for allocator overhead and small tensors).\n"
+        "            bytes_per_req = CL * self.vocab_size * (2 * 2 if use_fused else 4 * 10)\n",
+        1,
+    )
+    patched = patched.replace(
+        anchor_call,
+        "            scaled = (fused_sample_step if use_fused else _compiled_sample_step)(\n"
+        "                logits[start_req * CL : end_req * CL],\n",
+        1,
+    )
+    patched = patched.replace(
+        anchor_logits,
+        "    def scalarlm_compute_sample_logits(\n"
+        "        self, hidden_states: torch.Tensor\n"
+        "    ) -> torch.Tensor | None:\n"
+        "        # ScalarLM patch: the sampling path's logits WITHOUT the separate fp32\n"
+        "        # softcap copy. The tensor is tagged so DiffusionSampler applies the\n"
+        "        # softcap itself (in-kernel when fused, else exactly as before).\n"
+        "        logits = self.logits_processor(self.lm_head, hidden_states)\n"
+        "        if logits is not None and self.final_logit_softcapping is not None:\n"
+        "            logits._scalarlm_softcap = float(self.final_logit_softcapping)\n"
+        "        return logits\n"
+        "\n" + anchor_logits,
+        1,
+    )
+    patched = patched.replace(
+        anchor_prefill,
+        anchor_prefill
+        + "        # ScalarLM patch: raw (not yet softcapped) logits from\n"
+        "        # scalarlm_compute_sample_logits carry their softcap value.\n"
+        "        raw_softcap = getattr(logits, \"_scalarlm_softcap\", 0.0)\n",
+        1,
+    )
+    patched = patched.replace(
+        anchor_call_end,
+        "                tp_group_name=self.tp_group_name,\n"
+        "                **step_kwargs,\n"
+        "            )\n",
+        1,
+    )
+    assert patched != src, "patch produced identical output — something's wrong"
+    compile(patched, str(target), "exec")
+    compile(FUSED_DIFFUSION_SAMPLER_SRC, "scalarlm_fused_sampler.py", "exec")
+
+    (models / "scalarlm_fused_sampler.py").write_text(FUSED_DIFFUSION_SAMPLER_SRC)
+    target.write_text(patched)
+    print(f"[vllm_patches] Applied fused diffusion sampler to {target}")
+
+
+def patch_model_runner_fused_softcap(vllm_root: Path) -> None:
+    """Sampling path: let DiffusionGemma's fused sampler apply the final-logit softcap.
+
+    `model_runner.sample()` calls `compute_logits`, which for DiffusionGemma writes an
+    fp32 softcapped copy of the ``[num_decode * CL, vocab]`` logits. When the model
+    provides `scalarlm_compute_sample_logits` (added by
+    `patch_diffusion_gemma_fused_sampler`), use it instead: it returns the raw LM-head
+    logits tagged with the softcap value, and the sampler applies the softcap inside
+    its kernels. Other models, the warm-up run and prompt logprobs keep calling
+    `compute_logits` unchanged. Grammar bitmasks still work: a masked -inf stays -inf
+    through the in-kernel softcap.
+    """
+    target = vllm_root / "vllm" / "v1" / "worker" / "gpu" / "model_runner.py"
+    if not target.exists():
+        print(f"[vllm_patches] {target} not found; skipping fused softcap")
+        return
+
+    src = target.read_text()
+    if "scalarlm_compute_sample_logits" in src:
+        print("[vllm_patches] fused softcap already present; skipping")
+        return
+
+    anchor = "        logits = self.model.compute_logits(sample_hidden_states)\n"
+    assert src.count(anchor) == 1, (
+        "model_runner.py: expected exactly one sample() compute_logits call. Re-anchor this patch."
+    )
+    patched = src.replace(
+        anchor,
+        "        # ScalarLM patch: DiffusionGemma's fused sampler applies the softcap itself.\n"
+        "        _sample_logits = getattr(self.model, \"scalarlm_compute_sample_logits\", None)\n"
+        "        if _sample_logits is not None and __import__(\"os\").environ.get(\n"
+        "            \"SCALARLM_FUSED_DIFFUSION_SAMPLER\", \"1\"\n"
+        "        ) != \"0\":\n"
+        "            logits = _sample_logits(sample_hidden_states)\n"
+        "        else:\n"
+        "            logits = self.model.compute_logits(sample_hidden_states)\n",
+        1,
+    )
+    assert patched != src, "patch produced identical output — something's wrong"
+    compile(patched, str(target), "exec")
+    target.write_text(patched)
+    print(f"[vllm_patches] Applied fused softcap to {target}")
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print(f"usage: {sys.argv[0]} <vllm-root>", file=sys.stderr)
@@ -745,6 +1170,8 @@ def main() -> int:
     patch_llama_scalarlm_state_dict_export(vllm_root)
     patch_latest_checkpoint_selection(vllm_root)
     patch_diffusion_gemma_sc_embeds_dtype(vllm_root)
+    patch_diffusion_gemma_fused_sampler(vllm_root)
+    patch_model_runner_fused_softcap(vllm_root)
     print("[vllm_patches] All patches applied.")
     return 0
 
