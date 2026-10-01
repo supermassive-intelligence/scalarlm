@@ -994,8 +994,9 @@ def patch_diffusion_gemma_fused_sampler(vllm_root: Path) -> None:
 
     Measured on one RTX PRO 6000 Max-Q, production requests, 20 in flight, eager, with
     cap 32 and the sm120 attention tiling: 510 -> 815 tok/s (production settings: 328).
-    Quality: 1,000 paired nano-rl tasks vs production settings, reward -0.004
-    (95% CI -0.027 .. +0.020).
+    Quality: 1,000 paired nano-rl tasks, mean reward 0.496 and 0.473 in two runs vs
+    0.499 for production settings; two identical runs differ by ~0.023, so no
+    detectable quality loss (any real effect <= ~0.02-0.03).
 
     Opt out with SCALARLM_FUSED_DIFFUSION_SAMPLER=0 (disables both patches' effect).
     """
