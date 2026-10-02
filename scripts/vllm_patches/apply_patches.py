@@ -751,13 +751,25 @@ then the matmul and the small per-canvas logic (entropy-bound mask, history,
 convergence), which is copied unchanged from `_compiled_sample_step`.
 
 Same math up to floating-point summation order; the Gumbel noise is a different random
-stream from the same distribution (u ~ U(0,1) clamped at 1e-20, g = -log(-log u)).
+stream from the same distribution as the original's `torch.rand_like` in fp32
+(u = k / 2^24 clamped at 1e-20, g = -log(-log u); see `_uniform24`).
 Requests that ask for logprobs keep using the original path (it needs the scaled logits).
 """
 import torch
 import triton
 import triton.language as tl
 from triton.language.extra import libdevice
+
+
+@triton.jit
+def _uniform24(seed, offset):
+    """u = k / 2^24 with k uniform in [0, 2^24): the distribution of torch.rand in fp32.
+
+    `tl.rand` rounds to nearest instead, which gives the top level (u = 1 - 2^-24) half
+    the probability and thins the far upper tail of the Gumbel noise, so low-probability
+    tokens are sampled slightly less often than with the original formula."""
+    r = tl.randint(seed, offset)
+    return ((r >> 8) & 0xFFFFFF).to(tl.float32) * 5.9604644775390625e-08
 
 
 @triton.jit
@@ -790,7 +802,7 @@ def _row_stats(
         best = tl.where(upd, s, best)
         best_i = tl.where(upd, idx, best_i)
         # Gumbel-max sample
-        u = tl.rand(seed, row.to(tl.int64) * V + idx)
+        u = _uniform24(seed, row.to(tl.int64) * V + idx)
         u = tl.maximum(u, 1e-20)
         g = s - tl.log(-tl.log(u))
         gupd = g > gbest

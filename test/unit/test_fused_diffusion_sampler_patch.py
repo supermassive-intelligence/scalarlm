@@ -1,9 +1,9 @@
 """Unit tests for the fused DiffusionGemma sampler patches.
 
 Run the patches against minimal stand-ins for vllm-fork's diffusion_gemma.py and
-v1/worker/gpu/model_runner.py carrying the exact anchors. GPU correctness of the kernels
-themselves (argmax and state identical to `_compiled_sample_step`, entropy within ~1e-6)
-is checked separately on hardware; these tests cover the source transformation.
+v1/worker/gpu/model_runner.py carrying the exact anchors. These tests cover the source
+transformation and run without a GPU; the kernels themselves are tested on hardware in
+test_fused_diffusion_sampler_kernels.py.
 """
 
 from __future__ import annotations
@@ -112,6 +112,13 @@ def test_model_runner_uses_the_raw_logits_method_only_when_present(tmp_path):
 def test_embedded_module_is_valid_python_with_the_entry_point():
     compile(FUSED_DIFFUSION_SAMPLER_SRC, "scalarlm_fused_sampler.py", "exec")
     assert "def fused_sample_step(" in FUSED_DIFFUSION_SAMPLER_SRC
+
+
+def test_gumbel_noise_uses_the_torch_rand_distribution():
+    # tl.rand rounds to nearest, which halves the mass of the top fp32 level and thins the
+    # Gumbel tail relative to the original's torch.rand_like; _uniform24 reproduces it.
+    assert "u = _uniform24(seed, row.to(tl.int64) * V + idx)" in FUSED_DIFFUSION_SAMPLER_SRC
+    assert "tl.rand(" not in FUSED_DIFFUSION_SAMPLER_SRC
 
 
 def test_applying_twice_is_a_no_op(tmp_path):
