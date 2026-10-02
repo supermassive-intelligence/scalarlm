@@ -1002,13 +1002,15 @@ def patch_diffusion_gemma_fused_sampler(vllm_root: Path) -> None:
 
     Results match the original: argmax and all per-request state are identical;
     entropy agrees to ~1e-6 near zero; the Gumbel noise is a different random stream
-    from the same distribution. Sampler step 2.1-2.25x faster.
+    from the same distribution as the original's fp32 torch.rand (tested in
+    test_fused_diffusion_sampler_kernels.py). Sampler step 2.1-2.25x faster.
 
     Measured on one RTX PRO 6000 Max-Q, production requests, 20 in flight, eager, with
     cap 32 and the sm120 attention tiling: 510 -> 815 tok/s (production settings: 328).
-    Quality: 1,000 paired nano-rl tasks, mean reward 0.496 and 0.473 in two runs vs
-    0.499 for production settings; two identical runs differ by ~0.023, so no
-    detectable quality loss (any real effect <= ~0.02-0.03).
+    Quality: no detectable loss. 28 nano-rl runs on the same 300 tasks: 20 runs with
+    this patch and the attention tiling average 0.478 mean reward, 8 runs without
+    average 0.482 (difference -0.005, standard error 0.008). One run has a standard
+    deviation of ~0.017, and production settings alone range from 0.447 to 0.507.
 
     Opt out with SCALARLM_FUSED_DIFFUSION_SAMPLER=0 (disables both patches' effect).
     """
