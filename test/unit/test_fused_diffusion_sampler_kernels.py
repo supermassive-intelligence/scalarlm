@@ -18,6 +18,8 @@ What is checked:
     vocab sizes that are not a multiple of the kernel block
   * the in-kernel softcap on raw bf16 logits equals `_softcap_logits` followed by the fp32 path
   * batch invariance: a request's deterministic outputs are bitwise equal alone and in a batch
+  * column pruning (SCALARLM_FUSED_SAMPLER_SC_COLS): the pruned self-conditioning embedding is as close to
+    the exact one as the bf16 path, the dropped probability mass is tiny, and the switch is off by default
 
 Note on the spec: fp32 Gumbel noise tops out at 16.64 (u = 1 - 2^-24), so both the original
 formula and this one undersample tokens with probability below ~1e-7 relative to exact
@@ -282,3 +284,80 @@ def test_outputs_do_not_depend_on_the_rest_of_the_batch():
     sl = slice(r * CL, (r + 1) * CL)
     am1, _, ent1, pr1 = fs.vocab_stats_and_probs(x[sl], temp[r:r + 1], CL, 0, V)
     assert torch.equal(am1, am[sl]) and torch.equal(ent1, ent[sl]) and torch.equal(pr1, pr[sl])
+
+
+# ---------------------------------------------------------------- column pruning
+def test_pruning_is_off_by_default(monkeypatch):
+    monkeypatch.delenv("SCALARLM_FUSED_SAMPLER_SC_COLS", raising=False)
+    assert fs.sc_pruned_cols() == 0
+    monkeypatch.setenv("SCALARLM_FUSED_SAMPLER_SC_COLS", "32768")
+    assert fs.sc_pruned_cols() == 32768
+    monkeypatch.setenv("SCALARLM_FUSED_SAMPLER_SC_COLS", "junk")
+    assert fs.sc_pruned_cols() == 0
+
+
+def _concentrated_logits(n_rows, temp_rows, seed, pool_size=16384):
+    """Rows shaped like the model's real distributions (measured on production traffic: the top 256
+    tokens hold a median 99.98% of a position's mass, and a 32-request batch needs under 9% of the
+    vocabulary). Each row puts its mass on 1 to 256 tokens drawn from a shared active vocabulary of
+    `pool_size` tokens, with 1e-4 of mass spread evenly over the rest. Returns softcapped logits that
+    give that distribution at each row's own temperature `temp_rows`."""
+    g = torch.Generator(device=DEV).manual_seed(seed)
+    pool = torch.randperm(V, device=DEV, generator=g)[:pool_size]
+    p = torch.full((n_rows, V), 1e-4 / V, device=DEV, dtype=torch.float64)
+    ks = torch.tensor([1, 4, 32, 256], device=DEV)
+    for i in range(n_rows):
+        k = int(ks[torch.randint(0, 4, (1,), device=DEV, generator=g)])
+        idx = pool[torch.randperm(pool_size, device=DEV, generator=g)[:k]]
+        w = -torch.log(torch.rand(k, device=DEV, generator=g, dtype=torch.float64).clamp(min=1e-9))
+        p[i, idx] += (1 - 1e-4) * w / w.sum()
+    return (temp_rows.double()[:, None] * torch.log(p)).float()
+
+
+@pytest.mark.parametrize("softcap", [0.0, 30.0])
+def test_pruned_soft_embeds_match_the_exact_ones(softcap):
+    """8 requests of rows shaped like real traffic. The pruned embedding (K = 32,768 of 262,144) must
+    be as close to the fp32 exact embedding as the unpruned bf16 path is, and drop almost no mass."""
+    n_req = 8
+    temp = torch.linspace(0.4, 0.8, n_req, device=DEV)
+    capped = _concentrated_logits(n_req * CL, temp.repeat_interleave(CL), seed=11)
+    if softcap:
+        raw = (30.0 * torch.atanh(capped / 30.0)).to(torch.bfloat16)   # raw logits whose softcap is `capped`
+        x, x_ref = raw, _capped(raw)
+    else:
+        x = x_ref = capped
+    g = torch.Generator(device=DEV).manual_seed(5)
+    E = (torch.randn(V, 2816, device=DEV, generator=g) * 0.02).to(torch.bfloat16)
+    am, gm, ent, (inv_t, logz) = fs.vocab_stats_and_probs(x, temp, CL, 0, V, softcap=softcap, want_probs=False)
+    am2, gm2, ent2, probs = fs.vocab_stats_and_probs(x, temp, CL, 0, V, softcap=softcap)
+    assert torch.equal(am, am2) and torch.equal(ent, ent2), "want_probs must not change the statistics"
+    K = 32768
+    pruned = fs.pruned_soft_embeds(x, inv_t, logz, E, CL, K, softcap=softcap).float()
+    exact = _reference(x_ref, temp, CL)[2]                                # fp64 probabilities
+    ref = (exact @ E.double()).float()
+    bf16_path = (probs @ E).float()                                        # what the unpruned path computes
+    n = ref.norm(dim=-1).clamp(min=1e-12)
+    err_pruned = ((pruned - ref).norm(dim=-1) / n)
+    err_bf16 = ((bf16_path - ref).norm(dim=-1) / n)
+    assert float(err_pruned.mean()) <= 1.5 * float(err_bf16.mean()) + 1e-4, (float(err_pruned.mean()), float(err_bf16.mean()))
+    assert float(err_pruned.max()) <= 2.0 * float(err_bf16.max()) + 1e-3, (float(err_pruned.max()), float(err_bf16.max()))
+    # the kept columns carry (almost) all the mass: recompute which columns pruning keeps
+    colmax = exact.float().amax(dim=0)
+    cols = colmax.topk(K).indices
+    dropped = 1.0 - exact.float()[:, cols].sum(-1)
+    assert float(dropped.max()) < 5e-3 and float(dropped.mean()) < 1e-4, (float(dropped.max()), float(dropped.mean()))
+
+
+def test_pruned_soft_embeds_equal_the_exact_ones_when_nothing_is_dropped():
+    """With K = V no column is dropped, so the pruned path must equal the bf16 path to rounding."""
+    n_req = 2
+    x = _capped(_logits(n_req * CL, v=4096, seed=12))
+    g = torch.Generator(device=DEV).manual_seed(6)
+    E = (torch.randn(4096, 256, device=DEV, generator=g) * 0.05).to(torch.bfloat16)
+    temp = torch.linspace(0.4, 0.8, n_req, device=DEV)
+    _, _, _, (inv_t, logz) = fs.vocab_stats_and_probs(x, temp, CL, 0, 4096, want_probs=False)
+    _, _, _, probs = fs.vocab_stats_and_probs(x, temp, CL, 0, 4096)
+    pruned = fs.pruned_soft_embeds(x, inv_t, logz, E, CL, 4096).float()
+    full = (probs @ E).float()
+    rel = (pruned - full).norm(dim=-1) / full.norm(dim=-1).clamp(min=1e-12)
+    assert float(rel.max()) < 1e-2, float(rel.max())

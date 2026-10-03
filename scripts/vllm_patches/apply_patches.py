@@ -754,7 +754,17 @@ Same math up to floating-point summation order; the Gumbel noise is a different 
 stream from the same distribution as the original's `torch.rand_like` in fp32
 (u = k / 2^24 clamped at 1e-20, g = -log(-log u); see `_uniform24`).
 Requests that ask for logprobs keep using the original path (it needs the scaled logits).
+
+Optional column pruning (SCALARLM_FUSED_SAMPLER_SC_COLS=K, default off): the
+self-conditioning matmul runs over the K vocab columns with the largest probability
+anywhere in the batch instead of all 262,144. Measured on production traffic, a batch
+needs under 9% of the vocab at eps 1e-5; with K = 32,768 the soft-embedding error equals
+the bf16 path's own rounding error (mean 0.11%, worst row 0.24%), the dropped probability
+mass is at most 0.3%, and throughput rises ~15%. Everything else (sampled tokens,
+entropies, acceptance) still uses the full vocabulary.
 """
+import os
+
 import torch
 import triton
 import triton.language as tl
@@ -855,9 +865,76 @@ def _row_probs(
     tl.store(p_ptr + row.to(tl.int64) * stride_p + idx, p.to(tl.bfloat16), mask=mask)
 
 
-def vocab_stats_and_probs(logits, temp, CL, sc_vocab_start, sc_vocab_end, block=2048, softcap=0.0):
+@triton.jit
+def _col_max(
+    x_ptr, inv_t_ptr, logz_ptr, colmax_ptr,
+    N, V, stride_x, CL, cap,
+    BM: tl.constexpr, BLOCK: tl.constexpr, SOFTCAP: tl.constexpr,
+):
+    """colmax[v] = max over rows of p[row, v]; one atomic per column per BM-row tile."""
+    r0 = tl.program_id(0) * BM
+    cols = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    cmask = cols < V
+    best = tl.zeros([BLOCK], tl.float32)
+    for i in range(BM):
+        row = r0 + i
+        if row < N:
+            inv_t = tl.load(inv_t_ptr + row // CL)
+            logz = tl.load(logz_ptr + row)
+            x = tl.load(x_ptr + row.to(tl.int64) * stride_x + cols, mask=cmask, other=float("-inf")).to(tl.float32)
+            if SOFTCAP:
+                x = tl.where(x == float("-inf"), x, libdevice.tanh(x / cap) * cap)
+            best = tl.maximum(best, tl.exp(x * inv_t - logz))
+    tl.atomic_max(colmax_ptr + cols, best, mask=cmask)
+
+
+@triton.jit
+def _row_probs_cols(
+    x_ptr, inv_t_ptr, logz_ptr, cols_ptr, p_ptr,
+    stride_x, stride_p, CL, K, cap,
+    BLOCK: tl.constexpr, SOFTCAP: tl.constexpr,
+):
+    """p[row, j] = exp(s[row, cols[j]] - logZ[row]) in bf16, for the K selected columns."""
+    row = tl.program_id(0)
+    j = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    m = j < K
+    c = tl.load(cols_ptr + j, mask=m, other=0)
+    inv_t = tl.load(inv_t_ptr + row // CL)
+    logz = tl.load(logz_ptr + row)
+    x = tl.load(x_ptr + row.to(tl.int64) * stride_x + c, mask=m, other=float("-inf")).to(tl.float32)
+    if SOFTCAP:
+        x = tl.where(x == float("-inf"), x, libdevice.tanh(x / cap) * cap)
+    p = tl.exp(x * inv_t - logz)
+    tl.store(p_ptr + row.to(tl.int64) * stride_p + j, p.to(tl.bfloat16), mask=m)
+
+
+def pruned_soft_embeds(logits, inv_t, logz, embed_weight, CL, k_cols, softcap=0.0, block=1024, bm=64):
+    """Self-conditioning soft embeddings from the k_cols vocab columns with the largest probability
+    anywhere in the batch (fixed K: no host sync). Returns probs[:, cols] @ embed_weight[cols]."""
+    N, V = logits.shape
+    colmax = torch.zeros(V, device=logits.device, dtype=torch.float32)
+    _col_max[(triton.cdiv(N, bm), triton.cdiv(V, block))](
+        logits, inv_t, logz, colmax, N, V, logits.stride(0), CL, float(softcap or 1.0),
+        BM=bm, BLOCK=block, SOFTCAP=bool(softcap), num_warps=4)
+    cols = colmax.topk(k_cols, sorted=False).indices.sort().values.contiguous()
+    probs = torch.empty(N, k_cols, device=logits.device, dtype=torch.bfloat16)
+    _row_probs_cols[(N, triton.cdiv(k_cols, block))](
+        logits, inv_t, logz, cols, probs, logits.stride(0), probs.stride(0), CL, k_cols,
+        float(softcap or 1.0), BLOCK=block, SOFTCAP=bool(softcap), num_warps=4)
+    return probs @ embed_weight.index_select(0, cols)
+
+
+def sc_pruned_cols():
+    """K from SCALARLM_FUSED_SAMPLER_SC_COLS (0 / unset = no pruning)."""
+    try:
+        return int(os.environ.get("SCALARLM_FUSED_SAMPLER_SC_COLS", "0") or 0)
+    except ValueError:
+        return 0
+
+
+def vocab_stats_and_probs(logits, temp, CL, sc_vocab_start, sc_vocab_end, block=2048, softcap=0.0, want_probs=True):
     """logits [n*CL, V] (fp32 softcapped, or raw with softcap=cap to apply it in-kernel), temp [n] -> argmax, gumbel-argmax, entropy [n*CL],
-    probs bf16 [n*CL, sc_vocab_end - sc_vocab_start]."""
+    probs bf16 [n*CL, sc_vocab_end - sc_vocab_start]. With want_probs=False the last element is (inv_t, logz) instead."""
     N, V = logits.shape
     dev = logits.device
     inv_t = (1.0 / temp.float().clamp(min=1e-10)).contiguous()
@@ -871,6 +948,8 @@ def vocab_stats_and_probs(logits, temp, CL, sc_vocab_start, sc_vocab_end, block=
                      BLOCK=block, SOFTCAP=bool(softcap), num_warps=8)
     logz = m + torch.log(l)
     entropy = torch.log(l) + a / l
+    if want_probs is False:
+        return am.long(), gm.long(), entropy, (inv_t, logz)
     v_len = sc_vocab_end - sc_vocab_start
     probs = torch.empty(N, v_len, device=dev, dtype=torch.bfloat16)
     _row_probs[(N, triton.cdiv(v_len, block))](logits, inv_t, logz, probs, V, logits.stride(0),
@@ -961,12 +1040,19 @@ def fused_sample_step(
     steps_f = step_tensor[decode_slots].float()
     remaining = (max_denoising_steps - steps_f).clamp(min=1.0)
     temp = t_min + (t_max - t_min) * (remaining / max_denoising_steps)
+    k_cols = sc_pruned_cols()
+    pruned = 0 < k_cols < (sc_vocab_end - sc_vocab_start) and tp_size == 1
     argmax_tokens, new_tokens, token_entropy, probs = vocab_stats_and_probs(
-        logits, temp, CL, sc_vocab_start, sc_vocab_end, softcap=softcap)
+        logits, temp, CL, sc_vocab_start, sc_vocab_end, softcap=softcap, want_probs=not pruned)
     if not bool((temp > 0).all()):          # temp == 0 means greedy in the original
         greedy = (temp <= 0).repeat_interleave(CL)
         new_tokens = torch.where(greedy, argmax_tokens, new_tokens)
-    soft_embeds = torch.matmul(probs, embed_weight[: sc_vocab_end - sc_vocab_start])
+    if pruned:
+        inv_t, logz = probs
+        soft_embeds = pruned_soft_embeds(logits, inv_t, logz, embed_weight[: sc_vocab_end - sc_vocab_start],
+                                         CL, k_cols, softcap=softcap)
+    else:
+        soft_embeds = torch.matmul(probs, embed_weight[: sc_vocab_end - sc_vocab_start])
     if tp_size > 1:
         soft_embeds = torch.ops.vllm.all_reduce(soft_embeds, group_name=tp_group_name)
     soft_embeds = soft_embeds * normalizer
@@ -1011,6 +1097,13 @@ def patch_diffusion_gemma_fused_sampler(vllm_root: Path) -> None:
     this patch and the attention tiling average 0.478 mean reward, 8 runs without
     average 0.482 (difference -0.005, standard error 0.008). One run has a standard
     deviation of ~0.017, and production settings alone range from 0.447 to 0.507.
+
+    Optional column pruning, SCALARLM_FUSED_SAMPLER_SC_COLS=K (default off): the
+    self-conditioning matmul uses the K vocab columns with the largest probability
+    anywhere in the batch. With K=32768: +15% tok/s on the Max-Q (815 -> 938); on live
+    traffic the embedding error equals the bf16 path's own rounding error (mean 0.11%,
+    worst row 0.24%) and at most 0.3% of probability mass is dropped; 7 runs with it
+    average 0.485 reward vs 0.475 for 10 without (+0.010, standard error 0.006).
 
     Opt out with SCALARLM_FUSED_DIFFUSION_SAMPLER=0 (disables both patches' effect).
     """

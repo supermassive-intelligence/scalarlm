@@ -121,6 +121,13 @@ def test_gumbel_noise_uses_the_torch_rand_distribution():
     assert "tl.rand(" not in FUSED_DIFFUSION_SAMPLER_SRC
 
 
+def test_column_pruning_is_embedded_and_off_by_default():
+    src = FUSED_DIFFUSION_SAMPLER_SRC
+    assert "def pruned_soft_embeds(" in src and "def _col_max(" in src and "def _row_probs_cols(" in src
+    assert 'os.environ.get("SCALARLM_FUSED_SAMPLER_SC_COLS", "0")' in src
+    assert "pruned = 0 < k_cols < (sc_vocab_end - sc_vocab_start) and tp_size == 1" in src
+
+
 def test_applying_twice_is_a_no_op(tmp_path):
     models, runner = _tree(tmp_path)
     for _ in range(2):
