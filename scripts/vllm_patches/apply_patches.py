@@ -1219,6 +1219,129 @@ def patch_diffusion_gemma_fused_sampler(vllm_root: Path) -> None:
     print(f"[vllm_patches] Applied fused diffusion sampler to {target}")
 
 
+DENSE_FP8_SRC = '''# SPDX-License-Identifier: Apache-2.0
+"""fp8 (e4m3) GEMMs for Gemma4's dense projections (ScalarLM patch, opt-in).
+
+The diffusiongemma teacher keeps its MoE experts in NVFP4 but runs the attention and
+dense-MLP projections -- ``qkv_proj``, ``o_proj``, ``gate_up_proj``, ``down_proj`` in
+every decoder layer, 120 GEMMs -- in bf16. On RTX PRO 6000 (sm120) those GEMMs are
+~43% of a denoising step's GPU time. This module replaces them with fp8:
+
+  weights      static per-output-channel absmax scale, e4m3, computed once after loading
+  activations  dynamic per-token absmax scale, e4m3 (vLLM's fused ``scaled_fp8_quant``)
+  GEMM         vLLM's ``cutlass_scaled_mm`` with row-wise scales, fp32 accumulate, bf16 out
+
+It is installed by replacing ``UnquantizedLinearMethod.process_weights_after_loading``
+and ``.apply`` for the selected layers only; every other linear layer is untouched. The
+bf16 weights stay resident (the fp8 copies add ~1.6 GB for the 26B teacher), so other
+code paths that read ``layer.weight`` keep working.
+
+Environment:
+  SCALARLM_DENSE_FP8=1          enable (the import hook in gemma4.py checks this)
+  SCALARLM_DENSE_FP8_LAYERS     layer-name suffixes to convert, separated by "," or ":";
+                                default qkv_proj,o_proj,gate_up_proj,down_proj
+  SCALARLM_DENSE_FP8_LOG=N      log the relative error vs the bf16 GEMM for the first N
+                                calls of each layer (costs a bf16 GEMM per logged call)
+
+Measured (RTX PRO 6000 Workstation, 450 W, replayed production traffic, 32 in flight):
++7.0% generation throughput (1170 -> 1253 tok/s, two fresh servers per arm). Per-GEMM
+relative error on live traffic 2.0-2.6% (max 5.7%, o_proj). Quality: no detectable
+change -- 300-task nano-rl runs, fp8 vs bf16: +0.011 +- 0.005 (5 vs 14 runs, one rig),
+-0.003 +- 0.014 (3 vs 3, another rig); with column pruning on, 6 vs 6 interleaved runs
++0.000 +- 0.010. One run's standard deviation is ~0.017.
+"""
+import os
+import re
+
+import torch
+
+from vllm import _custom_ops as ops
+from vllm.logger import init_logger
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+
+logger = init_logger(__name__)
+
+FP8_MAX = 448.0
+DEFAULT_LAYERS = "qkv_proj,o_proj,gate_up_proj,down_proj"
+
+
+def selected_layers(spec: str | None = None) -> tuple[str, ...]:
+    """Layer-name suffixes from SCALARLM_DENSE_FP8_LAYERS ("," or ":" separated)."""
+    if spec is None:
+        spec = os.environ.get("SCALARLM_DENSE_FP8_LAYERS", DEFAULT_LAYERS)
+    return tuple(s for s in re.split(r"[,:]", spec) if s)
+
+
+def is_selected(prefix: str, layers: tuple[str, ...]) -> bool:
+    return any(prefix == s or prefix.endswith("." + s) for s in layers)
+
+
+def convertible(weight: torch.Tensor) -> bool:
+    """bf16, 2-D, and K a multiple of 16 (the fp8 GEMM's alignment requirement)."""
+    return weight.dtype == torch.bfloat16 and weight.dim() == 2 and weight.shape[1] % 16 == 0
+
+
+def quantize_weight(w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per-output-channel e4m3 codes [N, K] and fp32 scales [N, 1] for a bf16 weight [N, K]."""
+    scale = (w.abs().amax(dim=1).float() / FP8_MAX).clamp_(min=1e-12)
+    codes = (w.float() / scale[:, None]).clamp_(-FP8_MAX, FP8_MAX).to(torch.float8_e4m3fn)
+    return codes, scale[:, None].contiguous()
+
+
+def fp8_linear(x2: torch.Tensor, w8: torch.Tensor, w_scale: torch.Tensor) -> torch.Tensor:
+    """x2 [M, K] bf16 @ w8 [N, K]^T with per-token activation scales -> [M, N] bf16."""
+    x8, x_scale = ops.scaled_fp8_quant(x2, scale=None, use_per_token_if_dynamic=True)
+    return ops.cutlass_scaled_mm(x8, w8.t(), x_scale, w_scale, torch.bfloat16)
+
+
+_LAYERS = selected_layers()
+_LOG = int(os.environ.get("SCALARLM_DENSE_FP8_LOG", "0") or 0)
+_orig_process = UnquantizedLinearMethod.process_weights_after_loading
+_orig_apply = UnquantizedLinearMethod.apply
+_converted: list[str] = []
+
+
+def _process(self, layer):
+    _orig_process(self, layer)
+    prefix = getattr(layer, "prefix", "") or ""
+    if not is_selected(prefix, _LAYERS) or not hasattr(layer, "weight"):
+        return
+    w = layer.weight.data
+    if not convertible(w):
+        logger.warning("dense fp8: leaving %s in %s %s", prefix, w.dtype, tuple(w.shape))
+        return
+    layer.scalarlm_w8, layer.scalarlm_w_scale = quantize_weight(w)
+    layer.scalarlm_log_left = _LOG
+    _converted.append(prefix)
+    if len(_converted) == 1 or len(_converted) % 50 == 0:
+        logger.info("dense fp8: %d layers converted so far (latest %s %s)",
+                    len(_converted), prefix, tuple(w.shape))
+
+
+def _apply(self, layer, x, bias=None):
+    w8 = getattr(layer, "scalarlm_w8", None)
+    if w8 is None:
+        return _orig_apply(self, layer, x, bias)
+    shape = x.shape
+    x2 = x.reshape(-1, shape[-1])
+    if not x2.is_contiguous():
+        x2 = x2.contiguous()
+    out = fp8_linear(x2, w8, layer.scalarlm_w_scale)
+    if layer.scalarlm_log_left > 0:
+        layer.scalarlm_log_left -= 1
+        ref = torch.nn.functional.linear(x2, layer.weight).float()
+        rel = ((out.float() - ref).norm() / ref.norm().clamp(min=1e-12)).item()
+        logger.info("dense fp8: %s rows %d rel_fro_err %.5f", layer.prefix, x2.shape[0], rel)
+    if bias is not None:
+        out = out + bias
+    return out.reshape(*shape[:-1], out.shape[-1])
+
+
+UnquantizedLinearMethod.process_weights_after_loading = _process
+UnquantizedLinearMethod.apply = _apply
+logger.info("dense fp8 active for layers %s", _LAYERS)
+'''
+
 def patch_model_runner_fused_softcap(vllm_root: Path) -> None:
     """Sampling path: let DiffusionGemma's fused sampler apply the final-logit softcap.
 
@@ -1263,6 +1386,45 @@ def patch_model_runner_fused_softcap(vllm_root: Path) -> None:
     print(f"[vllm_patches] Applied fused softcap to {target}")
 
 
+def patch_gemma4_dense_fp8(vllm_root: Path) -> None:
+    """Opt-in fp8 for Gemma4's dense attention/MLP projections (SCALARLM_DENSE_FP8=1).
+
+    Adds `scalarlm_dense_fp8.py` (per-channel fp8 weights, per-token fp8 activations,
+    vLLM's row-wise cutlass GEMM) and an env-guarded import at the top of gemma4.py
+    so the method swap happens before weights are loaded. The MoE experts (already
+    NVFP4), the LM head and the embeddings are not touched. Off unless the env var is
+    set, so the patch changes nothing by default.
+
+    Measured on the diffusiongemma teacher (RTX PRO 6000, 450 W, replayed production
+    traffic, 32 in flight): +7.0% generation throughput; no detectable quality change
+    over 20 replicated 300-task runs (see the module docstring for the numbers).
+    """
+    models = vllm_root / "vllm" / "model_executor" / "models"
+    target = models / "gemma4.py"
+    if not target.exists():
+        print(f"[vllm_patches] {target} not found; skipping dense fp8")
+        return
+    src = target.read_text()
+    if "scalarlm_dense_fp8" in src:
+        print("[vllm_patches] dense fp8 already present; skipping")
+        return
+    anchor = "\nclass Gemma4MLP("
+    assert src.count(anchor) == 1, "gemma4.py: expected exactly one Gemma4MLP class. Re-anchor this patch."
+    hook = (
+        "\n# ScalarLM patch: optional fp8 for the dense projections (SCALARLM_DENSE_FP8=1).\n"
+        "if __import__(\"os\").environ.get(\"SCALARLM_DENSE_FP8\") == \"1\":\n"
+        "    from vllm.model_executor.models import scalarlm_dense_fp8  # noqa: F401\n"
+        "\n"
+    )
+    patched = src.replace(anchor, hook + anchor, 1)
+    assert patched != src, "patch produced identical output — something's wrong"
+    compile(patched, str(target), "exec")
+    compile(DENSE_FP8_SRC, "scalarlm_dense_fp8.py", "exec")
+    (models / "scalarlm_dense_fp8.py").write_text(DENSE_FP8_SRC)
+    target.write_text(patched)
+    print(f"[vllm_patches] Applied dense fp8 hook to {target}")
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print(f"usage: {sys.argv[0]} <vllm-root>", file=sys.stderr)
@@ -1280,6 +1442,7 @@ def main() -> int:
     patch_diffusion_gemma_sc_embeds_dtype(vllm_root)
     patch_diffusion_gemma_fused_sampler(vllm_root)
     patch_model_runner_fused_softcap(vllm_root)
+    patch_gemma4_dense_fp8(vllm_root)
     print("[vllm_patches] All patches applied.")
     return 0
 
